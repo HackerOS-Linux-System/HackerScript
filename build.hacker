@@ -1,0 +1,7 @@
+// virus
+
+> cd source-code
+>>> cd compiler && virus build
+>>> cd virus && virus build
+>>> cd runtime &&
+>>> cd installer && virus build
