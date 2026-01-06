@@ -4,4 +4,4 @@
 
 ## Installation
 
-## Commands and Tool
+## Commands and Tools
