@@ -1,7 +1,9 @@
 // virus
 
 > cd source-code
->>> cd compiler && virus build
->>> cd virus && virus build
->>> cd runtime &&
->>> cd installer && virus build
+>>> cd compiler && cargo build --release
+>>> cd virus && virus build --production
+>>> cd runtime && virus build --production
+>>> cd installer && virus build --production
+>>> cd vm && virus build --production
+>>> cd code && virus build --production
