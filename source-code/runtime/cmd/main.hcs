@@ -1,1 +1,91 @@
+@ Główny plik runtime dla JIT w Hacker Script
+@ Używa importów z C++ do parsowania i JIT
+@ Uruchamia skrypt .hcs w locie bez pre-kompilacji
 
+import <c<std:parser>>  @ Import parsera z C std
+import <c<jit:libjit>>  @ Import biblioteki JIT (symulacja, np. LLVM lite)
+import <virus<core:runtime>>  @ Własna biblioteka core runtime HS
+
+--- manual ---  @ Ręczne zarządzanie pamięcią (jak w Odin: allocate/deallocate)
+
+class JitRuntime [
+  func init [ 
+    log"Initializing JIT Runtime..."
+    self.parser = new Parser()  @ Z importowanego C parsera
+    self.jit_engine = new JitEngine()  @ Z importowanego JIT lib
+    self.memory_pool = allocate(1024 * 1024)  @ Ręczna alokacja puli pamięci (1MB)
+  ]
+  
+  func load_script (file_path) [
+    @ Ładuje plik .hcs
+    content = read_file(file_path)  @ Funkcja z core:runtime
+    if content == null [
+      log"Error: Failed to load script from {file_path}"
+      return null
+    ]
+    return content
+  ]
+  
+  func parse_script (content) [
+    @ Parsuje za pomocą C parsera
+    ast = self.parser.parse(content)
+    if ast.has_errors [
+      @ Pokaz błędy z miette-like (ale w HS, symulacja)
+      for error in ast.errors [
+        log"Parse Error at line {error.line}: {error.message}"
+      ]
+      return null
+    ]
+    return ast
+  ]
+  
+  func jit_compile (ast) [
+    @ Kompiluje AST do machine code w locie (JIT)
+    bytecode = generate_bytecode(ast)  @ Funkcja z core:runtime
+    machine_code = self.jit_engine.compile(bytecode)
+    if machine_code == null [
+      log"JIT Compilation failed!"
+      return null
+    ]
+    return machine_code
+  ]
+  
+  func execute (machine_code) [
+    @ Wykonuje skompilowany kod
+    result = self.jit_engine.run(machine_code, self.memory_pool)
+    log"Execution result: {result}"
+    return result
+  ]
+  
+  func cleanup [
+    @ Ręczne zwolnienie pamięci
+    deallocate(self.memory_pool)
+    self.jit_engine.shutdown()
+    log"Cleanup done."
+  ]
+]
+
+func main (args) [
+  if args.length < 2 [
+    log"Usage: hs2 <script.hcs>"
+    return 1
+  ]
+  
+  runtime = new JitRuntime()
+  runtime.init()
+  
+  script_path = args[1]
+  content = runtime.load_script(script_path)
+  if content != null [
+    ast = runtime.parse_script(content)
+    if ast != null [
+      code = runtime.jit_compile(ast)
+      if code != null [
+        runtime.execute(code)
+      ]
+    ]
+  ]
+  
+  runtime.cleanup()
+  return 0
+]
