@@ -1,4 +1,5 @@
 // virus
+// cargo
 
 > cd source-code
 >>> cd compiler && cargo build --release
