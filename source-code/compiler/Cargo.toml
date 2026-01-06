@@ -1,14 +1,10 @@
 [package]
-name = "hackerscript-compiler"
+name = "hs1"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-inkwell = { version = "0.5.0", features = ["llvm18-0"] }
-anyhow = "1.0"
-thiserror = "1.0"
-
-[[bin]]
-name = "HackerScript-Compiler"
-path = "src/main.rs"
-
+miette = { version = "7.2.0", features = ["fancy"] }
+bincode = "1.3.3"
+byteorder = "1.5.0"
+nom = "7.1.3"
