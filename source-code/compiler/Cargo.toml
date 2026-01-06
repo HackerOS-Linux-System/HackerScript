@@ -2,9 +2,13 @@
 name = "hs1"
 version = "0.1.0"
 edition = "2021"
+description = "Compiler for Hacker Script language"
+authors = ["HackerOS Team"]
 
 [dependencies]
 miette = { version = "7.2.0", features = ["fancy"] }
 bincode = "1.3.3"
 byteorder = "1.5.0"
 nom = "7.1.3"
+thiserror = "1.0.63"
+serde = { version = "1.0", features = ["derive"] }
