@@ -22,9 +22,9 @@ class VirusCLI [
     self.core_dir = self.home_dir + "core/"
     self.libs_dir = self.home_dir + "libs/"
     self.version_file = self.home_dir + "version.hacker"
-    self.repo_url = "https://github.com/HackerOS-Linux-System/Hacker-Lang/"
-    self.index_url = self.repo_url + "hacker-script/index.json"
-    self.version_remote = self.repo_url + "hacker-packages/HackerScript-Version.hacker"
+    self.repo_url = "https://github.com/HackerOS-Linux-System/HackerScript/"
+    self.index_url = self.repo_url + "repo/index.json"
+    self.version_remote = self.repo_url + "repo/version.hacker"
     self.release_url = self.repo_url + "releases/download/v{version}/HackerScript.tar.gz"
     
     @ Alokuj pamięć dla buforów
