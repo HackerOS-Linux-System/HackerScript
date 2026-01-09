@@ -227,14 +227,21 @@ class CTransformer(lark.Transformer):
             return '', 'unknown'
         left_c, left_t = children[0]
         right = get_value(children[2])
-        if left_t.startswith('struct ') and left_t.endswith('*'):
-            code = f'{left_c}->{right}'
+        if left_t.startswith('struct '):
             class_name = left_t[7:-1]
-            type_ = self.class_fields.get(class_name, {}).get(right, "char*")
+            if right in self.class_fields.get(class_name, {}):
+                code = f'{left_c}->{right}'
+                type_ = self.class_fields[class_name][right]
+            else:
+                code = f'{class_name}_{right}({left_c}'
+                type_ = 'method'
         elif left_t == "Array":
             if right == "length":
                 code = f'{left_c}.len'
                 type_ = "int"
+            elif right == "contains":
+                code = f'array_contains({left_c}'
+                type_ = 'method'
             else:
                 code = f'{left_c}.{right}'
                 type_ = "unknown"
@@ -255,7 +262,10 @@ class CTransformer(lark.Transformer):
         args = children[2] if len(children) > 2 else []
         args_c = ', '.join(a[0] for a in args)
         func_c, func_t = func
-        if func_t == "unknown":
+        if func_t == 'method':
+            code = func_c + (', ' + args_c if args_c else '') + ')'
+            type_ = self.infer_call_type(func_c.split('_')[-1])
+        elif func_t == "unknown":
             name = func_c
             if name == 'allocate':
                 code = f'malloc({args_c})'
@@ -266,15 +276,15 @@ class CTransformer(lark.Transformer):
             elif name == 'version_compare':
                 code = f'strcmp({args_c})'
                 type_ = "int"
+            elif name == 'run':
+                code = f'system({args_c})'
+                type_ = "int"
             else:
                 code = f'{name}({args_c})'
                 type_ = self.infer_call_type(name)
         else:
-            method = func_c.split('->')[-1] if '->' in func_c else func_c
-            full_name = f'{func_t[:-1] if func_t.endswith("*") else func_t}_{method}' if func_t[:-1] in self.class_names else method
-            args_c = f'{func_c}' + (', ' + args_c if args_c else '')
-            code = f'{full_name}({args_c})'
-            type_ = self.infer_call_type(method)
+            code = f'{func_c}({args_c})'
+            type_ = "unknown"
         return code, type_
     def func_call(self, children):
         return children[0]
@@ -468,60 +478,147 @@ class CTransformer(lark.Transformer):
         code = f'for (int _{var}_i = 0; _{var}_i < {collection_c}.len; _{var}_i++) {{ char* {var} = {collection_c}.data[_{var}_i]; {block} }}\n'
         return code
     def func_def(self, children):
-        if len(children) < 5:
+        if len(children) < 3:
             return ''
         name = get_value(children[1])
         self.scopes.append({})
+        if self.current_class:
+            self.scopes[-1]["self"] = f"struct {self.current_class}*"
         if name == "main":
             self.has_main = True
             name = "hs_main"
         if self.current_class:
             name = f'{self.current_class}_{name}'
-        # Find params - it's the child that has data == 'params'
-        params_idx = -1
-        for i, child in enumerate(children):
-            if isinstance(child, lark.Tree) and child.data == 'params':
-                params_idx = i
-                break
-
-        param_list = self.params(children[params_idx].children) if params_idx != -1 else []
-
-        # Collect all statement strings that come after the opening bracket
-        block_c = ''.join([c for c in children if isinstance(c, str)])
-
+        # Find params
+        param_list = []
+        for child in children:
+            if isinstance(child, list):
+                param_list = child
+        # Collect statements - everything after the opening bracket that's a string
+        statements = []
+        found_bracket = False
+        for child in children:
+            if isinstance(child, lark.Token) and child.value == '[':
+                found_bracket = True
+                continue
+            if found_bracket and isinstance(child, str):
+                statements.append(child)
+        block_c = ''.join(statements)
         for p in param_list:
             t = "Array" if p == "args" else "char*"
             self.scopes[-1][p] = t
-        locals_decl = ''.join(f'{t if t != "unknown" else "char*"} {name_var};\n' for name_var, t in self.scopes[-1].items() if name_var not in param_list)
+        locals_decl = ''.join(f'{t if t != "unknown" else "char*"} {name_var};\n' for name_var, t in self.scopes[-1].items() if name_var not in param_list and name_var != "self")
         block_c = locals_decl + block_c
         self.scopes.pop()
         param_str = ', '.join(f'{self.get_type(p) or "char*"} {p}' for p in param_list)
         ret_type = "int" if name in ["hs_main", "build", "run", "install", "remove", "version_compare"] else "void"
-        self_param = f'struct {self.current_class}* self, ' if self.current_class else ''
+        self_param = f'struct {self.current_class}* self' + (', ' if param_str else '') if self.current_class else ''
         return f'{ret_type} {name}({self_param}{param_str}) {{ {block_c} }}\n'
     def class_def(self, children):
-        if len(children) < 4:
+        if len(children) < 2:
             return ''
         name = get_value(children[1])
         old_class = self.current_class
         self.current_class = name
-        funcs_c = ''.join([c for c in children[3:] if isinstance(c, str)])
+        # Collect all function definitions
+        funcs = []
+        found_bracket = False
+        for child in children:
+            if isinstance(child, lark.Token) and child.value == '[':
+                found_bracket = True
+                continue
+            if found_bracket and isinstance(child, str):
+                funcs.append(child)
+        funcs_c = ''.join(funcs)
         self.current_class = old_class
         field_str = ''.join(f'{t} {f};\n' for f, t in self.class_fields.get(name, {}).items())
         if not field_str:
             field_str = 'char dummy; // to avoid empty struct\n'
-        return f'struct {name} {{ {field_str} }};\n{funcs_c}'
+        return f'struct {name} {{\n{field_str}}};\n{funcs_c}'
     def program(self, children):
         imports = ''.join(i for i in children if isinstance(i, str) and i.startswith('#include'))
         defs = ''.join(i for i in children if isinstance(i, str) and not i.startswith('#include'))
-        header = '#define _GNU_SOURCE\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdbool.h>\n#include <unistd.h>\n#include <curl/curl.h>\n' + """typedef struct { char** data; int len; } Array;
+        header = '#define _GNU_SOURCE\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdbool.h>\n#include <unistd.h>\n#include <curl/curl.h>\n'
+        header += """typedef struct { char** data; int len; } Array;
 bool array_contains(Array a, char* s) { for(int i=0; i<a.len; i++) if(strcmp(a.data[i], s)==0) return true; return false; }
 Array array_slice(Array a, int start) { return (Array){a.data + start, a.len - start}; }
 char* array_last(Array a) { return a.data[a.len-1]; }
 typedef struct { int status; char* body; } Response;
 typedef struct { Array items; } Json;
 typedef struct { struct { Array c; Array virus; } dependencies; } Hcl;
-"""
+typedef struct {
+    char *ptr;
+    size_t len;
+} Buffer;
+static size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
+    size_t realsize = size * nmemb;
+    Buffer *mem = (Buffer *)userp;
+    char *ptr = realloc(mem->ptr, mem->len + realsize + 1);
+    if (ptr == NULL) return 0;
+    mem->ptr = ptr;
+    memcpy(&(mem->ptr[mem->len]), contents, realsize);
+    mem->len += realsize;
+    mem->ptr[mem->len] = 0;
+    return realsize;
+}
+Response* curl_get(const char *url) {
+    CURL *curl = curl_easy_init();
+    if (!curl) return NULL;
+    Buffer buffer = {.ptr = NULL, .len = 0};
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
+    CURLcode ret = curl_easy_perform(curl);
+    Response *res = malloc(sizeof(Response));
+    if (ret == CURLE_OK) {
+        long status;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+        res->status = (int)status;
+        res->body = buffer.ptr;
+    } else {
+        res->status = -1;
+        res->body = NULL;
+        free(buffer.ptr);
+    }
+    curl_easy_cleanup(curl);
+    return res;
+}
+char* get_remote_version() {
+    Response *res = curl_get("https://hackerscript.org/version.json");
+    if (res->status != 200) {
+        free(res->body);
+        free(res);
+        return "0.0.0";
+    }
+    char *start = strstr(res->body, "\"version\":\"");
+    if (!start) {
+        free(res->body);
+        free(res);
+        return "0.0.0";
+    }
+    start += 11;
+    char *end = strchr(start, '"');
+    if (!end) {
+        free(res->body);
+        free(res);
+        return "0.0.0";
+    }
+    *end = 0;
+    char *ver = strdup(start);
+    free(res->body);
+    free(res);
+    return ver;
+}
+int write_file(char* path, char* content) {
+    FILE *fp = fopen(path, "w");
+    if (fp == NULL) {
+        return -1;
+    }
+    size_t len = strlen(content);
+    size_t written = fwrite(content, 1, len, fp);
+    fclose(fp);
+    return (written == len) ? 0 : -1;
+} """
         if self.mode == "manual":
             header += """#define defer(stmt) for (int _i = 1; _i--; (stmt)) """
         if self.has_main:
@@ -552,15 +649,10 @@ def compile_hcs(input_file, output_bin=None):
         f'-L{os.path.join(script_dir, "libs/")}',
         '-lcurl'
     ]
-    try:
-        subprocess.check_call(compile_cmd)
-        print(f"Compiled {input_file} to {output_bin}")
-    finally:
-        if os.path.exists(tmp_c_file):
-            os.remove(tmp_c_file)
+    subprocess.check_call(compile_cmd)
+    print(f"Compiled {input_file} to {output_bin}")
 if __name__ == '__main__':
     if len(sys.argv) < 2:
         print("Usage: HackerScript-Compiler <file.hcs>")
         sys.exit(1)
     compile_hcs(sys.argv[1])
-
