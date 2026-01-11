@@ -1,1 +1,31 @@
+@ Importowanie niezbędnych modułów systemowych
+import <core:subprocess>
+import <core:os>
+
+func main()[
+    --- automatic ---
+
+    log "Inicjowanie pobierania instalatora..."
+
+    @ Definicja ścieżek
+    val_url = "https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v0.1/installer"
+    val_dest = "/tmp/installer"
+
+    @ Pobieranie pliku za pomocą curl
+    log "Pobieranie binarki z GitHub..."
+    subprocess.run(["curl", "-L", val_url, "-o", val_dest])
+
+    @ Nadawanie uprawnień wykonywania (chmod a+x)
+    log "Nadawanie uprawnień wykonywania..."
+    os.chmod(val_dest, 0o755)
+
+    @ Uruchomienie pobranego instalatora
+    log "Uruchamianie instalatora..."
+    subprocess.run([val_dest])
+
+    log "Proces zakończony."
+]
+
+@ Wywołanie funkcji głównej
+main()
 
