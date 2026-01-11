@@ -1,31 +1,62 @@
-@ Importowanie niezbędnych modułów systemowych
-import <core:subprocess>
 import <core:os>
+import <core:shutil>
+import <core:urllib.request>
+import <core:tarfile>
+import <core:getpass>
 
-func main()[
-    --- automatic ---
+--- automatic ---
 
-    log "Inicjowanie pobierania instalatora..."
+func main() [
+    log "Rozpoczynam proces instalacji..." @ Komentarz: Logowanie postępu
 
-    @ Definicja ścieżek
-    val_url = "https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v0.1/installer"
-    val_dest = "/tmp/installer"
+    @ Definicja zmiennych
+    url = "https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v0.1/bin.tar.gz"
+    tmp_path = "/tmp/bin.tar.gz"
+    extract_path = "/tmp/"
+    
+    @ 1. Pobieranie pliku
+    log "Pobieranie binariów..."
+    urllib.request.urlretrieve(url, tmp_path)
 
-    @ Pobieranie pliku za pomocą curl
-    log "Pobieranie binarki z GitHub..."
-    subprocess.run(["curl", "-L", val_url, "-o", val_dest])
+    @ 2. Rozpakowanie
+    log "Rozpakowywanie archiwum..."
+    with tarfile.open(tmp_path, "r:gz") as tar [
+        tar.extractall(path=extract_path)
+    ]
 
-    @ Nadawanie uprawnień wykonywania (chmod a+x)
-    log "Nadawanie uprawnień wykonywania..."
-    os.chmod(val_dest, 0o755)
+    @ 3. Nadanie uprawnień chmod a+x
+    log "Nadawanie uprawnień..."
+    files_to_chmod = ["/tmp/star", "/tmp/hspm", "/tmp/virus"]
+    for f in files_to_chmod [
+        if os.path.exists(f) [
+            os.chmod(f, 0o755)
+        ]
+    ]
 
-    @ Uruchomienie pobranego instalatora
-    log "Uruchamianie instalatora..."
-    subprocess.run([val_dest])
+    @ 4. Przenoszenie 'virus' do /usr/bin/
+    log "Instalacja binarki virus do /usr/bin/..."
+    if os.path.exists("/tmp/virus") [
+        @ Wymaga uprawnień roota do zapisu w /usr/bin/
+        shutil.move("/tmp/virus", "/usr/bin/virus")
+    ]
 
-    log "Proces zakończony."
+    @ 5. Tworzenie folderów w katalogu domowym
+    user = getpass.getuser()
+    hcs_home = "/home/" + user + "/.HackerScript/bin"
+    
+    log "Tworzenie struktury katalogów w " + hcs_home
+    os.makedirs(hcs_home, exist_ok=True)
+
+    @ 6. Przenoszenie star i hspm
+    if os.path.exists("/tmp/star") [
+        shutil.move("/tmp/star", hcs_home + "/star")
+    ]
+    if os.path.exists("/tmp/hspm") [
+        shutil.move("/tmp/hspm", hcs_home + "/hspm")
+    ]
+
+    log "Instalacja zakończona pomyślnie!"
 ]
 
-@ Wywołanie funkcji głównej
+@ Uruchomienie funkcji głównej
 main()
-
