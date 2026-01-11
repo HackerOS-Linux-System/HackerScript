@@ -1,1 +1,53 @@
+import <core:os>
+import <core:subprocess>
+import <core:shutil>
 
+--- automatic ---
+
+func run_cmd(command) [
+    log "Wykonuję: " + command
+    @ shell=True pozwala na używanie potoków i przekierowań
+    subprocess.run(command, shell=True, check=True)
+]
+
+func main() [
+    log "Starting building from source"
+
+    @ 1. Budowanie narzędzia STAR
+    os.chdir("source-code/star")
+    
+    @ Tworzenie venv i instalacja zależności
+    run_cmd("python3.13 -m venv venv")
+    @ Uwaga: 'source' działa wewnątrz jednej sesji shella, 
+    @ więc łączymy komendy w jednym wywołaniu run_cmd
+    run_cmd(". venv/bin/activate && pip install python-hcl2")
+    
+    @ Kompilacja Rust
+    run_cmd("cargo build --release")
+    
+    @ Kopiowanie binarnego star do głównego folderu source-code
+    @ Zakładamy, że ścieżka to target/release/star
+    if os.path.exists("target/release/star") [
+        run_cmd("sudo cp target/release/star ../")
+    ]
+    
+    os.chdir("..") @ Powrót do source-code
+
+    @ 2. Budowanie modułu VIRUS przy użyciu nowego STAR
+    log "Building VIRUS..."
+    os.chdir("virus")
+    run_cmd("../star main.hcs")
+    run_cmd("sudo mv cache/build/target/release/virus ../")
+    os.chdir("..")
+
+    @ 3. Budowanie modułu HSPM przy użyciu nowego STAR
+    log "Building HSPM..."
+    os.chdir("hspm")
+    run_cmd("../star main.hcs")
+    run_cmd("sudo mv cache/build/target/release/hspm ../")
+    os.chdir("..")
+
+    log "Build from source complete"
+]
+
+main()
