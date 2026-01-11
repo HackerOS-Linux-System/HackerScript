@@ -1,8 +1,7 @@
 project {
-  name = "installer"
+  name = "install"
 }
 
 build {
-  binary_name = "deployer"
+  binary_name = "HackerScript-Installer"
 }
-
