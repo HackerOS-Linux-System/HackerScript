@@ -1,264 +1,114 @@
-@ Główny plik CLI tool 'virus' dla Hacker Script
-@ Obsługuje komendy: build, run, install, remove, update, docs, tutorial, list, init, clean itp.
-@ Napisany w Hacker Script dla bootstrapu (używa HS2/HS3 do wykonania siebie)
-@ Ładny wygląd CLI: używa kolorów, progress barów (import z C libs)
-@ Zarządza pakietami, kompilacją, runtime'em
-@ Interakcja z GitHub dla update'ów i index.json dla libs
+import <core:sys>
+import <core:os>
+import <core:subprocess>
+import <core:shutil>
+import <core:getpass>
 
-import <c<std:io>>  @ Dla input/output
-import <c<term:ansi>>  @ Dla kolorów i ładnego CLI (np. ansi_term lub podobna wrapper)
-import <c<curl:lib>>  @ Dla download z GitHub
-import <c<tar:lib>>  @ Dla unpack tar.gz
-import <c<json:parser>>  @ Dla parsowania JSON index/repo
-import <virus<core:fs>>  @ Własne utils dla file system
-import <virus<core:proc>>  @ Dla uruchamiania procesów (np. HS1, HS2, HS3)
-
---- manual ---  @ Ręczne zarządzanie pamięcią
-
-class VirusCLI [
-  func init [
-    self.home_dir = "/home/HackerScript/"
-    self.bin_dir = self.home_dir + "bin/"
-    self.core_dir = self.home_dir + "core/"
-    self.libs_dir = self.home_dir + "libs/"
-    self.version_file = self.home_dir + "version.hacker"
-    self.repo_url = "https://github.com/HackerOS-Linux-System/HackerScript/"
-    self.index_url = self.repo_url + "repo/index.json"
-    self.version_remote = self.repo_url + "repo/version.hacker"
-    self.release_url = self.repo_url + "releases/download/v{version}/HackerScript.tar.gz"
-    
-    @ Alokuj pamięć dla buforów
-    self.buffer = allocate(4096)  @ Bufor na dane
-    log"Virus CLI initialized."
-  ]
-  
-  func print_help [
-    term_color("green")  @ Ustaw kolor
-    log"Virus CLI - Tool for Hacker Script"
-    log"Usage: virus <command> [options]"
-    log""
-    log"Commands:"
-    log"  build [--production]    Build .hcs to .object or .pack"
-    log"  run [-fast|-pack]       Run script with JIT, .pack or .object"
-    log"  install <lib>           Install library from repo"
-    log"  remove <lib>            Remove library"
-    log"  update                  Check and update HackerScript"
-    log"  list                    List installed libraries"
-    log"  init                    Initialize new project (cmd/main.hcs + Virus.hcl)"
-    log"  clean                   Clean build artifacts"
-    log"  docs <topic>            Show documentation for topic"
-    log"  tutorial                Show interactive tutorial"
-    log"  version                 Show current version"
-    term_reset()  @ Reset kolor
-  ]
-  
-  func get_current_version [
-    content = read_file(self.version_file)
-    if content == null [ return "0.0" ]
-    return trim(content)
-  ]
-  
-  func get_remote_version [
-    response = curl_get(self.version_remote)
-    if response.status != 200 [ 
-      log"Error fetching remote version: {response.status}"
-      return null 
-    ]
-    @ Parsuj [ 0.1 ] jako array, weź pierwszy
-    json = json_parse(response.body)
-    return json[0]
-  ]
-  
-  func update [
-    current = self.get_current_version()
-    remote = self.get_remote_version()
-    if remote == null [ return ]
-    
-    if version_compare(remote, current) > 0 [
-      log"New version available: {remote} (current: {current})"
-      download_url = replace(self.release_url, "{version}", remote)
-      tar_data = curl_download(download_url)
-      if tar_data == null [ log"Download failed!" return ]
-      
-      @ Rozpakuj do temp
-      temp_dir = "/tmp/hs_update/"
-      mkdir(temp_dir)
-      tar_unpack(tar_data, temp_dir)
-      
-      @ Przenieś binarki do /home/HackerScript/bin/
-      copy_files(temp_dir + "bin/*", self.bin_dir)
-      chmod(self.bin_dir + "*", 0755)  @ Nadaj uprawnienia
-      
-      @ Aktualizuj version
-      write_file(self.version_file, remote)
-      
-      @ Usuń stare libs jeśli potrzeba
-      rm_rf(self.libs_dir + "*")
-      
-      log"Update completed to {remote}"
-    ] else [
-      log"Already up to date: {current}"
-    ]
-  ]
-  
-  func build (args) [
-    is_production = args.contains("--production")
-    project_dir = get_cwd()
-    
-    if !file_exists(project_dir + "/cmd/main.hcs") [
-      log"Error: Not in project directory (missing cmd/main.hcs)"
-      return 1
-    ]
-    
-    @ Użyj HS1 do kompilacji .hcs -> .object
-    output_object = "build/main.object"
-    proc_run(self.bin_dir + "HS1", [project_dir + "/cmd/main.hcs", output_object])
-    
-    if is_production [
-      @ Izolowane env
-      iso_dir = project_dir + "/iso_env/"
-      mkdir(iso_dir)
-      @ Instaluj deps z Virus.hcl do iso_env (C libs itd.)
-      hcl = parse_hcl(project_dir + "/Virus.hcl")
-      for dep in hcl.dependencies.c [
-        install_c_lib(dep, iso_dir + "libs/")
-      ]
-      for dep in hcl.dependencies.virus [
-        install_hs_lib(dep, iso_dir + "core/")
-      ]
-      
-      @ Kompiluj .object -> .pack (np. bundle z deps)
-      output_pack = "build/main.pack"
-      bundle_pack(output_object, iso_dir, output_pack)  @ Custom func do bundlingu
-      log"Built production .pack: {output_pack}"
-    ] else [
-      log"Built .object: {output_object}"
-    ]
-    return 0
-  ]
-  
-  func run (args) [
-    if args.length < 1 [ log"Usage: run [options] <file>" return 1 ]
-    file = args.last()
-    
-    if args.contains("-fast") [
-      @ Użyj HS2 dla JIT
-      proc_run(self.bin_dir + "HS2", [file])
-    ] elif args.contains("-pack") [
-      @ Użyj HS3 dla .pack (zakładam .pack to bundled bytecode)
-      proc_run(self.bin_dir + "HS3", [file])  @ Dostosuj jeśli .pack != .object
-    ] else [
-      @ Domyślnie run .object z HS3
-      proc_run(self.bin_dir + "HS3", [file])
-    ]
-    return 0
-  ]
-  
-  func install (lib_name) [
-    @ Pobierz index.json
-    index = json_parse(curl_get(self.index_url).body)
-    if !index.contains(lib_name) [ log"Lib not found: {lib_name}" return 1 ]
-    
-    lib_info = index[lib_name]
-    if lib_info.type == "c" [
-      @ Instaluj C lib do /home/HackerScript/libs/ (kontener tymczasowy?)
-      download_lib(lib_info.url, self.libs_dir + lib_name)
-      log"Installed C lib: {lib_name}"
-    ] elif lib_info.type == "hs" [
-      @ Instaluj HS lib do core/
-      download_lib(lib_info.url, self.core_dir + lib_name + ".hcs")
-      log"Installed HS lib: {lib_name}"
-    ]
-    return 0
-  ]
-  
-  func remove (lib_name) [
-    @ Usuń z libs lub core
-    if file_exists(self.libs_dir + lib_name) [
-      rm(self.libs_dir + lib_name)
-    ] elif file_exists(self.core_dir + lib_name + ".hcs") [
-      rm(self.core_dir + lib_name + ".hcs")
-    ] else [
-      log"Lib not found: {lib_name}"
-      return 1
-    ]
-    log"Removed: {lib_name}"
-    return 0
-  ]
-  
-  func list [
-    libs_c = list_dir(self.libs_dir)
-    libs_hs = list_dir(self.core_dir)
-    log"C libs:"
-    for lib in libs_c [ log" - {lib}" ]
-    log"HS libs:"
-    for lib in libs_hs [ log" - {lib}" ]
-  ]
-  
-  func init [
-    project_dir = get_cwd()
-    mkdir(project_dir + "/cmd/")
-    write_file(project_dir + "/cmd/main.hcs", "func main [] [ log\"Hello HackerScript!\" ]")
-    write_file(project_dir + "/Virus.hcl", "package { name = \"my_project\" version = \"0.1\" }\ndependencies {}")
-    log"Project initialized."
-  ]
-  
-  func clean [
-    rm_rf("build/")
-    log"Cleaned build artifacts."
-  ]
-  
-  func docs (topic) [
-    @ Prosty docs system
-    if topic == "build" [
-      log"Build command: compiles .hcs to .object or .pack in production."
-    ] else [
-      log"Docs for {topic} not found. Try: build, run, etc."
-    ]
-  ]
-  
-  func tutorial [
-    @ Interaktywny tutorial
-    log"Welcome to Hacker Script Tutorial!"
-    log"Step 1: Init project - virus init"
-    input = read_input("Try it? (y/n)")
-    if input == "y" [ self.init() ]
-    @ Kontynuuj z więcej krokami...
-    log"Tutorial completed."
-  ]
-  
-  func version [
-    log"Virus CLI version: {self.get_current_version()}"
-  ]
-  
-  func cleanup [
-    deallocate(self.buffer)
-  ]
+@ Funkcja pomocnicza do pobierania sciezki kompilatora star
+func get_star_path()[
+    val_user = getpass.getuser()
+    return "/home/" + val_user + "/.HackerScript/bin/star"
 ]
 
-func main (args) [
-  if args.length < 2 [ VirusCLI.print_help() return 0 ]
-  
-  cli = new VirusCLI()
-  cli.init()
-  
-  command = args[1]
-  sub_args = args.slice(2)
-  
-  result = 0
-  if command == "build" [ result = cli.build(sub_args) ]
-  elif command == "run" [ result = cli.run(sub_args) ]
-  elif command == "install" [ result = cli.install(sub_args[0]) ]
-  elif command == "remove" [ result = cli.remove(sub_args[0]) ]
-  elif command == "update" [ cli.update() ]
-  elif command == "list" [ cli.list() ]
-  elif command == "init" [ cli.init() ]
-  elif command == "clean" [ cli.clean() ]
-  elif command == "docs" [ cli.docs(sub_args[0]) ]
-  elif command == "tutorial" [ cli.tutorial() ]
-  elif command == "version" [ cli.version() ]
-  else [ log"Unknown command: {command}" VirusCLI.print_help() result = 1 ]
-  
-  cli.cleanup()
-  return result
+func show_help()[
+    log "=== HackerScript CLI (virus) ==="
+    log "Uzycie: virus [komenda]"
+    log ""
+    log "Komendy:"
+    log "  init    - Tworzy nowy projekt HackerScript"
+    log "  build   - Kompiluje projekt (wymaga Virus.hcl i cmd/main.hcs)"
+    log "  clean   - Usuwa katalog cache"
+    log "  docs    - Wyswietla dokumentacje i tutoriale"
+]
+
+func init_project()[
+    log "[*] Inicjowanie projektu..."
+    if not os.path.exists("cmd")[
+        os.makedirs("cmd")
+    ]
+    
+    @ Plik konfiguracyjny
+    f_hcl = open("Virus.hcl", "w")
+    f_hcl.write("project {\n  name = 'virus_payload'\n}\n")
+    f_hcl.close()
+
+    @ Plik glowny
+    f_hcs = open("cmd/main.hcs", "w")
+    f_hcs.write("func main()[\n    log 'Witaj w HackerScript!'\n]\nmain()")
+    f_hcs.close()
+    
+    log "[+] Utworzono Virus.hcl oraz cmd/main.hcs"
+]
+
+func build_project()[
+    log "[*] Rozpoczynanie kompilacji produkcyjnej..."
+    
+    if not os.path.exists("cmd/main.hcs")[
+        log "[-] Blad: Nie znaleziono cmd/main.hcs"
+        return
+    ]
+
+    val_star = get_star_path()
+    log "[*] Uzywanie kompilatora: " + val_star
+
+    @ Wywolanie binarki star
+    try [
+        subprocess.run([val_star, "cmd/main.hcs"], check=True)
+        
+        @ Przenoszenie gotowej binarki z cache
+        val_src = "cache/build/target/release/virus_payload"
+        if os.path.exists(val_src)[
+            shutil.copy(val_src, "./virus_payload")
+            log "[+] Sukces! Binarka przeniesiona do bieżącego folderu."
+        ]
+    ] except Exception as e [
+        log "[-] Blad podczas kompilacji: " + str(e)
+    ]
+]
+
+func clean_cache()[
+    if os.path.exists("cache")[
+        shutil.rmtree("cache")
+        log "[+] Katalog cache usunięty."
+    ]
+    if not os.path.exists("cache")[
+        log "[!] Cache jest juz czysty."
+    ]
+]
+
+func show_docs()[
+    log "=== HackerScript Tutorial ==="
+    log "1. Struktura: Projekt musi miec Virus.hcl i folder cmd/"
+    log "2. Skladnia: uzywamy [ ] zamiast wciec Pythona"
+    log "3. Funkcje: 'func nazwa() [ ]'"
+    log "4. Importy: 'import <core:modul>'"
+    log "5. Kompilacja: 'virus build' zamienia kod na binarke Rust/Python"
+    log ""
+    log "Przyklad:"
+    log "func test() [ log 'dziala' ]"
+]
+
+@ Glowna logika sterujaca
+args = sys.argv
+val_len = len(args)
+
+if val_len < 2 [
+    show_help()
+]
+
+if val_len >= 2 [
+    cmd = args[1]
+    
+    if cmd == "init" [
+        init_project()
+    ]
+    if cmd == "build" [
+        build_project()
+    ]
+    if cmd == "clean" [
+        clean_cache()
+    ]
+    if cmd == "docs" [
+        show_docs()
+    ]
 ]
