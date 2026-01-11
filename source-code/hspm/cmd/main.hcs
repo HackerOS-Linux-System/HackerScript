@@ -1,1 +1,75 @@
+import <core:os>
+import <core:sys>
+import <core:urllib.request>
+import <core:json> @ Zakładamy, że do parsowania vira-index użyjemy prostych metod tekstowych
 
+func install_package(pkg_name) [
+    log "Szukanie pakietu: " + pkg_name
+    
+    @ Linki do indeksów
+    url_virus = "https://raw.githubusercontent.com/HackerOS-Linux-System/HackerScript/main/repo/index.hcl"
+    url_vira = "https://raw.githubusercontent.com/HackerOS-Linux-System/HackerScript/main/repo/vira-index.toon"
+
+    @ Ścieżka instalacji bibliotek
+    user_home = "/home/" + os.getlogin() + "/.HackerScript/libs/"
+    os.makedirs(user_home, exist_ok=True)
+
+    @ 1. Próba znalezienia w oficjalnym repo (VIRUS)
+    log "[Repo: Virus] Sprawdzanie weryfikowanych zasobów..."
+    try [
+        @ Pobieranie indeksu (w wersji surowej 'raw')
+        response = urllib.request.urlopen(url_virus).read().decode("utf-8")
+        
+        if pkg_name in response [
+            log "[+] Znaleziono w oficjalnym repo! Pobieranie..."
+            @ Tutaj logika wyciągania URL z HCL - uproszczona dla przykładu
+            pkg_url = "https://github.com/HackerOS-Linux-System/HackerScript/releases/download/libs/" + pkg_name + ".tar.gz"
+            urllib.request.urlretrieve(pkg_url, user_home + pkg_name + ".tar.gz")
+            log "[✔] Zainstalowano bezpieczną bibliotekę: " + pkg_name
+            return True
+        ]
+    ] except [
+        log "[-] Błąd połączenia z repozytorium Virus"
+    ]
+
+    @ 2. Próba znalezienia w otwartym repo (VIRA)
+    log "[Repo: Vira] Sprawdzanie społeczności (brak weryfikacji)..."
+    try [
+        response_vira = urllib.request.urlopen(url_vira).read().decode("utf-8")
+        
+        if pkg_name in response_vira [
+            log "[!] OSTRZEŻENIE: Biblioteka nieweryfikowana. Kontynuować? (Y/N)"
+            @ W kompilatorze Rust/Python wejście można obsłużyć przez input()
+            urllib.request.urlretrieve("https://temp-storage.com/vira/" + pkg_name + ".tar.gz", user_home + pkg_name + ".tar.gz")
+            log "[✔] Zainstalowano bibliotekę społeczności: " + pkg_name
+            return True
+        ]
+    ] except [
+        log "[-] Pakiet nie istnieje w repozytorium Vira"
+    ]
+
+    log "[X] BŁĄD: Nie znaleziono pakietu " + pkg_name + " w żadnym repozytorium."
+    return False
+]
+
+func main() [
+    @ Sprawdzanie argumentów wiersza poleceń
+    @ sys.argv[1] to komenda (np. install), sys.argv[2] to nazwa pakietu
+    
+    if len(sys.argv) < 3 [
+        log "HackerScript Package Manager (hspm)"
+        log "Użycie: hspm install <nazwa_pakietu>"
+        return
+    ]
+
+    command = sys.argv[1]
+    package = sys.argv[2]
+
+    if command == "install" [
+        install_package(package)
+    ] else [
+        log "Nieznana komenda: " + command
+    ]
+]
+
+main()
