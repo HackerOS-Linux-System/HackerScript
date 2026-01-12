@@ -1,75 +1,112 @@
 import <core:os>
 import <core:sys>
 import <core:urllib.request>
-import <core:json> @ Zakładamy, że do parsowania vira-index użyjemy prostych metod tekstowych
+import <core:json>
+import <core:toon>
+import <core:getpass>
 
-func install_package(pkg_name) [
-    log "Szukanie pakietu: " + pkg_name
-    
-    @ Linki do indeksów
-    url_virus = "https://raw.githubusercontent.com/HackerOS-Linux-System/HackerScript/main/repo/index.hcl"
-    url_vira = "https://raw.githubusercontent.com/HackerOS-Linux-System/HackerScript/main/repo/vira-index.toon"
-
-    @ Ścieżka instalacji bibliotek
-    user_home = "/home/" + os.getlogin() + "/.HackerScript/libs/"
-    os.makedirs(user_home, exist_ok=True)
-
-    @ 1. Próba znalezienia w oficjalnym repo (VIRUS)
-    log "[Repo: Virus] Sprawdzanie weryfikowanych zasobów..."
-    try [
-        @ Pobieranie indeksu (w wersji surowej 'raw')
-        response = urllib.request.urlopen(url_virus).read().decode("utf-8")
-        
-        if pkg_name in response [
-            log "[+] Znaleziono w oficjalnym repo! Pobieranie..."
-            @ Tutaj logika wyciągania URL z HCL - uproszczona dla przykładu
-            pkg_url = "https://github.com/HackerOS-Linux-System/HackerScript/releases/download/libs/" + pkg_name + ".tar.gz"
-            urllib.request.urlretrieve(pkg_url, user_home + pkg_name + ".tar.gz")
-            log "[✔] Zainstalowano bezpieczną bibliotekę: " + pkg_name
-            return True
-        ]
-    ] except [
-        log "[-] Błąd połączenia z repozytorium Virus"
-    ]
-
-    @ 2. Próba znalezienia w otwartym repo (VIRA)
-    log "[Repo: Vira] Sprawdzanie społeczności (brak weryfikacji)..."
-    try [
-        response_vira = urllib.request.urlopen(url_vira).read().decode("utf-8")
-        
-        if pkg_name in response_vira [
-            log "[!] OSTRZEŻENIE: Biblioteka nieweryfikowana. Kontynuować? (Y/N)"
-            @ W kompilatorze Rust/Python wejście można obsłużyć przez input()
-            urllib.request.urlretrieve("https://temp-storage.com/vira/" + pkg_name + ".tar.gz", user_home + pkg_name + ".tar.gz")
-            log "[✔] Zainstalowano bibliotekę społeczności: " + pkg_name
-            return True
-        ]
-    ] except [
-        log "[-] Pakiet nie istnieje w repozytorium Vira"
-    ]
-
-    log "[X] BŁĄD: Nie znaleziono pakietu " + pkg_name + " w żadnym repozytorium."
-    return False
+@ Funkcja pobierająca bazową ścieżkę
+func get_base_path()[
+    val_user = getpass.getuser()
+    return "/home/" + val_user + "/.HackerScript/libs/"
 ]
 
-func main() [
-    @ Sprawdzanie argumentów wiersza poleceń
-    @ sys.argv[1] to komenda (np. install), sys.argv[2] to nazwa pakietu
-    
-    if len(sys.argv) < 3 [
-        log "HackerScript Package Manager (hspm)"
-        log "Użycie: hspm install <nazwa_pakietu>"
-        return
+func install_package(pkg_name)[
+    val_base = get_base_path()
+    val_virus_path = val_base + "virus/"
+    val_vira_path = val_base + "vira/"
+
+    @ Tworzenie struktur
+    sh [
+        mkdir -p {val_virus_path}
+        mkdir -p {val_vira_path}
     ]
 
-    command = sys.argv[1]
-    package = sys.argv[2]
+    log "[*] Szukanie pakietu: " + pkg_name
 
-    if command == "install" [
-        install_package(package)
-    ] else [
-        log "Nieznana komenda: " + command
-    ]
+    @ 1. PRÓBA: REPOZYTORIUM VIRUS (JSON)
+    val_url_virus = "https://raw.githubusercontent.com/HackerOS-Linux-System/HackerScript/main/repo/index.json"
+    try [
+        val_res = urllib.request.urlopen(val_url_virus).read().decode("utf-8")
+        val_data = json.loads(val_res)
+
+        if pkg_name in val_data [
+            log "[+] Znaleziono w oficjalnym repo (Virus)!"
+            val_download_url = val_data[pkg_name]["release"]
+            val_dest = val_virus_path + pkg_name + ".a"
+
+            sh [ curl -L {val_download_url} -o {val_dest} ]
+
+            log "[✔] Zainstalowano: " + val_dest
+            log "[!] Dodaj do Virus.hcl: link = '" + val_dest + "'"
+            return True
+        ]
+    ] except [ log "[?] Brak w repozytorium Virus..." ]
+
+    @ 2. PRÓBA: REPOZYTORIUM VIRA (TOON)
+    val_url_vira = "https://raw.githubusercontent.com/HackerOS-Linux-System/HackerScript/main/repo/vira-index.toon"
+    try [
+        val_res_toon = urllib.request.urlopen(val_url_vira).read().decode("utf-8")
+        val_data_vira = toon.parse(val_res_toon)
+
+        if pkg_name in val_data_vira [
+            log "[!] OSTRZEŻENIE: Biblioteka Vira jest nieweryfikowana!"
+            val_download_url = val_data_vira[pkg_name]["release"]
+            val_dest = val_vira_path + pkg_name + ".a"
+
+            sh [ curl -L {val_download_url} -o {val_dest} ]
+
+            log "[✔] Zainstalowano społecznościowy pakiet: " + val_dest
+            return True
+        ]
+    ] except [ log "[-] Pakiet nie istnieje w Vira." ]
+
+    log "[X] Nie znaleziono pakietu: " + pkg_name
 ]
 
-main()
+func publish_vira(pkg_name, url)[
+    log "[*] Publikowanie/Aktualizacja pakietu " + pkg_name + " w Vira..."
+    val_url_index = "https://github.com/HackerOS-Linux-System/HackerScript/blob/main/repo/vira-index.toon"
+
+    @ W realnym scenariuszu wymagany byłby Token API / Auth
+    @ Tutaj symulujemy edycję formatu Toon
+    val_entry = "\n[" + pkg_name + "]\nrelease = '" + url + "'\nowner = 'user'\n"
+
+    @ Symulacja zapisu (wymagałaby Gita/API do faktycznej aktualizacji repo)
+    log "[+] Generowanie wpisu TOON:"
+    log val_entry
+
+    sh [
+        @ Wersja uproszczona: dopisywanie do lokalnej kopii przed wysyłką
+        echo {val_entry} >> local_vira_index.toon
+    ]
+    log "[✔] Wpis przygotowany do synchronizacji."
+]
+
+func remove_package(pkg_name)[
+    val_base = get_base_path()
+    sh [
+        rm -f {val_base}virus/{pkg_name}.a
+        rm -f {val_base}vira/{pkg_name}.a
+    ]
+    log "[+] Usunięto bibliotekę " + pkg_name
+]
+
+@ Główna logika
+val_args = sys.argv
+if len(val_args) < 2 [
+    log "HackerScript Package Manager (hspm)"
+    log "Użycie: hspm [install|publish|remove] <nazwa> <url_jeśli_publish>"
+] else [
+    val_cmd = val_args[1]
+
+    if val_cmd == "install" [
+        install_package(val_args[2])
+    ]
+    if val_cmd == "publish" [
+        publish_vira(val_args[2], val_args[3])
+    ]
+    if val_cmd == "remove" [
+        remove_package(val_args[2])
+    ]
+]
