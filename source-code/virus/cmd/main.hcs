@@ -1,114 +1,117 @@
 import <core:sys>
 import <core:os>
-import <core:subprocess>
 import <core:shutil>
 import <core:getpass>
 
+@ Pobieramy sciezke domowa uzytkownika z systemu Linux
+val_home = os.path.expanduser("~")
+
 @ Funkcja pomocnicza do pobierania sciezki kompilatora star
 func get_star_path()[
-    val_user = getpass.getuser()
-    return "/home/" + val_user + "/.HackerScript/bin/star"
+    @ Na Linuxie star powinien znajdowac sie w ukrytym folderze lokalnym
+    return val_home + "/.HackerScript/bin/star"
 ]
 
 func show_help()[
-    log "=== HackerScript CLI (virus) ==="
-    log "Uzycie: virus [komenda]"
+    log "=== HackerScript CLI (virus) v2.0 - LINUX EDITION ==="
+    log "Uzycie: virus [komenda] [opcje]"
     log ""
     log "Komendy:"
-    log "  init    - Tworzy nowy projekt HackerScript"
-    log "  build   - Kompiluje projekt (wymaga Virus.hcl i cmd/main.hcs)"
-    log "  clean   - Usuwa katalog cache"
-    log "  docs    - Wyswietla dokumentacje i tutoriale"
+    log "  init                - Inicjuje nowy projekt (Virus.hcl + cmd/)"
+    log "  clean               - Usuwa katalog cache"
+    log "  docs                - Wyswietla dokumentacje"
+    log "  build [plik]        - Kompiluje plik (domyslnie main.hcs)"
+    log ""
+    log "Opcje build:"
+    log "  --production        - Kompilacja z cmd/main.hcs"
+    log "  --lib               - Generuje biblioteke statyczna .a"
 ]
 
 func init_project()[
-    log "[*] Inicjowanie projektu..."
+    log "[*] Inicjowanie projektu Linux..."
     if not os.path.exists("cmd")[
         os.makedirs("cmd")
     ]
-    
-    @ Plik konfiguracyjny
-    f_hcl = open("Virus.hcl", "w")
-    f_hcl.write("project {\n  name = 'virus_payload'\n}\n")
-    f_hcl.close()
 
-    @ Plik glowny
-    f_hcs = open("cmd/main.hcs", "w")
-    f_hcs.write("func main()[\n    log 'Witaj w HackerScript!'\n]\nmain()")
-    f_hcs.close()
-    
-    log "[+] Utworzono Virus.hcl oraz cmd/main.hcs"
-]
-
-func build_project()[
-    log "[*] Rozpoczynanie kompilacji produkcyjnej..."
-    
-    if not os.path.exists("cmd/main.hcs")[
-        log "[-] Blad: Nie znaleziono cmd/main.hcs"
-        return
+    @ Tworzenie Virus.hcl z poprawnym formatowaniem Linuxowym
+    sh [
+        echo 'project { name = "virus_payload" }' > Virus.hcl
     ]
 
-    val_star = get_star_path()
-    log "[*] Uzywanie kompilatora: " + val_star
+    val_file = open("cmd/main.hcs", "w")
+    val_file.write("func main()[ log 'Witaj w HackerScript na Linuxie!' ]\nmain()")
+    val_file.close()
 
-    @ Wywolanie binarki star
+    log "[+] Projekt gotowy."
+]
+
+func build_project(args)[
+    val_star = get_star_path()
+    val_target = "main.hcs"
+    val_is_lib = False
+    val_is_prod = False
+
+    for arg in args [
+        if arg == "--lib" [ val_is_lib = True ]
+        if arg == "--production" [ val_is_prod = True ]
+        if not arg.startswith("-") [ val_target = arg ]
+    ]
+
+    if val_is_prod [ val_target = "cmd/main.hcs" ]
+
+    log "[*] Kompilacja (Linux ELF): " + val_target
+
     try [
-        subprocess.run([val_star, "cmd/main.hcs"], check=True)
-        
-        @ Przenoszenie gotowej binarki z cache
-        val_src = "cache/build/target/release/virus_payload"
-        if os.path.exists(val_src)[
-            shutil.copy(val_src, "./virus_payload")
-            log "[+] Sukces! Binarka przeniesiona do bieżącego folderu."
+        if val_is_lib [
+            sh [ {val_star} {val_target} --lib ]
+        ] else [
+            sh [ {val_star} {val_target} ]
+        ]
+
+        val_out_name = "virus_payload"
+        val_base_path = "cache/build/target/release/"
+
+        if val_is_lib [
+            val_src = val_base_path + "lib" + val_out_name + ".a"
+            if os.path.exists(val_src) [
+                shutil.copy(val_src, "./" + val_out_name + ".a")
+                log "[+] Biblioteka gotowa: ./" + val_out_name + ".a"
+            ]
+        ] else [
+            @ Na Linuxie binarki zazwyczaj nie maja rozszerzenia .exe
+            val_src = val_base_path + val_out_name
+
+            if os.path.exists(val_src) [
+                shutil.copy(val_src, "./" + val_out_name)
+                @ Nadajemy uprawnienia do wykonywania (chmod +x)
+                sh [ chmod +x ./{val_out_name} ]
+                log "[+] Binarka ELF gotowa: ./" + val_out_name
+            ]
         ]
     ] except Exception as e [
-        log "[-] Blad podczas kompilacji: " + str(e)
+        log "[-] Blad kompilacji: " + str(e)
     ]
 ]
 
-func clean_cache()[
-    if os.path.exists("cache")[
-        shutil.rmtree("cache")
-        log "[+] Katalog cache usunięty."
-    ]
-    if not os.path.exists("cache")[
-        log "[!] Cache jest juz czysty."
-    ]
-]
+val_args = sys.argv
+val_count = len(val_args)
 
-func show_docs()[
-    log "=== HackerScript Tutorial ==="
-    log "1. Struktura: Projekt musi miec Virus.hcl i folder cmd/"
-    log "2. Skladnia: uzywamy [ ] zamiast wciec Pythona"
-    log "3. Funkcje: 'func nazwa() [ ]'"
-    log "4. Importy: 'import <core:modul>'"
-    log "5. Kompilacja: 'virus build' zamienia kod na binarke Rust/Python"
-    log ""
-    log "Przyklad:"
-    log "func test() [ log 'dziala' ]"
-]
-
-@ Glowna logika sterujaca
-args = sys.argv
-val_len = len(args)
-
-if val_len < 2 [
+if val_count < 2 [
     show_help()
-]
+] else [
+    val_cmd = val_args[1]
 
-if val_len >= 2 [
-    cmd = args[1]
-    
-    if cmd == "init" [
-        init_project()
+    if val_cmd == "init" [ init_project() ]
+    if val_cmd == "clean" [
+        if os.path.exists("cache") [
+            shutil.rmtree("cache")
+            log "[+] Cache wyczyszczony."
+        ]
     ]
-    if cmd == "build" [
-        build_project()
+    if val_cmd == "docs" [
+        log "HackerScript v2.0 - Linux Support Active."
     ]
-    if cmd == "clean" [
-        clean_cache()
-    ]
-    if cmd == "docs" [
-        show_docs()
+    if val_cmd == "build" [
+        build_project(val_args[2:])
     ]
 ]
