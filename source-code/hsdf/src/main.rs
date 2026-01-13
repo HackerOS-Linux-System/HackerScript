@@ -1,10 +1,10 @@
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::PathBuf;
-
 use clap::Parser;
-use miette::{Diagnostic, GraphicalReportHandler, Report, SourceSpan};
+use miette::{Diagnostic, GraphicalReportHandler, IntoDiagnostic, Report, Result, SourceSpan};
 use regex::Regex;
+use thiserror::Error;
 
 #[derive(Parser, Debug)]
 #[command(name = "hsdf", about = "HackerScript Diagnostic Files - Diagnoses .hcs files with pretty errors")]
@@ -14,11 +14,10 @@ struct Args {
     file: PathBuf,
 }
 
-#[derive(Debug, thiserror::Error, Diagnostic)]
+#[derive(Debug, Error, Diagnostic)]
 enum HcsError {
     #[error("File not found or unable to read: {0}")]
     IoError(#[from] io::Error),
-
     #[error("Unclosed block comment")]
     #[diagnostic(code(hcs::unclosed_block_comment))]
     UnclosedBlockComment {
@@ -27,7 +26,6 @@ enum HcsError {
         #[label("Block comment started here but never closed")]
         span: SourceSpan,
     },
-
     #[error("Unmatched closing bracket ']' without opening '['")]
     #[diagnostic(code(hcs::unmatched_closing_bracket))]
     UnmatchedClosingBracket {
@@ -36,7 +34,6 @@ enum HcsError {
         #[label("This ']' has no matching '['")]
         span: SourceSpan,
     },
-
     #[error("Unclosed sh block")]
     #[diagnostic(code(hcs::unclosed_sh_block))]
     UnclosedShBlock {
@@ -45,7 +42,6 @@ enum HcsError {
         #[label("sh block started here but never closed")]
         span: SourceSpan,
     },
-
     #[error("Unclosed block (indent level > 0 at EOF)")]
     #[diagnostic(code(hcs::unclosed_block))]
     UnclosedBlock {
@@ -54,7 +50,6 @@ enum HcsError {
         #[label("Block opened here but not closed")]
         span: SourceSpan,
     },
-
     #[error("Invalid syntax: {message}")]
     #[diagnostic(code(hcs::invalid_syntax))]
     InvalidSyntax {
@@ -64,18 +59,15 @@ enum HcsError {
         #[label("Invalid syntax here")]
         span: SourceSpan,
     },
-
     #[error("Multiple errors found")]
     MultipleErrors(Vec<Report>),
 }
 
-fn main() -> miette::Result<()> {
+fn main() -> Result<()> {
     let args = Args::parse();
-
-    let mut file = File::open(&args.file)?;
+    let mut file = File::open(&args.file).into_diagnostic()?;
     let mut code = String::new();
-    file.read_to_string(&mut code)?;
-
+    file.read_to_string(&mut code).into_diagnostic()?;
     match diagnose_hcs(&code) {
         Ok(_) => {
             println!("No errors found in {}", args.file.display());
@@ -84,23 +76,26 @@ fn main() -> miette::Result<()> {
         Err(HcsError::MultipleErrors(errors)) => {
             let handler = GraphicalReportHandler::new();
             for err in errors {
-                handler.render_report(&mut io::stdout(), err.as_ref())?;
+                let mut out = String::new();
+                handler.render_report(&mut out, err.as_ref()).into_diagnostic()?;
+                print!("{}", out);
             }
             std::process::exit(1);
         }
         Err(err) => {
             let report = Report::new(err);
             let handler = GraphicalReportHandler::new();
-            handler.render_report(&mut io::stdout(), report.as_ref())?;
+            let mut out = String::new();
+            handler.render_report(&mut out, report.as_ref()).into_diagnostic()?;
+            print!("{}", out);
             std::process::exit(1);
         }
     }
 }
 
-fn diagnose_hcs(code: &str) -> Result<(), HcsError> {
+fn diagnose_hcs(code: &str) -> std::result::Result<(), HcsError> {
     let lines: Vec<&str> = code.lines().collect();
     let mut errors: Vec<Report> = Vec::new();
-
     let mut indent_level = 0;
     let mut in_sh_block = false;
     let mut in_block_comment = false;
@@ -110,34 +105,39 @@ fn diagnose_hcs(code: &str) -> Result<(), HcsError> {
 
     let rust_re = Regex::new(r"<rust:([\w\-]+)(?:=([\d\.]+))?>").unwrap();
     let c_re = Regex::new(r"<c:(.*)>").unwrap();
+    let virus_vira_re = Regex::new(r"import\s+<(virus|vira):([\w\-]+)>").unwrap();
+    let core_import_re = Regex::new(r"import\s+<core:([\w\.]+)>").unwrap();
+    let require_re = Regex::new(r"require\s+<([\w\./]+)>").unwrap();
     let comment_re = Regex::new(r"@.*").unwrap();
+    let block_comment_start_re = Regex::new(r"-/").unwrap();
+    let block_comment_end_re = Regex::new(r"-\\").unwrap();
 
     let mut pos = 0;
-    for (line_num, line) in lines.iter().enumerate() {
+    for (_line_num, line) in lines.iter().enumerate() {
         let line_start = pos;
         let mut raw_line = line.trim().to_string();
-
         // Advance pos
         pos += line.len() + 1; // +1 for newline
 
         // Handle block comments
-        if raw_line.contains("-/") {
+        if block_comment_start_re.is_match(&raw_line) {
             if in_block_comment {
                 errors.push(Report::new(HcsError::InvalidSyntax {
                     message: "Nested block comment start".to_string(),
-                    src: code.to_string(),
-                    span: (line_start, raw_line.len()).into(),
+                                        src: code.to_string(),
+                                        span: (line_start, raw_line.len()).into(),
                 }));
             }
             in_block_comment = true;
             block_comment_start = Some(line_start);
             continue;
         }
-        if raw_line.contains("-\\") {
+        if block_comment_end_re.is_match(&raw_line) {
             if !in_block_comment {
-                errors.push(Report::new(HcsError::UnmatchedClosingBracket {
-                    src: code.to_string(),
-                    span: (line_start, raw_line.len()).into(),
+                errors.push(Report::new(HcsError::InvalidSyntax {
+                    message: "Unmatched block comment end".to_string(),
+                                        src: code.to_string(),
+                                        span: (line_start, raw_line.len()).into(),
                 }));
             }
             in_block_comment = false;
@@ -150,18 +150,31 @@ fn diagnose_hcs(code: &str) -> Result<(), HcsError> {
 
         // Remove line comments
         raw_line = comment_re.replace(&raw_line, "").trim().to_string();
-
         if raw_line.is_empty() && !in_sh_block {
             continue;
         }
 
-        // Special imports
+        // Require
+        if require_re.is_match(&raw_line) {
+            // Valid
+            continue;
+        }
+
+        // Special imports: rust, c, virus/vira, core
         if rust_re.is_match(&raw_line) {
-            // Valid, skip
+            // Valid
             continue;
         }
         if c_re.is_match(&raw_line) {
-            // Valid, skip
+            // Valid
+            continue;
+        }
+        if virus_vira_re.is_match(&raw_line) {
+            // Valid
+            continue;
+        }
+        if core_import_re.is_match(&raw_line) {
+            // Valid
             continue;
         }
 
@@ -171,10 +184,20 @@ fn diagnose_hcs(code: &str) -> Result<(), HcsError> {
             continue;
         }
 
-        // Numpy syntax
-        if raw_line.starts_with("matrix ") || raw_line.starts_with("vector ") {
-            // Assume valid for now
-            continue;
+        // Numpy/Tensor syntax
+        if raw_line.starts_with("tensor ") || raw_line.starts_with("matrix ") || raw_line.starts_with("vector ") {
+            // Check if it looks like assignment or declaration
+            if raw_line.contains("=") || raw_line.contains("zeros(") || raw_line.contains("ones(") {
+                // Assume valid
+                continue;
+            } else {
+                errors.push(Report::new(HcsError::InvalidSyntax {
+                    message: "Invalid tensor/matrix/vector declaration".to_string(),
+                                        src: code.to_string(),
+                                        span: (line_start, raw_line.len()).into(),
+                }));
+                continue;
+            }
         }
 
         // SH commands
@@ -182,8 +205,8 @@ fn diagnose_hcs(code: &str) -> Result<(), HcsError> {
             if in_sh_block {
                 errors.push(Report::new(HcsError::InvalidSyntax {
                     message: "Nested sh block".to_string(),
-                    src: code.to_string(),
-                    span: (line_start, raw_line.len()).into(),
+                                        src: code.to_string(),
+                                        span: (line_start, raw_line.len()).into(),
                 }));
             }
             in_sh_block = true;
@@ -204,15 +227,40 @@ fn diagnose_hcs(code: &str) -> Result<(), HcsError> {
             continue;
         }
 
+        // Object (class)
+        if raw_line.starts_with("object ") {
+            // Valid, similar to func
+            if raw_line.ends_with("[") {
+                indent_level += 1;
+                last_open_block_pos = Some(line_start);
+            }
+            continue;
+        }
+
+        // Keywords: func, fast func, log
+        if raw_line.starts_with("func ") || raw_line.starts_with("fast func ") || raw_line.starts_with("log ") {
+            // Valid
+            if raw_line.ends_with("[") {
+                indent_level += 1;
+                last_open_block_pos = Some(line_start);
+            }
+            continue;
+        }
+
         // Block handling
         if raw_line.starts_with("] except") || raw_line.starts_with("] else") {
             if indent_level == 0 {
                 errors.push(Report::new(HcsError::UnmatchedClosingBracket {
                     src: code.to_string(),
-                    span: (line_start, raw_line.len()).into(),
+                                        span: (line_start, raw_line.len()).into(),
                 }));
             } else {
                 indent_level -= 1;
+            }
+            // For except/else, might open new block if followed by [
+            if raw_line.ends_with("[") {
+                indent_level += 1;
+                last_open_block_pos = Some(line_start);
             }
             continue;
         }
@@ -220,17 +268,12 @@ fn diagnose_hcs(code: &str) -> Result<(), HcsError> {
             if indent_level == 0 {
                 errors.push(Report::new(HcsError::UnmatchedClosingBracket {
                     src: code.to_string(),
-                    span: (line_start, raw_line.len()).into(),
+                                        span: (line_start, raw_line.len()).into(),
                 }));
             } else {
                 indent_level -= 1;
             }
             continue;
-        }
-
-        // Keywords
-        if raw_line.starts_with("func ") || raw_line.starts_with("log ") {
-            // Valid
         }
 
         // Opening blocks
@@ -240,12 +283,18 @@ fn diagnose_hcs(code: &str) -> Result<(), HcsError> {
             continue;
         }
 
+        // Operations like dot
+        if raw_line.contains(" dot ") {
+            // Assume valid in expressions
+            continue;
+        }
+
         // If we reach here and it's not recognized, flag as invalid
         if !raw_line.is_empty() {
             errors.push(Report::new(HcsError::InvalidSyntax {
                 message: "Unrecognized syntax".to_string(),
-                src: code.to_string(),
-                span: (line_start, raw_line.len()).into(),
+                                    src: code.to_string(),
+                                    span: (line_start, raw_line.len()).into(),
             }));
         }
     }
@@ -255,7 +304,7 @@ fn diagnose_hcs(code: &str) -> Result<(), HcsError> {
         if let Some(start) = block_comment_start {
             errors.push(Report::new(HcsError::UnclosedBlockComment {
                 src: code.to_string(),
-                span: (start, 2).into(), // Approximate span for "-/"
+                                    span: (start, 2).into(), // Approximate span for "-/"
             }));
         }
     }
@@ -263,7 +312,7 @@ fn diagnose_hcs(code: &str) -> Result<(), HcsError> {
         if let Some(start) = sh_block_start {
             errors.push(Report::new(HcsError::UnclosedShBlock {
                 src: code.to_string(),
-                span: (start, 4).into(), // "sh ["
+                                    span: (start, 4).into(), // "sh ["
             }));
         }
     }
@@ -271,7 +320,7 @@ fn diagnose_hcs(code: &str) -> Result<(), HcsError> {
         if let Some(start) = last_open_block_pos {
             errors.push(Report::new(HcsError::UnclosedBlock {
                 src: code.to_string(),
-                span: (start, 1).into(), // "["
+                                    span: (start, 1).into(), // "["
             }));
         }
     }
