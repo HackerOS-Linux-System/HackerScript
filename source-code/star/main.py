@@ -13,7 +13,12 @@ class HackerCompiler:
         self.src_dir = os.path.join(self.build_dir, "src")
 
         self.home_dir = os.path.expanduser("~")
-        self.pip_requirements = {"stackprinter", "numpy"}
+        # Narzędzie hspm
+        self.hspm_bin = os.path.join(self.home_dir, ".HackerScript", "bin", "hspm")
+        self.libs_base = os.path.join(self.home_dir, ".HackerScript", "libs")
+
+        # Rozszerzone wymagania o numba dla fast func
+        self.pip_requirements = {"stackprinter", "numpy", "numba"}
 
         self.config = self._load_config(config_path)
         project_list = self.config.get('project', [{}])
@@ -22,6 +27,8 @@ class HackerCompiler:
 
         self.rust_crates = {}
         self.manual_mode = False
+        # Lista skompilowanych obiektów .a do linkowania w Cargo
+        self.external_static_libs = []
 
     def _load_config(self, path):
         if not os.path.exists(path): return {}
@@ -45,7 +52,17 @@ class HackerCompiler:
 
     def _run_pip(self, args):
         pip_exe = os.path.join(self.venv_dir, "Scripts", "pip") if os.name == "nt" else os.path.join(self.venv_dir, "bin", "pip")
-        subprocess.run([pip_exe] + args, check=True)
+        subprocess.run([pip_exe] + args, check=True, capture_output=True)
+
+    def _call_hspm(self, pkg_name):
+        """Wywołuje hspm w celu instalacji biblioteki .a"""
+        if not os.path.exists(self.hspm_bin):
+            print(f"[!] Błąd: Nie znaleziono narzędzia hspm w {self.hspm_bin}")
+            return False
+
+        print(f"[*] hspm: Próba instalacji pakietu {pkg_name}...")
+        res = subprocess.run([sys.executable, self.hspm_bin, "install", pkg_name])
+        return res.returncode == 0
 
     def translate_hcs_to_python(self, hcs_path):
         if not os.path.exists(hcs_path):
@@ -58,6 +75,7 @@ class HackerCompiler:
         header_imports = [
             "import subprocess, sys, os, shutil, ctypes",
             "import numpy as np",
+            "import numba",
             "import stackprinter", "stackprinter.set_excepthook(style='darkbg2')"
         ]
 
@@ -82,6 +100,41 @@ class HackerCompiler:
             raw_line = re.sub(r'@.*', '', raw_line).strip()
             if not raw_line and not in_sh_block: continue
 
+            # --- REQUIRE ---
+            require_match = re.search(r'require\s+<([\w\./]+)>', raw_line)
+            if require_match:
+                rel_path = require_match.group(1)
+                full_req_path = os.path.join(os.getcwd(), "cmd", rel_path)
+                if os.path.exists(full_req_path):
+                    included_code = self.translate_hcs_to_python(full_req_path)
+                    processed_lines.append(f"# --- REQUIRE START: {rel_path} ---")
+                    processed_lines.append(included_code)
+                    processed_lines.append(f"# --- REQUIRE END: {rel_path} ---")
+                else:
+                    print(f"[!] Warning: Nie odnaleziono pliku require: {full_req_path}")
+                continue
+
+            # --- IMPORT VIRUS / VIRA (.a libs) ---
+            lib_a_match = re.search(r'import\s+<(virus|vira):([\w\-]+)>', raw_line)
+            if lib_a_match:
+                repo_type = lib_a_match.group(1)
+                pkg_name = lib_a_match.group(2)
+
+                lib_path = os.path.join(self.libs_base, repo_type, f"{pkg_name}.a")
+
+                if not os.path.exists(lib_path):
+                    if self._call_hspm(pkg_name):
+                        print(f"[+] Pakiet {pkg_name} pobrany pomyślnie.")
+                    else:
+                        print(f"[X] Nie udało się zainstalować pakietu {pkg_name} przez hspm.")
+
+                if os.path.exists(lib_path):
+                    self.external_static_libs.append(lib_path)
+                    lib_var = pkg_name.replace("-", "_")
+                    processed_lines.append(f"{'    '*indent_level}# Linkowanie statyczne .a dla {pkg_name}")
+                    processed_lines.append(f"{'    '*indent_level}{lib_var} = ctypes.CDLL('{lib_path}')")
+                continue
+
             # --- IMPORTY SPECJALNE (RUST i C) ---
             rust_match = re.search(r'<rust:([\w\-]+)(?:=([\d\.]+))?>', raw_line)
             if rust_match:
@@ -97,24 +150,32 @@ class HackerCompiler:
                 processed_lines.append(f"{'    '*indent_level}{lib_var} = ctypes.CDLL('{lib_path}')")
                 continue
 
-            # --- ZARZĄDZANIE PAMIĘCIĄ (FIXED) ---
+            # --- DYNAMICZNY IMPORT <core:nazwa> ---
+            core_import_match = re.search(r'import\s+<core:([\w\.]+)>', raw_line)
+            if core_import_match:
+                lib_name = core_import_match.group(1)
+                try:
+                    self._run_pip(["install", lib_name])
+                except: pass
+                processed_lines.append(f"{'    '*indent_level}import {lib_name}")
+                continue
+
+            # --- ZARZĄDZANIE PAMIĘCIĄ ---
             if "--- manual ---" in raw_line:
                 self.manual_mode = True
-                # Inicjalizacja libc w zależności od systemu operacyjnego
                 processed_lines.append(f"{'    '*indent_level}# System Memory Management Initialization")
                 if os.name == 'nt':
                     processed_lines.append(f"{'    '*indent_level}libc = ctypes.cdll.msvcrt")
                 else:
-                    # Na Linuxie szukamy standardowej biblioteki C
                     processed_lines.append(f"{'    '*indent_level}libc = ctypes.CDLL('libc.so.6')")
                 continue
 
-            # --- SKŁADNIA NUMPY ---
-            if raw_line.startswith("matrix "):
-                raw_line = raw_line.replace("matrix ", "", 1)
+            # --- NOWE: TENSOR (ZAMIAST/OPRÓCZ MATRIX) ---
+            if raw_line.startswith("tensor ") or raw_line.startswith("matrix "):
+                raw_line = re.sub(r'^(tensor|matrix)\s+', '', raw_line)
                 if "=" in raw_line:
                     var, val = raw_line.split("=", 1)
-                    raw_line = f"{var.strip()} = {val.strip()}"
+                    raw_line = f"{var.strip()} = np.array({val.strip()})"
 
             if raw_line.startswith("vector "):
                 raw_line = raw_line.replace("vector ", "", 1)
@@ -143,7 +204,7 @@ class HackerCompiler:
                 processed_lines.append(f"{'    ' * indent_level}subprocess.run(f\"\"\"{content}\"\"\", shell=True, check=True)")
                 continue
 
-            # --- BLOKI I WCIĘCIA (NAPRAWA ELSE/EXCEPT) ---
+            # --- BLOKI I WCIĘCIA ---
             if raw_line.startswith('] except'):
                 indent_level = max(0, indent_level - 1)
                 line_content = raw_line[1:].strip().replace('[', ':')
@@ -161,8 +222,16 @@ class HackerCompiler:
                 indent_level = max(0, indent_level - 1)
                 continue
 
+            # --- OBSŁUGA KLAS (object) ---
+            if raw_line.startswith('object '):
+                raw_line = raw_line.replace('object ', 'class ', 1)
+
+            # --- NOWE: FAST FUNC (NUMBA) ---
+            if raw_line.startswith('fast func '):
+                processed_lines.append(f"{'    ' * indent_level}@numba.njit")
+                raw_line = raw_line.replace('fast func ', 'def ', 1)
+
             # Tłumaczenie słów kluczowych
-            raw_line = re.sub(r'(import\s+)?<core:([\w\.]+)>', r'import \2', raw_line)
             if raw_line.startswith('func '): raw_line = raw_line.replace('func ', 'def ', 1)
             if raw_line.startswith('log '): raw_line = f"print({raw_line[4:].strip()})"
 
@@ -200,6 +269,17 @@ codegen-units = 1
 panic = "abort"
 """
         with open(os.path.join(self.build_dir, "Cargo.toml"), "w") as f: f.write(cargo_toml)
+
+        # Skrypt budujący build.rs dla linkowania plików .a
+        if self.external_static_libs:
+            build_rs = "fn main() {\n"
+            for lib in self.external_static_libs:
+                lib_dir = os.path.dirname(lib)
+                lib_name = os.path.basename(lib).replace("lib", "").replace(".a", "")
+                build_rs += f'    println!("cargo:rustc-link-search=native={lib_dir}");\n'
+                build_rs += f'    println!("cargo:rustc-link-lib=static={lib_name}");\n'
+            build_rs += "}"
+            with open(os.path.join(self.build_dir, "build.rs"), "w") as f: f.write(build_rs)
 
     def _get_rust_bin_template(self):
         sp_path = self._get_site_packages_path()
@@ -247,19 +327,14 @@ fn main() -> PyResult<()> {{
             sys.exit(1)
 
     def run(self, input_hcs, is_lib=False):
-        # 1. Analiza i translacja
+        self.setup_workspace()
         py_code = self.translate_hcs_to_python(input_hcs)
 
-        # 2. Workspace
-        self.setup_workspace()
-
-        # 3. Zapis plików projektu
         with open(os.path.join(self.build_dir, "logic.py"), "w", encoding='utf-8') as f: f.write(py_code)
         self.prepare_cargo_project(is_lib)
         os.makedirs(self.src_dir, exist_ok=True)
         with open(os.path.join(self.src_dir, "main.rs"), "w") as f: f.write(self._get_rust_bin_template())
 
-        # 4. Kompilacja Cargo
         self.build_cargo()
 
 if __name__ == "__main__":
