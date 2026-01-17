@@ -7,7 +7,7 @@ use std::path::Path;
 #[repr(u8)]
 pub enum Opcode {
     Nop = 0,
-    PushConst = 1,     // u32 index
+    PushConst = 1, // u32 index
     LogString = 3,
     BeginFunc = 10,
     EndFunc = 11,
@@ -17,7 +17,7 @@ pub enum Opcode {
 #[derive(Debug)]
 pub struct Bytecode {
     pub code: Vec<u8>,
-    pub constants: Vec<String>, // na razie tylko stringi
+    pub constants: Vec<String>,
 }
 
 pub struct BytecodeEmitter {
@@ -57,28 +57,18 @@ impl BytecodeEmitter {
 
 pub fn write_to_file(bytecode: &Bytecode, path: &Path) -> Result<()> {
     let mut file = File::create(path).context("Cannot create output file")?;
-
-    // Prosty format:
-    // u32 code_len
-    // [code]
-    // u32 const_count
-    // [u32 len][utf8 bytes] × const_count
-
     let code_len = bytecode.code.len() as u32;
     file.write_all(&code_len.to_le_bytes())?;
-
     file.write_all(&bytecode.code)?;
 
     let const_count = bytecode.constants.len() as u32;
     file.write_all(&const_count.to_le_bytes())?;
-
     for s in &bytecode.constants {
         let bytes = s.as_bytes();
         let len = bytes.len() as u32;
         file.write_all(&len.to_le_bytes())?;
         file.write_all(bytes)?;
     }
-
     Ok(())
 }
 
@@ -87,7 +77,6 @@ pub fn pretty_print(bytecode: &Bytecode) {
     for (i, s) in bytecode.constants.iter().enumerate() {
         println!("  {:3}: {:?}", i, s);
     }
-
     println!("\nCode:");
     let mut i = 0;
     while i < bytecode.code.len() {
