@@ -1,0 +1,39 @@
+object Http
+[
+    func get(url: String, headers: Map<String,String> = {}): HttpResponse
+    [
+        native http_get(url, headers)
+    ]
+
+    func post(url: String, body: any, headers: Map<String,String> = {}): HttpResponse
+    [
+        native http_post(url, Json.stringify(body), headers.merge({"Content-Type": "application/json"}))
+    ]
+
+    func download(url: String, path: String ? = null): Bytes | String
+    [
+        let response = Http.get(url)
+        if response.status != 200
+        [
+            throw "Download failed: {response.status}"
+        ]
+
+        if path != null
+        [
+            fs.write_bytes(path, response.body_bytes)
+            return path
+        ]
+        else
+        [
+            return response.body
+        ]
+    ]
+]
+
+object HttpResponse
+[
+    let status: Int
+    let headers: Map<String, String>
+    let body: String
+    let body_bytes: Bytes
+]
