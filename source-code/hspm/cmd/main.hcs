@@ -1,112 +1,133 @@
-import <core:os>
-import <core:sys>
-import <core:urllib.request>
+--- automatic ---
+
+@ HackerScript Package Manager (HSPM) - main script
+@ Written in HackerScript
+@ Manages packages from vira, virus, core repos
+@ Commands: install <repo:pkg>, list, update, remove <pkg>
+
 import <core:json>
-import <core:toon>
-import <core:getpass>
+import <core:http>
+import <core:fs>
+import <core:os>
+import <core:cli>
 
-@ Funkcja pobierająca bazową ścieżkę
-func get_base_path()[
-    val_user = getpass.getuser()
-    return "/home/" + val_user + "/.HackerScript/libs/"
-]
+require <utils/string_utils.hcs>
 
-func install_package(pkg_name)[
-    val_base = get_base_path()
-    val_virus_path = val_base + "virus/"
-    val_vira_path = val_base + "vira/"
-
-    @ Tworzenie struktur
-    sh [
-        mkdir -p {val_virus_path}
-        mkdir -p {val_vira_path}
-    ]
-
-    log "[*] Szukanie pakietu: " + pkg_name
-
-    @ 1. PRÓBA: REPOZYTORIUM VIRUS (JSON)
-    val_url_virus = "https://raw.githubusercontent.com/HackerOS-Linux-System/HackerScript/main/repo/index.json"
-    try [
-        val_res = urllib.request.urlopen(val_url_virus).read().decode("utf-8")
-        val_data = json.loads(val_res)
-
-        if pkg_name in val_data [
-            log "[+] Znaleziono w oficjalnym repo (Virus)!"
-            val_download_url = val_data[pkg_name]["release"]
-            val_dest = val_virus_path + pkg_name + ".a"
-
-            sh [ curl -L {val_download_url} -o {val_dest} ]
-
-            log "[✔] Zainstalowano: " + val_dest
-            log "[!] Dodaj do Virus.hcl: link = '" + val_dest + "'"
-            return True
+object HSPM
+[
+    func main(args: List<String>)
+    [
+        if args.length < 2
+        [
+            log "Usage: hspm [install|list|update|remove] <args>"
+            return 1
         ]
-    ] except [ log "[?] Brak w repozytorium Virus..." ]
 
-    @ 2. PRÓBA: REPOZYTORIUM VIRA (TOON)
-    val_url_vira = "https://raw.githubusercontent.com/HackerOS-Linux-System/HackerScript/main/repo/vira-index.toon"
-    try [
-        val_res_toon = urllib.request.urlopen(val_url_vira).read().decode("utf-8")
-        val_data_vira = toon.parse(val_res_toon)
+        let command: String = args[1]
 
-        if pkg_name in val_data_vira [
-            log "[!] OSTRZEŻENIE: Biblioteka Vira jest nieweryfikowana!"
-            val_download_url = val_data_vira[pkg_name]["release"]
-            val_dest = val_vira_path + pkg_name + ".a"
-
-            sh [ curl -L {val_download_url} -o {val_dest} ]
-
-            log "[✔] Zainstalowano społecznościowy pakiet: " + val_dest
-            return True
+        match command
+        [
+            "install": install_package(args[2])
+            "list": list_packages()
+            "update": update_all()
+            "remove": remove_package(args[2])
+            default: log "Unknown command: {command}"
         ]
-    ] except [ log "[-] Pakiet nie istnieje w Vira." ]
 
-    log "[X] Nie znaleziono pakietu: " + pkg_name
+        return 0
+    ]
+
+    func install_package(spec: String)
+    [
+        @ Parse <repo:pkg>
+        let parts: List<String> = spec.split(":")
+        if parts.length != 2
+        [
+            log "Invalid spec: {spec}. Use <repo:pkg>"
+            return
+        ]
+
+        let repo: String = parts[0]
+        let pkg: String = parts[1]
+
+        @ Get repo index URL
+        let index_url: String = get_repo_index_url(repo)
+
+        @ Fetch index.json
+        let response: HttpResponse = http.get(index_url)
+        if response.status != 200
+        [
+            log "Failed to fetch index for {repo}: {response.status}"
+            return
+        ]
+
+        let index: JsonObject = json.parse(response.body)
+
+        @ Find pkg in index
+        if !index.has_key(pkg)
+        [
+            log "Package {pkg} not found in {repo}"
+            return
+        ]
+
+        let pkg_info: JsonObject = index[pkg]
+        let download_url: String = pkg_info["url"]  @ Assume .a or .o URL
+        let version: String = pkg_info["version"]
+
+        @ Download
+        let file_data: Bytes = http.download(download_url)
+
+        @ Install to ~/.HackerScript/libs/{repo}/{pkg}-{version}.a (or .o)
+        let install_dir: String = os.home_dir() + "/.HackerScript/libs/" + repo
+        fs.create_dir(install_dir, recursive: true)
+
+        let ext: String = if download_url.ends_with(".o") "o" else "a"
+        let install_path: String = install_dir + "/" + pkg + "-" + version + "." + ext
+
+        fs.write_file(install_path, file_data)
+
+        log "Installed {pkg} v{version} from {repo} to {install_path}"
+    ]
+
+    func get_repo_index_url(repo: String): String
+    [
+        match repo
+        [
+            "vira": "https://github.com/HackerOS-Linux-System/HackerScript/blob/main/repo/vira-index.json?raw=true"
+            "virus": "https://github.com/HackerOS-Linux-System/HackerScript/blob/main/repo/index.json?raw=true"
+            "core": log "Core packages are built-in"; return ""
+            default: log "Unknown repo: {repo}"; return ""
+        ]
+    ]
+
+    func list_packages()
+    [
+        let lib_dir: String = os.home_dir() + "/.HackerScript/libs/"
+        let repos: List<String> = fs.list_dirs(lib_dir)
+
+        for repo in repos
+        [
+            log "Repo: {repo}"
+            let pkgs: List<String> = fs.list_files(lib_dir + repo)
+            for pkg in pkgs
+            [
+                log "  - {pkg}"
+            ]
+        ]
+    ]
+
+    func update_all()
+    [
+        @ TODO: Check each installed pkg against index, download newer if available
+        log "Update not implemented yet"
+    ]
+
+    func remove_package(pkg: String)
+    [
+        @ TODO: Find and remove .a/.o files matching pkg
+        log "Remove not implemented yet"
+    ]
 ]
 
-func publish_vira(pkg_name, url)[
-    log "[*] Publikowanie/Aktualizacja pakietu " + pkg_name + " w Vira..."
-    val_url_index = "https://github.com/HackerOS-Linux-System/HackerScript/blob/main/repo/vira-index.toon"
-
-    @ W realnym scenariuszu wymagany byłby Token API / Auth
-    @ Tutaj symulujemy edycję formatu Toon
-    val_entry = "\n[" + pkg_name + "]\nrelease = '" + url + "'\nowner = 'user'\n"
-
-    @ Symulacja zapisu (wymagałaby Gita/API do faktycznej aktualizacji repo)
-    log "[+] Generowanie wpisu TOON:"
-    log val_entry
-
-    sh [
-        @ Wersja uproszczona: dopisywanie do lokalnej kopii przed wysyłką
-        echo {val_entry} >> local_vira_index.toon
-    ]
-    log "[✔] Wpis przygotowany do synchronizacji."
-]
-
-func remove_package(pkg_name)[
-    val_base = get_base_path()
-    sh [
-        rm -f {val_base}virus/{pkg_name}.a
-        rm -f {val_base}vira/{pkg_name}.a
-    ]
-    log "[+] Usunięto bibliotekę " + pkg_name
-]
-
-@ Główna logika
-val_args = sys.argv
-if len(val_args) < 2 [
-    log "HackerScript Package Manager (hspm)"
-    log "Użycie: hspm [install|publish|remove] <nazwa> <url_jeśli_publish>"
-] else [
-    val_cmd = val_args[1]
-
-    if val_cmd == "install" [
-        install_package(val_args[2])
-    ]
-    if val_cmd == "publish" [
-        publish_vira(val_args[2], val_args[3])
-    ]
-    if val_cmd == "remove" [
-        remove_package(val_args[2])
-    ]
-]
+@ Entry point
+cli.run(HSPM.main, os.args)
