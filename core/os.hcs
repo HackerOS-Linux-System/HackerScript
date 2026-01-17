@@ -1,0 +1,54 @@
+object Os
+[
+    func env(name: String): String ?
+    [
+        native os_getenv(name)
+    ]
+
+    func env_or(name: String, default: String): String
+    [
+        let val = Os.env(name)
+        return val ?? default
+    ]
+
+    func home_dir(): String
+    [
+        native os_home_dir()
+    ]
+
+    func current_dir(): String
+    [
+        native os_current_dir()
+    ]
+
+    func username(): String
+    [
+        native os_username()
+    ]
+
+    func hostname(): String
+    [
+        native os_hostname()
+    ]
+
+    func args(): List<String>
+    [
+        native os_args()
+    ]
+
+    func exit(code: Int = 0)
+    [
+        native os_exit(code)
+    ]
+
+    func platform(): String
+    [
+        @ zwraca: "linux", "windows", "macos", "unknown"
+        native os_platform()
+    ]
+
+    func is_windows(): Bool
+    [
+        return Os.platform() == "windows"
+    ]
+]
