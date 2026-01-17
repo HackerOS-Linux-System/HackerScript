@@ -1,0 +1,74 @@
+object Cli
+[
+    @ Prosta obsługa argumentów i opcji (inspirowane clap / docopt)
+
+    func run(entry: (List<String> → Int), args: List<String> = Os.args())
+    [
+        @ tutaj można dodać automatyczne --help, --version itp.
+        let code = entry(args)
+        Os.exit(code)
+    ]
+
+    func parse_args(args: List<String>): Map<String, any>
+    [
+        @ bardzo uproszczony parser flag
+        @ --flag=value   → "flag": "value"
+        @ --flag         → "flag": true
+        @ pozycyjne      → "_": [pozycyjne]
+
+        let result = Map.new()
+        let positional = List.new()
+
+        mut i = 0
+        while i < args.length
+        [
+            let arg = args[i]
+
+            if arg.starts_with("--")
+            [
+                let key = arg[2..].split("=")[0]
+                let value_part = arg.contains("=") ? arg.split("=")[1] : null
+
+                if value_part != null
+                [
+                    result[key] = value_part
+                ]
+                else if i + 1 < args.length && !args[i+1].starts_with("-")
+                [
+                    result[key] = args[i+1]
+                    i += 1
+                ]
+                else
+                [
+                    result[key] = true
+                ]
+            ]
+            else if arg.starts_with("-") && arg.length > 1
+            [
+                @ krótkie flagi -abc → a:true, b:true, c:true
+                for ch in arg[1..]
+                [
+                    result[ch] = true
+                ]
+            ]
+            else
+            [
+                positional.push(arg)
+            ]
+
+            i += 1
+        ]
+
+        result["_"] = positional
+        return result
+    ]
+
+    func print_help(commands: Map<String, String>)
+    [
+        log "Dostępne polecenia:"
+        for cmd, desc in commands
+        [
+            log "  {cmd.ljust(12)} {desc}"
+        ]
+    ]
+]
