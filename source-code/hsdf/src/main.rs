@@ -1,5 +1,3 @@
-// src/main.rs
-
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use miette::{Diagnostic, MietteDiagnostic, NamedSource, Report, SourceSpan};
