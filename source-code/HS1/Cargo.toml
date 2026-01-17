@@ -1,0 +1,24 @@
+[package]
+name = "hs1"
+version = "0.1.0"
+edition = "2021"
+description = "HackerScript Compiler (source → bytecode / Cranelift)"
+authors = ["HackerOS Team <hackeros068@gmail.com>"]
+license = "MPL2"
+
+[dependencies]
+pest = "2.7"
+pest_derive = "2.7"
+anyhow = "1.0"
+thiserror = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"
+cranelift-codegen = "0.107"
+cranelift-frontend = "0.107"
+cranelift-module = "0.107"
+cranelift-native = "0.107"
+target-lexicon = "0.12"
+
+[dev-dependencies]
+pretty_assertions = "1.4"
