@@ -1,6 +1,6 @@
 use anyhow::Result;
-use pest::iterators::{Pair, Pairs};
-use crate::parser::{Rule, HackerScriptParser};
+use pest::iterators::Pair;
+use crate::parser::Rule;
 use crate::bytecode::{BytecodeEmitter, Opcode};
 
 pub struct Compiler {
@@ -21,33 +21,27 @@ impl Compiler {
                     self.compile_pair(inner)?;
                 }
             }
-
             Rule::log_stmt => {
                 let mut inner = pair.into_inner();
                 let string_pair = inner.next().unwrap();
                 let s = string_pair.as_str().trim_matches('"');
                 let idx = self.emitter.add_constant(s.to_string());
-                self.emitter.emit(Opcode::PushConst(idx as u32));
+
+                self.emitter.emit(Opcode::PushConst);
+                self.emitter.emit_u32(idx as u32);
                 self.emitter.emit(Opcode::LogString);
             }
-
             Rule::func_def => {
-                // bardzo uproszczone – w realnym kompilatorze trzeba obsługiwać scope, params, itd.
                 self.emitter.emit(Opcode::BeginFunc);
-                for stmt in pair.into_inner().skip(2) { // skip "func" + name
+                // skip "func" + identifier + "(" + params? + ")"
+                for stmt in pair.into_inner().skip(2) {
                     self.compile_pair(stmt)?;
                 }
                 self.emitter.emit(Opcode::EndFunc);
             }
-
-            // ... inne reguły: object, import, require, expressions, etc.
-
-            Rule::EOI | Rule::comment | Rule::ws | Rule::newline => {
-                // ignorujemy
-            }
-
+            Rule::EOI | Rule::comment | Rule::ws | Rule::newline => {}
             other => {
-                log::warn!("Unhandled rule in compiler: {:?}", other);
+                log::warn!("Unhandled rule: {:?}", other);
             }
         }
         Ok(())
