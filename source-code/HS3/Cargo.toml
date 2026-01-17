@@ -1,0 +1,10 @@
+[package]
+name = "hs3"
+version = "0.1.0"
+edition = "2021"
+description = "HackerScript Parser and Lexer (using Pest, no AST)"
+authors = ["HackerOS Team"]
+license = "MPL2"
+[dependencies]
+pest = "2.7.5"
+pest_derive = "2.7.5"
