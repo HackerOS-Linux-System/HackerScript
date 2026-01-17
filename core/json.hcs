@@ -1,0 +1,32 @@
+import <core:string>
+
+object Json
+[
+    @ parse(string) → any
+    @ stringify(any, pretty = false) → string
+
+    func parse(input: String): any
+    [
+        @ natywna implementacja w HS2 / Cranelift
+        @ zwraca: String | Number | Bool | Null | List<any> | Map<String, any>
+        native json_parse(input)
+    ]
+
+    func stringify(value: any, pretty: Bool = false, indent: String = "  "): String
+    [
+        native json_stringify(value, pretty, indent)
+    ]
+
+    @ pomocnicze metody
+    func parse_file(path: String): any
+    [
+        let content = fs.read_text(path)
+        return Json.parse(content)
+    ]
+
+    func save_file(path: String, value: any, pretty: Bool = true)
+    [
+        let json_str = Json.stringify(value, pretty)
+        fs.write_text(path, json_str)
+    ]
+]
