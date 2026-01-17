@@ -1,0 +1,67 @@
+object Fs
+[
+    func read_text(path: String): String
+    [
+        native fs_read_text(path)
+    ]
+
+    func write_text(path: String, content: String)
+    [
+        native fs_write_text(path, content)
+    ]
+
+    func read_bytes(path: String): Bytes
+    [
+        native fs_read_bytes(path)
+    ]
+
+    func write_bytes(path: String, data: Bytes)
+    [
+        native fs_write_bytes(path, data)
+    ]
+
+    func exists(path: String): Bool
+    [
+        native fs_exists(path)
+    ]
+
+    func is_file(path: String): Bool
+    [
+        native fs_is_file(path)
+    ]
+
+    func is_dir(path: String): Bool
+    [
+        native fs_is_dir(path)
+    ]
+
+    func create_dir(path: String, recursive: Bool = false)
+    [
+        native fs_create_dir(path, recursive)
+    ]
+
+    func remove(path: String, recursive: Bool = false)
+    [
+        native fs_remove(path, recursive)
+    ]
+
+    func list_files(path: String): List<String>
+    [
+        native fs_list_files(path)
+    ]
+
+    func list_dirs(path: String): List<String>
+    [
+        native fs_list_dirs(path)
+    ]
+
+    func copy(src: String, dst: String)
+    [
+        native fs_copy(src, dst)
+    ]
+
+    func move(src: String, dst: String)
+    [
+        native fs_move(src, dst)
+    ]
+]
