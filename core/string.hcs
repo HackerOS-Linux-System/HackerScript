@@ -1,0 +1,58 @@
+object StringUtils
+[
+    func format(template: String, values: Map<String, any>): String
+    [
+        @ "Witaj {name}, masz {age} lat" → format(..., {name: "Kac", age: 25})
+        native string_format(template, values)
+    ]
+
+    func split(self: String, sep: String = " "): List<String>
+    [
+        native string_split(self, sep)
+    ]
+
+    func join(self: List<String>, sep: String = ""): String
+    [
+        native string_join(self, sep)
+    ]
+
+    func trim(self: String): String
+    [
+        native string_trim(self)
+    ]
+
+    func starts_with(self: String, prefix: String): Bool
+    [
+        native string_starts_with(self, prefix)
+    ]
+
+    func ends_with(self: String, suffix: String): Bool
+    [
+        native string_ends_with(self, suffix)
+    ]
+
+    func contains(self: String, substr: String): Bool
+    [
+        native string_contains(self, substr)
+    ]
+
+    func replace(self: String, from: String, to: String): String
+    [
+        native string_replace(self, from, to)
+    ]
+
+    func to_upper(self: String): String
+    [
+        native string_to_upper(self)
+    ]
+
+    func to_lower(self: String): String
+    [
+        native string_to_lower(self)
+    ]
+
+    func length(self: String): Int
+    [
+        native string_length(self)
+    ]
+]
