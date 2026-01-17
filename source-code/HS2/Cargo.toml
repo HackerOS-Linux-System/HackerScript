@@ -1,0 +1,19 @@
+[package]
+name = "hs2"
+version = "0.1.0"
+edition = "2021"
+description = "HackerScript Runtime (Bytecode VM using Cranelift for JIT)"
+authors = ["HackerOS Team <hackeros068@gmail.com>"]
+license = "MPL2"
+
+[dependencies]
+cranelift-codegen = "0.107.0"
+cranelift-module = "0.107.0"
+cranelift-frontend = "0.107.0"
+cranelift-native = "0.107.0"
+cranelift-reader = "0.107.0"
+cranelift-jit = "0.107.0"
+target-lexicon = "0.12.14"
+anyhow = "1.0.79"
+log = "0.4.20"
+env_logger = "0.10.1"
