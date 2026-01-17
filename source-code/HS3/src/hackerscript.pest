@@ -1,0 +1,25 @@
+// hackerscript.pest
+// hackerscript.pest (place this file in the project root or src; Pest will load it relative to the crate)
+program = _{ SOI ~ memory_mode? ~ (stmt)* ~ EOI }
+memory_mode = { "---" ~ ws* ~ ("auto" | "automatic" | "manual") ~ ws* ~ "---" }
+stmt = { (import_stmt | require_stmt | func_def | object_def | log_stmt | comment) ~ (newline | ws)* }
+import_stmt = { "import" ~ ws+ ~ "<" ~ repo ~ ":" ~ lib ~ ">" }
+repo = { ASCII_ALPHA+ }
+lib = { ASCII_ALPHA+ }
+require_stmt = { "require" ~ ws+ ~ "<" ~ path ~ ">" }
+path = { (ASCII_ALPHANUMERIC | "/" | "." | "-")+ }
+func_def = { "func" ~ ws+ ~ identifier ~ ws* ~ "(" ~ ws* ~ params? ~ ws* ~ ")" ~ ws* ~ block }
+params = { identifier ~ (ws* ~ "," ~ ws* ~ identifier)* }
+object_def = { "object" ~ ws+ ~ identifier ~ ws* ~ block }
+log_stmt = { "log" ~ ws+ ~ string }
+block = { "[" ~ (stmt)* ~ "]" } // Blocks use [ ] as delimiters, with optional YAML-like indentation inside (but not enforced in PEG for simplicity)
+string = { "\"" ~ ( !("\"" | "\n") ~ ANY | "\\\"" )* ~ "\"" }
+comment = _{ "@" ~ (!newline ~ ANY)* ~ newline? } // Comments start with @ and go to end of line
+identifier = { (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+ws = _{ " " | "\t" }
+newline = { "\n" | "\r\n" }
+// For YAML-like elements (e.g., inside blocks, key: value pairs if needed; extend as required)
+key_value = { identifier ~ ws* ~ ":" ~ ws* ~ (string | identifier | number) }
+number = { "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
+// Note: This grammar is basic and YAML-inspired where possible (e.g., : for key-value), but indent-sensitivity is not fully enforced in PEG for ease.
+// Indents can be handled by ws rules or post-processing if needed. Extend rules for more features like expressions, loops, etc.
