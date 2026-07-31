@@ -1,0 +1,5 @@
+"""hackerc - transpilator jezyka HackerScript (.hsc) do Pythona."""
+
+__version__ = "0.0.1"
+
+from .transpiler import transpile_source, transpile_file, TranspileError  # noqa: F401
