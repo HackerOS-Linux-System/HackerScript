@@ -1,17 +1,3 @@
-"""
-hackerc.lexer
-=============
-Tokenizer dla jezyka HackerScript (.hsc).
-
-Odpowiada za usuwanie komentarzy oraz podzial zrodla na tokeny.
-Style komentarzy zdefiniowane w spec HackerScript:
-
-    !            komentarz jednoliniowy
-    != tresc =!  komentarz wieloliniowy
-    !! tresc     komentarz dokumentacyjny (jednoliniowy, zachowywany
-                 jako docstring w wygenerowanym Pythonie)
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -42,7 +28,7 @@ KEYWORDS = {
     "fun", "let", "const", "if", "else", "elif", "while", "for", "in",
     "return", "end", "get", "import", "using", "direct", "manual",
     "true", "false", "null", "struct", "enum", "match", "break",
-    "continue", "gc", "pub", "self", "and", "or", "not",
+    "continue", "gc", "pub", "self", "and", "or", "not", "native",
 }
 
 _MULTI_OPS = [
@@ -57,15 +43,18 @@ class Token:
     value: str
     line: int
     col: int
+    tight: bool = False  # True = brak bialych znakow przed tym tokenem (uzywane dla '[' -> indeksowanie vs blok)
 
     def __repr__(self) -> str:  # pragma: no cover - debug helper
         return f"Token({self.kind.name}, {self.value!r}, L{self.line})"
 
 
 class LexError(Exception):
-    def __init__(self, message: str, line: int):
+    def __init__(self, message: str, line: int, col: int = 1):
         super().__init__(f"[hackerc] blad leksykalny (linia {line}): {message}")
         self.line = line
+        self.col = col
+        self.message = message
 
 
 def strip_comments(source: str) -> str:
@@ -98,7 +87,7 @@ def tokenize(source: str) -> list[Token]:
     source = strip_comments(source)
     tokens: list[Token] = []
     line = 1
-    col = 1
+    line_start = 0  # indeks w `source` gdzie zaczyna sie biezaca linia
     i = 0
     n = len(source)
 
@@ -107,18 +96,18 @@ def tokenize(source: str) -> list[Token]:
         return source[j] if j < n else ""
 
     while i < n:
+        col = i - line_start + 1
         c = source[i]
 
         if c == "\n":
             tokens.append(Token(TokKind.NEWLINE, "\n", line, col))
             line += 1
-            col = 1
+            line_start = i + 1
             i += 1
             continue
 
         if c in " \t\r":
             i += 1
-            col += 1
             continue
 
         # !! doc comment (do konca linii)
@@ -154,11 +143,11 @@ def tokenize(source: str) -> list[Token]:
                     j += 2
                     continue
                 if source[j] == "\n":
-                    raise LexError("niezamkniety string", line)
+                    raise LexError("niezamkniety string", line, col)
                 buf.append(source[j])
                 j += 1
             if j >= n:
-                raise LexError("niezamkniety string", line)
+                raise LexError("niezamkniety string", line, col)
             tokens.append(Token(TokKind.STRING, "".join(buf), line, col))
             i = j + 1
             continue
@@ -182,7 +171,8 @@ def tokenize(source: str) -> list[Token]:
             continue
 
         if c == "[":
-            tokens.append(Token(TokKind.OPEN, "[", line, col)); i += 1; continue
+            tight = i > 0 and source[i - 1] not in " \t\r\n"
+            tokens.append(Token(TokKind.OPEN, "[", line, col, tight=tight)); i += 1; continue
         if c == "]":
             tokens.append(Token(TokKind.CLOSE, "]", line, col)); i += 1; continue
         if c == "(":
@@ -196,10 +186,6 @@ def tokenize(source: str) -> list[Token]:
             tokens.append(Token(TokKind.DCOLON, "::", line, col)); i += 2; continue
         if c == ":":
             tokens.append(Token(TokKind.COLON, ":", line, col)); i += 1; continue
-        if c == "<":
-            tokens.append(Token(TokKind.LANGLE, "<", line, col)); i += 1; continue
-        if c == ">":
-            tokens.append(Token(TokKind.RANGLE, ">", line, col)); i += 1; continue
 
         matched = False
         for op in _MULTI_OPS:
@@ -211,10 +197,18 @@ def tokenize(source: str) -> list[Token]:
         if matched:
             continue
 
+        # '<' i '>' pojedyncze - jako LANGLE/RANGLE (uzywane zarowno jako
+        # nawiasy generic/get<...> jak i operatory porownania w parserze).
+        # Warianty dwuznakowe (<=, >=, ->) sa juz obsluzone powyzej przez _MULTI_OPS.
+        if c == "<":
+            tokens.append(Token(TokKind.LANGLE, "<", line, col)); i += 1; continue
+        if c == ">":
+            tokens.append(Token(TokKind.RANGLE, ">", line, col)); i += 1; continue
+
         if c in _SINGLE_OPS:
             tokens.append(Token(TokKind.OP, c, line, col)); i += 1; continue
 
-        raise LexError(f"nieoczekiwany znak {c!r}", line)
+        raise LexError(f"nieoczekiwany znak {c!r}", line, col)
 
-    tokens.append(Token(TokKind.EOF, "", line, col))
+    tokens.append(Token(TokKind.EOF, "", line, i - line_start + 1))
     return tokens
