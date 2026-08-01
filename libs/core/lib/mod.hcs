@@ -1,0 +1,12 @@
+!! core - punkt wejscia pakietu core.
+!!
+!! UWAGA: HackerScript (bootstrap 0.0.1) nie ma jeszcze prawdziwego systemu
+!! modulow miedzy plikami .hcs (patrz docs/ROADMAP.md - "system modulow").
+!! Do tego czasu kazdy plik w core/lib/**/*.hcs (np. memory/arena.hcs) jest
+!! samodzielny i transpilowany osobno. Ten plik jest tylko deklaratywnym
+!! punktem wejscia wymaganym przez [build] w Virus.hk.
+
+fun core_placeholder() [
+    log("core: patrz core/lib/memory/arena.hcs dla przykladu alokatora arenowego")
+    end
+]
