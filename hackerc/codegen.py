@@ -1,16 +1,7 @@
-"""
-hackerc.codegen
-===============
-Zamienia AST (ast_nodes.Program) na czytelny kod Python.
-
-Zasada: hackerc TYLKO tlumaczy - nie kompiluje. Wygenerowany plik .py
-trafia do cache/source/, skad virus (lub docelowo kompilator Python->
-binarka) buduje finalna binarke.
-"""
-
 from __future__ import annotations
 
 from . import ast_nodes as A
+from .typeinfer import Signatures, TypeEnv, infer_expr_type
 
 TYPE_MAP = {
     "Int": "int",
@@ -34,11 +25,15 @@ def py_type(t: A.TypeRef | None) -> str:
 
 
 class CodeGen:
-    def __init__(self, direct_blocks: dict[int, str] | None = None):
+    def __init__(self, direct_blocks: dict[int, str] | None = None, native_package: str = "hackerscript"):
         self.lines: list[str] = []
         self.indent = 0
         self.direct_blocks = direct_blocks or {}
         self.needs_dataclass = False
+        self.native_package = native_package
+        self.natives: list[A.FunDecl] = []
+        self.sigs: Signatures | None = None
+        self.env: TypeEnv | None = None
 
     def emit(self, text: str = ""):
         if text == "":
@@ -52,7 +47,7 @@ class CodeGen:
             "# -*- coding: utf-8 -*-",
             "#",
             "# Plik wygenerowany automatycznie przez hackerc (transpilator HackerScript).",
-            "# NIE EDYTUJ RECZNIE - edytuj zrodlo .hsc w cmd/ i uruchom `virus build` ponownie.",
+            "# NIE EDYTUJ RECZNIE - edytuj zrodlo .hcs w cmd/ i uruchom `virus build` ponownie.",
             "#",
             "from __future__ import annotations",
             "",
@@ -60,11 +55,21 @@ class CodeGen:
         body_lines: list[str] = []
         has_main = any(isinstance(s, A.FunDecl) and s.name == "main" for s in prog.body)
 
+        self.sigs = Signatures(prog)
+        self.env = TypeEnv(self.sigs)  # srodowisko globalne (module-level let)
+
         for stmt in prog.body:
             self.gen_stmt(stmt)
 
         if self.needs_dataclass:
             header.insert(len(header) - 1, "from dataclasses import dataclass, field")
+        if self.natives:
+            native_names = ", ".join(sorted(fn.name for fn in self.natives))
+            header.insert(
+                len(header) - 1,
+                f"from {self.native_package}_native import {native_names}  "
+                f"# native fun -> Rust/PyO3, patrz cache/native/",
+            )
 
         out = header + self.lines
         if has_main:
@@ -92,7 +97,14 @@ class CodeGen:
             self.emit(f"# gc:use::{node.mode}  (pragma zarzadzania pamiecia - patrz libs/core)")
             return
         if isinstance(node, A.LetStmt):
-            hint = f": {py_type(node.type_)}" if node.type_ else ""
+            type_ = node.type_
+            if type_ is None and node.value is not None:
+                # REALNA inferencja (hackerc.typeinfer), nie poleganie na
+                # dynamicznym typowaniu Pythona - wynik trafia jako jawna
+                # adnotacja do wygenerowanego kodu.
+                type_ = infer_expr_type(node.value, self.env)
+            self.env.declare(node.name, type_)
+            hint = f": {py_type(type_)}" if type_ else ""
             value = self.gen_expr(node.value) if node.value is not None else "None"
             tag = "  # const" if node.is_const else ""
             self.emit(f"{node.name}{hint} = {value}{tag}")
@@ -147,6 +159,16 @@ class CodeGen:
             if isinstance(e, A.StringLit) and getattr(e, "_is_doc", False):
                 self.emit(f'"""{e.value}"""')
                 return
+            if (
+                isinstance(e, A.Call)
+                and isinstance(e.callee, A.Ident)
+                and e.callee.name == "__direct__"
+            ):
+                idx = int(e.args[0].value)
+                raw = self.direct_blocks.get(idx, "")
+                for line in (raw.splitlines() or [""]):
+                    self.emit(line)
+                return
             self.emit(self.gen_expr(e))
             return
         raise NotImplementedError(f"nieobslugiwany wezel: {node!r}")
@@ -154,31 +176,62 @@ class CodeGen:
     def gen_get_import(self, node: A.GetImportStmt):
         src = node.source
         name = node.name
-        ver_comment = f"  # wersja: {node.version}" if node.version else ""
-        if src in ("pypi", "std"):
-            # najprostszy przypadek: `import name`
-            self.emit(f"import {name}{ver_comment}")
-        elif src == "crates":
+        ver_comment = f"  # wersja: {node.version}" if node.version and src in ("pypi", "crates") else ""
+
+        if src in ("std", "core"):
+            # Nazwa musi byc zgodna 1:1 z hackerc.project.flat_module_name -
+            # to jest cala "umowa" systemu modulow miedzy plikami .hcs:
+            # `get <core:memory::arena>` zawsze odpowiada plikowi
+            # libs/core/lib/memory/arena.hcs, transpilowanemu przez
+            # hackerc.project do pliku o DOKLADNIE tej samej splaszczonej
+            # nazwie w tym samym katalogu wyjsciowym. Patrz docs/SYNTAX.md.
+            from .project import flat_module_name
+
+            module = flat_module_name(src, name, node.version)
+            if node.details:
+                self.emit(f"from {module} import {', '.join(node.details)}")
+            else:
+                self.emit(f"import {module}")
+            return
+
+        if src == "crates":
             self.emit(
                 f"# get <crates:{name}{'::' + node.version if node.version else ''}> "
-                f"-> natywny modul Rust (linkowany statycznie przez virus),"
+                f"-> natywny modul Rust (linkowany statycznie przez virus)"
             )
-            self.emit(f"import {name}_native as {name}  # wygenerowany wrapper (patrz virus/)")
-        elif src == "core":
-            self.emit(f"from hackerscript.core import {name}")
-        else:
-            self.emit(f"# get <{src}:{name}> - nieznane zrodlo, pomijam import{ver_comment}")
+            if node.details:
+                self.emit(f"from {name}_native import {', '.join(node.details)}{ver_comment}")
+            else:
+                self.emit(f"import {name}_native as {name}{ver_comment}")
+            return
+
+        if src == "pypi":
+            if node.details:
+                self.emit(f"from {name} import {', '.join(node.details)}{ver_comment}")
+            else:
+                self.emit(f"import {name}{ver_comment}")
+            return
+
+        self.emit(f"# get <{src}:{name}> - nieznane zrodlo, pomijam import{ver_comment}")
 
     def gen_fun(self, node: A.FunDecl):
+        if node.is_native:
+            self.natives.append(node)
+            self.emit(f"# fun {node.name}(...) -> native (Rust/PyO3) - patrz cache/native/src/lib.rs")
+            return
         params = []
+        fn_env = TypeEnv(self.sigs)
         for p in node.params:
             hint = f": {py_type(p.type_)}" if p.type_ else ""
             default = f" = {self.gen_expr(p.default)}" if p.default is not None else ""
             params.append(f"{p.name}{hint}{default}")
+            fn_env.declare(p.name, p.type_)
         ret = f" -> {py_type(node.ret_type)}" if node.ret_type else ""
         vis = "" if node.is_pub or True else ""  # brak realnej roznicy w Pythonie na tym etapie
         self.emit(f"def {node.name}({', '.join(params)}){ret}:")
+        prev_env, self.env = self.env, fn_env
         self.gen_block(node.body)
+        self.env = prev_env
         self.emit("")
 
     def gen_struct(self, node: A.StructDecl):
@@ -222,28 +275,19 @@ class CodeGen:
             return f"({self.gen_expr(node.left)} {op} {self.gen_expr(node.right)})"
         if isinstance(node, A.Attr):
             return f"{self.gen_expr(node.target)}.{node.name}"
+        if isinstance(node, A.Index):
+            return f"{self.gen_expr(node.target)}[{self.gen_expr(node.index)}]"
         if isinstance(node, A.Call):
             callee = node.callee
             if isinstance(callee, A.Ident) and callee.name == "log":
                 args = ", ".join(self.gen_expr(a) for a in node.args)
                 return f"print({args})"
-            if isinstance(callee, A.Ident) and callee.name == "__direct__":
-                idx = int(node.args[0].value)
-                raw = self.direct_blocks.get(idx, "")
-                # wstawiamy surowy kod pythona jako wielolinijkowy blok
-                return "\n".join(("    " * self.indent) if i > 0 else "" for i, _ in enumerate([0])) + self._inline_direct(raw)
             args = ", ".join(self.gen_expr(a) for a in node.args)
             return f"{self.gen_expr(callee)}({args})"
         raise NotImplementedError(f"nieobslugiwany wezel wyrazenia: {node!r}")
 
-    def _inline_direct(self, raw: str) -> str:
-        # Zwraca pierwsza linie; reszte linii dopisujemy bezposrednio do self.lines
-        raw_lines = raw.splitlines() or [""]
-        first, rest = raw_lines[0], raw_lines[1:]
-        for r in rest:
-            self.lines.append("    " * self.indent + r)
-        return first
 
-
-def generate(prog: A.Program, direct_blocks: dict[int, str] | None = None) -> str:
-    return CodeGen(direct_blocks=direct_blocks).gen_program(prog)
+def generate(prog: A.Program, direct_blocks: dict[int, str] | None = None, native_package: str = "hackerscript"):
+    gen = CodeGen(direct_blocks=direct_blocks, native_package=native_package)
+    python_code = gen.gen_program(prog)
+    return python_code, gen.natives
