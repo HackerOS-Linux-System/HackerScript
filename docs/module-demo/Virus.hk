@@ -1,0 +1,9 @@
+[package]
+name = "module-demo"
+version = "0.0.1"
+using = "1.2"
+edition = "2026"
+description = "Przyklad importu modulu z libs/core przez system modulow HackerScript."
+
+[build]
+entry = "cmd/main.hcs"
