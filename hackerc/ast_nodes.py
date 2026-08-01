@@ -1,11 +1,3 @@
-"""
-hackerc.ast_nodes
-=================
-Proste, plaskie definicje wezlow AST (dataclasses) dla HackerScript.
-Celowo trzymane bez zbednej abstrakcji - hackerc na tym etapie (bootstrap
-0.0.1) ma byc czytelny i latwy do rozbudowy, a nie "enterprise".
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -119,6 +111,7 @@ class FunDecl(Node):
     ret_type: Optional[TypeRef] = None
     body: list = field(default_factory=list)
     is_pub: bool = False
+    is_native: bool = False
 
 
 @dataclass
