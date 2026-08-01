@@ -1,0 +1,12 @@
+! Przyklad systemu modulow: import prawdziwego kodu z libs/core.
+using <1.2>
+
+get <core:memory::arena> import <arena_new::arena_alloc::arena_get>
+
+fun main() [
+    let a = arena_new(4)
+    let i1 = arena_alloc(a, "hello")
+    let i2 = arena_alloc(a, 42)
+    log(arena_get(a, i1), arena_get(a, i2))
+    end
+]
