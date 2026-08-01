@@ -1,0 +1,39 @@
+
+! Przykladowy program HackerScript pokazujacy podstawowa skladnie.
+using <1.2>
+
+!! Zwraca sume dwoch liczb calkowitych.
+fun add(a: Int, b: Int) -> Int [
+    end a + b
+]
+
+fun fib(n: Int) -> Int [
+    if n <= 1 [
+        end n
+    ]
+    end fib(n - 1) + fib(n - 2)
+]
+
+fun main() [
+    let name = "HackerScript"
+    log("Hello,", name, "!")
+
+    let suma = add(2, 3)
+    log("2 + 3 =", suma)
+
+    let i = 0
+    while i < 5 [
+        log("fib(", i, ") =", fib(i))
+        i = i + 1
+    ]
+
+    for jezyk in ["Python", "Rust", "HackerScript"] [
+        if jezyk == "HackerScript" [
+            log(jezyk, "- to my!")
+        ] else [
+            log(jezyk, "- inspiracja")
+        ]
+    ]
+
+    end
+]
