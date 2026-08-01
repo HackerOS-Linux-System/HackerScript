@@ -1,0 +1,34 @@
+[package]
+name = "virus"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Manager pakietow i narzedzie budowania dla HackerScript (odpowiednik cargo)."
+repository.workspace = true
+
+[[bin]]
+name = "virus"
+path = "src/main.rs"
+
+[dependencies]
+# Parser Virus.hk - patrz uwaga w ../Cargo.toml: docelowo `hk-parser = "0.3.1"`
+# z crates.io, na razie path-dependency do lokalnego crate w tym repo.
+hk-parser = { path = "../hk-parser", version = "0.3.1" }
+
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+indicatif = "0.17"
+console = "0.15"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
+flate2 = "1"
+tar = "0.4"
+dirs = "5"
+walkdir = "2"
+which = "6"
+zip = "1"
+sha2 = "0.10"
