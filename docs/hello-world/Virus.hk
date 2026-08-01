@@ -1,0 +1,13 @@
+[package]
+name = "hello-world"
+version = "0.0.1"
+using = "1.2"
+edition = "2026"
+authors = ["Twoje Imie"]
+description = "Przykladowy projekt HackerScript pokazujacy podstawowa skladnie."
+
+[dependencies]
+# "pypi:rich" = "*"
+
+[build]
+entry = "cmd/main.hcs"
