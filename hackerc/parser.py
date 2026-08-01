@@ -1,12 +1,3 @@
-"""
-hackerc.parser
-==============
-Recursive-descent parser: tokeny -> AST (ast_nodes.Program).
-
-Gramatyka jest celowo prosta (bootstrap 0.0.1) - patrz docs/SYNTAX.md
-w repo HackerScript po pelny opis skladni docelowej.
-"""
-
 from __future__ import annotations
 
 from .lexer import Token, TokKind, tokenize
@@ -14,9 +5,11 @@ from . import ast_nodes as A
 
 
 class ParseError(Exception):
-    def __init__(self, message: str, line: int):
+    def __init__(self, message: str, line: int, col: int = 1):
         super().__init__(f"[hackerc] blad skladni (linia {line}): {message}")
         self.line = line
+        self.col = col
+        self.message = message
 
 
 _ASSIGN_OPS = {"=", "+=", "-=", "*=", "/="}
@@ -58,7 +51,7 @@ class Parser:
         if not self.check(kind, value):
             t = self.cur()
             expected = value if value else kind.name
-            raise ParseError(f"oczekiwano {expected!r}, otrzymano {t.value!r}", t.line)
+            raise ParseError(f"oczekiwano {expected!r}, otrzymano {t.value!r}", t.line, t.col)
         return self.advance()
 
     def skip_newlines(self):
@@ -86,7 +79,7 @@ class Parser:
         stmts = []
         while not self.check(TokKind.CLOSE):
             if self.at_end():
-                raise ParseError("nieoczekiwany koniec pliku wewnatrz bloku '[' ... ']'", self.cur().line)
+                raise ParseError("nieoczekiwany koniec pliku wewnatrz bloku '[' ... ']'", self.cur().line, self.cur().col)
             stmts.append(self.parse_statement())
             self.skip_newlines()
         self.expect(TokKind.CLOSE)
@@ -97,7 +90,9 @@ class Parser:
 
         if t.kind == TokKind.DOC_COMMENT:
             self.advance()
-            return A.ExprStmt(expr=A.StringLit(value=t.value, line=t.line), line=t.line)
+            lit = A.StringLit(value=t.value, line=t.line)
+            lit._is_doc = True
+            return A.ExprStmt(expr=lit, line=t.line)
 
         if t.kind == TokKind.KEYWORD:
             kw = t.value
@@ -112,6 +107,13 @@ class Parser:
                 inner = self.parse_statement()
                 if isinstance(inner, A.FunDecl):
                     inner.is_pub = True
+                return inner
+            if kw == "native":
+                self.advance()
+                inner = self.parse_statement()
+                if not isinstance(inner, A.FunDecl):
+                    raise ParseError("'native' moze poprzedzac tylko 'fun'", t.line, t.col)
+                inner.is_native = True
                 return inner
             if kw == "fun":
                 return self.parse_fun()
@@ -380,11 +382,19 @@ class Parser:
                     if not self.match(TokKind.COMMA):
                         break
                 self.expect(TokKind.RPAREN)
-                expr = A.Call(callee=expr, args=args)
+                expr = A.Call(callee=expr, args=args, line=getattr(expr, "line", 0))
             elif self.check(TokKind.OP) and self.cur().value == ".":
                 self.advance()
                 name = self.expect(TokKind.IDENT).value
                 expr = A.Attr(target=expr, name=name)
+            elif self.check(TokKind.OPEN) and self.cur().tight:
+                # x[i] - dozwolone TYLKO bez spacji przed '['. Z spacja ("if x [")
+                # to zawsze otwarcie bloku, nigdy indeksowanie - to rozstrzyga
+                # sam lekser (Token.tight), wiec tu nie ma juz niejednoznacznosci.
+                self.advance()
+                index = self.parse_expr()
+                self.expect(TokKind.CLOSE)
+                expr = A.Index(target=expr, index=index)
             else:
                 break
         return expr
@@ -427,7 +437,7 @@ class Parser:
                 self.skip_newlines()
             self.expect(TokKind.CLOSE)
             return A.ListLit(items=items, line=t.line)
-        raise ParseError(f"nieoczekiwany token {t.value!r}", t.line)
+        raise ParseError(f"nieoczekiwany token {t.value!r}", t.line, t.col)
 
 
 def parse(source: str) -> A.Program:
