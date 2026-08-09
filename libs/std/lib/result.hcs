@@ -1,0 +1,59 @@
+fun unwrap_or<T, E>(r: Result<T, E>, domyslna: T) -> T [
+    match r [
+        Ok(v) -> [
+            end v
+        ]
+        Err(_e) -> [
+            end domyslna
+        ]
+    ]
+]
+
+!! Jak `unwrap_or`, ale dla `Option<T>`.
+fun unwrap_or_default<T>(o: Option<T>, domyslna: T) -> T [
+    match o [
+        Some(v) -> [
+            end v
+        ]
+        None -> [
+            end domyslna
+        ]
+    ]
+]
+
+!! Czy `r` to `Ok(...)` - bez wydobywania wartosci ani rozbijania przez
+!! `match`, gdy interesuje nas tylko sam fakt sukcesu/porazki.
+fun is_ok<T, E>(r: Result<T, E>) -> Bool [
+    match r [
+        Ok(_v) -> [
+            end true
+        ]
+        Err(_e) -> [
+            end false
+        ]
+    ]
+]
+
+!! Czy `r` to `Err(...)`.
+fun is_err<T, E>(r: Result<T, E>) -> Bool [
+    match r [
+        Ok(_v) -> [
+            end false
+        ]
+        Err(_e) -> [
+            end true
+        ]
+    ]
+]
+
+!! Czy `o` to `Some(...)`.
+fun is_some<T>(o: Option<T>) -> Bool [
+    match o [
+        Some(_v) -> [
+            end true
+        ]
+        None -> [
+            end false
+        ]
+    ]
+]
