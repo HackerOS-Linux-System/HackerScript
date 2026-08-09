@@ -51,8 +51,16 @@ impl CacheDirs {
     }
 
     /// Sciezka gdzie powinien wladowac sie pobrany `hackerc` dla danej wersji.
+    /// Na Windows binarka ma rozszerzenie `.exe` - bez tego `Command::new()`
+    /// nie znajdzie pliku mimo poprawnego pobrania (patrz hackerc_bridge.rs,
+    /// ktore juz poprawnie rozroznia platformy przy pobieraniu).
     pub fn hackerc_binary(&self, version: &str) -> PathBuf {
-        self.env.join(format!("hackerc-{version}")).join("hackerc")
+        let name = if cfg!(target_os = "windows") {
+            "hackerc.exe"
+        } else {
+            "hackerc"
+        };
+        self.env.join(format!("hackerc-{version}")).join(name)
     }
 }
 
