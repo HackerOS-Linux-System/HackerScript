@@ -1,0 +1,45 @@
+fun byte_histogram(data: List<Int>) -> List<Int> [
+    let counts = []
+    let i = 0
+    while i < 256 [
+        counts = counts + [0]
+        i = i + 1
+    ]
+    let j = 0
+    while j < data.len() [
+        let b = data[j]
+        counts[b] = counts[b] + 1
+        j = j + 1
+    ]
+    end counts
+]
+
+!! Entropia Shannona w bitach/bajt (0.0 = calkowicie przewidywalne dane,
+!! 8.0 = idealnie losowe bajty - typowe dla szyfrowania/kompresji).
+fun shannon_entropy(data: List<Int>) -> Float [
+    let n = data.len()
+    manual [
+        if n == 0 [
+            log("shannon_entropy: pusty bufor, entropia niezdefiniowana - zwracam 0.0")
+        ]
+    ]
+    let counts = byte_histogram(data)
+    let total = n as Float
+    let entropy = 0.0
+    let k = 0
+    while k < 256 [
+        let count = counts[k]
+        if count > 0 [
+            let p = (count as Float) / total
+            entropy = entropy - (p * p.log2())
+        ]
+        k = k + 1
+    ]
+    end entropy
+]
+
+!! Prosty prog decyzyjny: czy dane "wygladaja" na spakowane/zaszyfrowane
+!! (entropia powyzej progu, domyslnie sugerowany 7.2 - patrz wywolujacy).
+fun looks_encrypted(data: List<Int>, threshold: Float) -> Bool [
+    end shannon_entropy(data) >= threshold
+]
