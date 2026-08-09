@@ -14,6 +14,16 @@ class Formatter:
     def emit(self, text: str = ""):
         self.lines.append(("    " * self.indent + text) if text else "")
 
+    def fmt_type(self, type_: A.TypeRef) -> str:
+        """Renderuje TypeRef WLACZAJAC argument generyczny - `type_.name`
+        samo w sobie gubi `<Int>` w `List<Int>` (bug: formater uzywal
+        golego `.name` w kilku miejscach, ignorujac `.generic`)."""
+        if type_.generic is not None and type_.generic2 is not None:
+            return f"{type_.name}<{self.fmt_type(type_.generic)}, {self.fmt_type(type_.generic2)}>"
+        if type_.generic is not None:
+            return f"{type_.name}<{self.fmt_type(type_.generic)}>"
+        return type_.name
+
     def format_program(self, prog: A.Program) -> str:
         for i, stmt in enumerate(prog.body):
             if i > 0 and isinstance(stmt, A.FunDecl):
@@ -33,6 +43,8 @@ class Formatter:
         self.indent -= 1
 
     def fmt_stmt(self, node):
+        for comment in getattr(node, "_leading_comments", None) or []:
+            self.emit(f"! {comment}" if comment else "!")
         if isinstance(node, A.UsingStmt):
             self.emit(f"using <{node.version}>")
             return
@@ -50,7 +62,7 @@ class Formatter:
             return
         if isinstance(node, A.LetStmt):
             kw = "const" if node.is_const else "let"
-            hint = f": {node.type_.name}" if node.type_ else ""
+            hint = f": {self.fmt_type(node.type_)}" if node.type_ else ""
             value = f" = {self.fmt_expr(node.value)}" if node.value is not None else ""
             self.emit(f"{kw} {node.name}{hint}{value}")
             return
@@ -59,6 +71,14 @@ class Formatter:
             return
         if isinstance(node, A.FunDecl):
             self.fmt_fun(node)
+            return
+        if isinstance(node, A.ExternFunDecl):
+            params = []
+            for p in node.params:
+                hint = f": {self.fmt_type(p.type_)}" if p.type_ else ""
+                params.append(f"{p.name}{hint}")
+            ret = f" -> {self.fmt_type(node.ret_type)}" if node.ret_type else ""
+            self.emit(f'extern "{node.lib}" fun {node.name}({", ".join(params)}){ret}')
             return
         if isinstance(node, A.IfStmt):
             self.emit(f"if {self.fmt_expr(node.cond)} [")
@@ -96,12 +116,51 @@ class Formatter:
             self.emit("]")
             return
         if isinstance(node, A.StructDecl):
-            self.emit(f"struct {node.name} [")
+            gen_head = f"<{', '.join(node.type_params)}>" if node.type_params else ""
+            self.emit(f"struct {node.name}{gen_head} [")
             self.indent += 1
             for i, f in enumerate(node.fields):
                 comma = "," if i < len(node.fields) - 1 else ""
-                type_name = f.type_.name if f.type_ else "Any"
+                type_name = self.fmt_type(f.type_) if f.type_ else "Any"
                 self.emit(f"{f.name}: {type_name}{comma}")
+            self.indent -= 1
+            self.emit("]")
+            return
+        if isinstance(node, A.EnumDecl):
+            gen_head = f"<{', '.join(node.type_params)}>" if node.type_params else ""
+            self.emit(f"enum {node.name}{gen_head} [")
+            self.indent += 1
+            for i, v in enumerate(node.variants):
+                comma = "," if i < len(node.variants) - 1 else ""
+                if v.fields:
+                    args = ", ".join(self.fmt_type(t) for t in v.fields)
+                    self.emit(f"{v.name}({args}){comma}")
+                else:
+                    self.emit(f"{v.name}{comma}")
+            self.indent -= 1
+            self.emit("]")
+            return
+        if isinstance(node, A.ImplDecl):
+            gen_head = f"<{', '.join(node.type_params)}>" if node.type_params else ""
+            self.emit(f"impl {node.struct_name}{gen_head} [")
+            self.indent += 1
+            for i, m in enumerate(node.methods):
+                if i > 0:
+                    self.emit()
+                self.fmt_fun(m)
+            self.indent -= 1
+            self.emit("]")
+            return
+        if isinstance(node, A.MatchStmt):
+            self.emit(f"match {self.fmt_expr(node.subject)} [")
+            self.indent += 1
+            for arm in node.arms:
+                head = arm.variant
+                if arm.binds:
+                    head += "(" + ", ".join(arm.binds) + ")"
+                self.emit(f"{head} -> [")
+                self.fmt_block(arm.body)
+                self.emit("]")
             self.indent -= 1
             self.emit("]")
             return
@@ -129,14 +188,17 @@ class Formatter:
         raise NotImplementedError(f"formatter: nieobslugiwany wezel {node!r}")
 
     def fmt_fun(self, node: A.FunDecl):
+        for doc in getattr(node, "_leading_doc_comments", None) or []:
+            self.emit(f"!! {doc}")
         params = []
         for p in node.params:
-            hint = f": {p.type_.name}" if p.type_ else ""
+            hint = f": {self.fmt_type(p.type_)}" if p.type_ else ""
             default = f" = {self.fmt_expr(p.default)}" if p.default is not None else ""
             params.append(f"{p.name}{hint}{default}")
-        ret = f" -> {node.ret_type.name}" if node.ret_type else ""
-        prefix = "native " if node.is_native else ("pub " if node.is_pub else "")
-        self.emit(f"{prefix}fun {node.name}({', '.join(params)}){ret} [")
+        ret = f" -> {self.fmt_type(node.ret_type)}" if node.ret_type else ""
+        prefix = "pub " if node.is_pub else ""
+        gen_head = f"<{', '.join(node.type_params)}>" if node.type_params else ""
+        self.emit(f"{prefix}fun {node.name}{gen_head}({', '.join(params)}){ret} [")
         self.fmt_block(node.body)
         self.emit("]")
 
@@ -168,6 +230,10 @@ class Formatter:
             return f"{self.fmt_expr(node.target)}.{node.name}"
         if isinstance(node, A.Index):
             return f"{self.fmt_expr(node.target)}[{self.fmt_expr(node.index)}]"
+        if isinstance(node, A.Cast):
+            return f"{self.fmt_expr(node.target)} as {self.fmt_type(node.type_)}"
+        if isinstance(node, A.TryOp):
+            return f"{self.fmt_expr(node.target)}?"
         if isinstance(node, A.Call):
             args = ", ".join(self.fmt_expr(a) for a in node.args)
             return f"{self.fmt_expr(node.callee)}({args})"
