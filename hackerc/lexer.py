@@ -21,6 +21,8 @@ class TokKind(Enum):
     IDENT = auto()
     KEYWORD = auto()
     DOC_COMMENT = auto()
+    LINE_COMMENT = auto()
+    QUESTION = auto()  # ? - propagacja bledu/braku wartosci (jak Rust `?`)
     EOF = auto()
 
 
@@ -28,13 +30,26 @@ KEYWORDS = {
     "fun", "let", "const", "if", "else", "elif", "while", "for", "in",
     "return", "end", "get", "import", "using", "direct", "manual",
     "true", "false", "null", "struct", "enum", "match", "break",
-    "continue", "gc", "pub", "self", "and", "or", "not", "native",
+    "continue", "gc", "pub", "self", "and", "or", "not", "extern", "as",
+    "impl",
 }
 
 _MULTI_OPS = [
     "==", "!=", "<=", ">=", "->", "::", "&&", "||", "+=", "-=", "*=", "/=",
 ]
 _SINGLE_OPS = set("+-*/%=<>!.,&|^~")
+
+# Escape'y rozpoznawane w literalach stringow (`"..."`/`'...'`) - klucz to
+# znak PO '\\', wartosc to realny znak ktory ma trafic do bufora tokena.
+_STRING_ESCAPES = {
+    "n": "\n",
+    "t": "\t",
+    "r": "\r",
+    "\\": "\\",
+    '"': '"',
+    "'": "'",
+    "0": "\0",
+}
 
 
 @dataclass
@@ -59,14 +74,72 @@ class LexError(Exception):
 
 def strip_comments(source: str) -> str:
     """Usuwa komentarze != ... =! (wieloliniowe) zamieniajac je na
-    puste linie (zeby numery linii sie zgadzaly)."""
+    puste linie (zeby numery linii sie zgadzaly).
+
+    UWAGA: `!=` jest TEZ operatorem nierownosci (a != b). Rozstrzygamy
+    po kontekscie: jesli znak bezposrednio przed `!=` moze konczyc
+    wyrazenie (litera/cyfra/`_`/`)`/`]`/cudzyslow), to operator - nie
+    ruszamy go tutaj, zostawiamy tokenizerowi. W przeciwnym razie (biala
+    spacja, poczatek pliku, inny operator) to otwarcie komentarza.
+
+    Zanim ten heurystyczny test w ogole sie uruchomi, POMIJAMY W CALOSCI
+    (kopiujac tekst 1:1, bez interpretacji) stringi (`"..."`/`'...'`) i
+    komentarze jednoliniowe/dokumentacyjne (`!`/`!!` do konca linii) -
+    bez tego `!=` WEWNATRZ stringa albo WEWNATRZ TEKSTU takiego
+    komentarza (np. dokumentacja opisujaca operator `!=`) bylo blednie
+    rozpoznawane jako otwarcie komentarza wieloliniowego, psujac caly
+    dalszy plik. Bug znaleziony przy pisaniu
+    bootstrap/hackerc-self/expr_parser.hcs - patrz docs/ROADMAP.md."""
+    _EXPR_END_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_)]\"'")
+
+    def _looks_like_operator(pos: int) -> bool:
+        """Cofa sie przez spacje/taby (nie newline) szukajac poprzedniego
+        nie-bialego znaku - `x != y` ma spacje wokol operatora, wiec samo
+        sprawdzenie source[pos-1] by nie wystarczylo."""
+        k = pos - 1
+        while k >= 0 and source[k] in " \t":
+            k -= 1
+        return k >= 0 and source[k] in _EXPR_END_CHARS
+
     out = []
     i = 0
     n = len(source)
     line = 1
     while i < n:
-        # wieloliniowy komentarz: != ... =!
-        if source[i : i + 2] == "!=":
+        c = source[i]
+
+        # String literal - kopiuj 1:1 (z escape'ami) az do zamykajacego
+        # cudzyslowu, zeby '!=' WEWNATRZ stringa nigdy nie trafilo do
+        # testu ponizej.
+        if c == '"' or c == "'":
+            quote = c
+            j = i + 1
+            while j < n and source[j] != quote and source[j] != "\n":
+                if source[j] == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                j += 1
+            if j < n and source[j] == quote:
+                j += 1
+            out.append(source[i:j])
+            i = j
+            continue
+
+        # '!' NIE po ktorym nastepuje '=' - to '!' albo '!!' (komentarz
+        # jednoliniowy/dokumentacyjny), kopiuj do konca linii 1:1 bez
+        # dalszej interpretacji (dokladnie tak jak tokenizer sam by go
+        # obsluzyl) - inaczej '!=' w TRESCI takiego komentarza (np. w
+        # dokumentacji opisujacej ten sam operator) bylby blednie
+        # zinterpretowany ponizej.
+        if c == "!" and (i + 1 >= n or source[i + 1] != "="):
+            j = i
+            while j < n and source[j] != "\n":
+                j += 1
+            out.append(source[i:j])
+            i = j
+            continue
+
+        if source[i : i + 2] == "!=" and not _looks_like_operator(i):
             start_line = line
             j = source.find("=!", i + 2)
             if j == -1:
@@ -119,17 +192,16 @@ def tokenize(source: str) -> list[Token]:
             i = j
             continue
 
-        # ! komentarz jednoliniowy (do konca linii) - ale nie mylic z != ktore
-        # jest juz usuwane w strip_comments, oraz nie mylic z operatorem != (nierownosc)
-        if c == "!" and not (peek(1).isalnum() and False):
-            # sprawdz czy to naprawde komentarz, a nie operator '!=' uzyty jako porownanie.
-            # Zasada: '!' rozpoczyna komentarz jednoliniowy chyba ze nastepny znak to '='
-            # (to jest operator != obslugiwany jako MULTI_OP powyzej i juz wyciety jako
-            # blok komentarza wieloliniowego przez strip_comments -- wiec tu zawsze to
-            # jest czysty komentarz jednoliniowy).
+        # ! komentarz jednoliniowy (do konca linii) - ale NIE gdy nastepny
+        # znak to '=' (wtedy to operator '!=' - nierownosc - albo pozostalosc
+        # po komentarzu wieloliniowym, ktory strip_comments juz wyciela
+        # PRZED wywolaniem tokenize(); jesli tu nadal widzimy '!=', to na
+        # pewno operator, nie komentarz).
+        if c == "!" and peek(1) != "=":
             j = i + 1
             while j < n and source[j] != "\n":
                 j += 1
+            tokens.append(Token(TokKind.LINE_COMMENT, source[i + 1 : j].strip(), line, col))
             i = j
             continue
 
@@ -139,7 +211,22 @@ def tokenize(source: str) -> list[Token]:
             buf = []
             while j < n and source[j] != quote:
                 if source[j] == "\\" and j + 1 < n:
-                    buf.append(source[j : j + 2])
+                    # Rozwiazujemy escape'y TERAZ (na realny znak), nie
+                    # zostawiamy surowego '\\'+litera w buforze - inaczej
+                    # codegen._rust_string_literal() (ktore oczekuje juz
+                    # rozwiazanych znakow specjalnych i samo je re-escape'uje
+                    # dla Rusta) podwójnie escape'owaloby kazdy '\\', np.
+                    # zrodlowe "\n" wychodzilo jako Rust "\\n" (dosl.
+                    # backslash+n) zamiast prawdziwego znaku nowej linii.
+                    # Bug znaleziony przy pisaniu bootstrap/hackerc-self/lexer.hcs.
+                    esc = source[j + 1]
+                    resolved = _STRING_ESCAPES.get(esc)
+                    if resolved is not None:
+                        buf.append(resolved)
+                    else:
+                        # Nieznany escape - zachowaj oba znaki dosłownie
+                        # (zamiast cicho gubic backslash).
+                        buf.append(source[j : j + 2])
                     j += 2
                     continue
                 if source[j] == "\n":
@@ -204,6 +291,9 @@ def tokenize(source: str) -> list[Token]:
             tokens.append(Token(TokKind.LANGLE, "<", line, col)); i += 1; continue
         if c == ">":
             tokens.append(Token(TokKind.RANGLE, ">", line, col)); i += 1; continue
+
+        if c == "?":
+            tokens.append(Token(TokKind.QUESTION, "?", line, col)); i += 1; continue
 
         if c in _SINGLE_OPS:
             tokens.append(Token(TokKind.OP, c, line, col)); i += 1; continue
