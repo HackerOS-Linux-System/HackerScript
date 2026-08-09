@@ -1,0 +1,32 @@
+struct Pool [
+    slots: List<Int>,
+    free_list: List<Int>
+]
+
+fun pool_new() -> Pool [
+    let p = Pool([], [])
+    end p
+]
+
+!! Zajmuje slot (z listy wolnych, jesli sa - w przeciwnym razie dokleja
+!! nowy) i zapisuje w nim `value`. Zwraca indeks slotu.
+fun pool_alloc(p: Pool, value: Int) -> Int [
+    if p.free_list.len() > 0 [
+        let idx = p.free_list.pop().unwrap()
+        p.slots[idx] = value
+        end idx
+    ]
+    p.slots = p.slots + [value]
+    end p.slots.len() - 1
+]
+
+!! Zwalnia slot pod danym indeksem - trafia z powrotem do free_list i
+!! bedzie ponownie uzyty przy kolejnym `pool_alloc`.
+fun pool_free(p: Pool, idx: Int) [
+    p.free_list = p.free_list + [idx]
+    end
+]
+
+fun pool_get(p: Pool, idx: Int) -> Int [
+    end p.slots[idx]
+]
