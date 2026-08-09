@@ -1,0 +1,28 @@
+struct ChainedArena [
+    blocks: List<List<Int>>,
+    block_size: Int
+]
+
+!! Tworzy nowy lancuch z jednym poczatkowym (pustym) blokiem.
+fun chained_arena_new(block_size: Int) -> ChainedArena [
+    let empty_block = []
+    let ca = ChainedArena([empty_block], block_size)
+    end ca
+]
+
+!! Alokuje `value`, w razie potrzeby doklejajac nowy blok. Zwraca
+!! globalny indeks (liczony przez wszystkie bloki razem).
+fun chained_arena_alloc(ca: ChainedArena, value: Int) -> Int [
+    let last = ca.blocks.len() - 1
+    if ca.blocks[last].len() >= ca.block_size [
+        ca.blocks = ca.blocks + [[value]]
+        end (ca.blocks.len() - 1) * ca.block_size
+    ]
+    ca.blocks[last].push(value)
+    end last * ca.block_size + ca.blocks[last].len() - 1
+]
+
+!! Zwraca liczbe blokow w lancuchu (rosnie w miare alokacji).
+fun chained_arena_block_count(ca: ChainedArena) -> Int [
+    end ca.blocks.len()
+]
