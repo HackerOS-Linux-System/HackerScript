@@ -62,6 +62,22 @@ class Index(Node):
 
 
 @dataclass
+class Cast(Node):
+    """`wyrazenie as Typ` - rzutowanie typu, 1:1 na Rust `as`."""
+    target: Any = None
+    type_: Optional["TypeRef"] = None
+
+
+@dataclass
+class TryOp(Node):
+    """`wyrazenie?` - propagacja bledu/braku wartosci, 1:1 na Rust `?`.
+    Dziala na Result<T,E> (zwraca Err(e) z otaczajacej fun/metody gdy
+    wartosc to Err) i Option<T> (analogicznie dla None) - patrz
+    docs/SYNTAX.md."""
+    target: Any = None
+
+
+@dataclass
 class Attr(Node):
     target: Any = None
     name: str = ""
@@ -78,6 +94,11 @@ class ListLit(Node):
 class TypeRef(Node):
     name: str = ""
     generic: Optional["TypeRef"] = None
+    # Drugi argument generyczny - potrzebny WYLACZNIE dla wbudowanego
+    # `Result<T, E>` (Option<T> ma tylko jeden, wiec starcza `generic`).
+    # Nie jest to ogolny system generykow wieloargumentowych (np.
+    # user-defined Dict<K, V>) - patrz docs/ROADMAP.md.
+    generic2: Optional["TypeRef"] = None
 
 
 # ---- instrukcje (statements) ----------------------------------------------
@@ -111,7 +132,20 @@ class FunDecl(Node):
     ret_type: Optional[TypeRef] = None
     body: list = field(default_factory=list)
     is_pub: bool = False
-    is_native: bool = False
+    # Parametry generyczne `<T, U>` - PRAWDZIWE generyki Rusta (Rust je
+    # sam monomorfizuje, hackerc nie robi wlasnej monomorfizacji).
+    # Patrz docs/ROADMAP.md.
+    type_params: list = field(default_factory=list)
+
+
+@dataclass
+class ExternFunDecl(Node):
+    """`extern "libname" fun name(params) -> Typ` - deklaracja FFI bez ciala,
+    tlumaczona do bloku `extern "C" { fn ... }` w Ruscie (patrz SYNTAX.md)."""
+    lib: str = ""
+    name: str = ""
+    params: list = field(default_factory=list)
+    ret_type: Optional[TypeRef] = None
 
 
 @dataclass
@@ -189,6 +223,48 @@ class GcPragma(Node):
 class StructDecl(Node):
     name: str = ""
     fields: list = field(default_factory=list)  # list[Param]
+    type_params: list = field(default_factory=list)  # ["T", "U"] dla struct Nazwa<T, U>
+
+
+@dataclass
+class EnumVariant(Node):
+    """Jeden wariant `enum` - `Nazwa` (jednostkowy) albo `Nazwa(Typ, ...)`
+    (krotkowy, jak `Some(T)` w Rust) - odpowiada Rust `enum X { A, B(T) }`."""
+    name: str = ""
+    fields: list = field(default_factory=list)  # list[TypeRef], puste = jednostkowy
+
+
+@dataclass
+class EnumDecl(Node):
+    name: str = ""
+    variants: list = field(default_factory=list)  # list[EnumVariant]
+    type_params: list = field(default_factory=list)
+
+
+@dataclass
+class MatchArm(Node):
+    """Jedna galaz `match`: `Wariant(bind1, bind2) -> [ ... ]` albo
+    `_ -> [ ... ]` (wildcard/domyslna galaz, wariant name == "_")."""
+    variant: str = ""
+    binds: list = field(default_factory=list)  # list[str] - nazwy bindowanych zmiennych
+    body: list = field(default_factory=list)
+
+
+@dataclass
+class MatchStmt(Node):
+    subject: Any = None
+    arms: list = field(default_factory=list)  # list[MatchArm]
+
+
+@dataclass
+class ImplDecl(Node):
+    """`impl Nazwa [ fun metoda(self, ...) -> Typ [ ... ] ... ]` - metody
+    dla struct. Generuje OSOBNY blok Rust `impl Nazwa { ... }` obok tego,
+    ktory `gen_struct` juz emituje automatycznie dla `new()` - Rust
+    pozwala na wiele blokow `impl` dla tego samego typu w jednym pliku."""
+    struct_name: str = ""
+    methods: list = field(default_factory=list)  # list[FunDecl]
+    type_params: list = field(default_factory=list)
 
 
 @dataclass
