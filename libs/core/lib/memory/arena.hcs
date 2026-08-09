@@ -1,12 +1,5 @@
-!! Prosty alokator arenowy (bump allocator).
-!! To jeden z alternatywnych systemow pamieci dostepnych w `core` (get <core:memory::arena>).
-!! Dzisiejszy backend (transpilacja do Pythona) nie robi prawdziwej reczne
-!! alokacji pamieci - `manual [ ... ]` oznacza tu miejsca, ktore docelowy
-!! natywny backend (Rust) zaimplementuje jako realne, reczne zarzadzanie
-!! pamiecia (bez GC). Semantyka API ma pozostac identyczna.
-
 struct Arena [
-    buffer: List,
+    buffer: List<Int>,
     offset: Int,
     capacity: Int
 ]
@@ -18,10 +11,10 @@ fun arena_new(capacity: Int) -> Arena [
 ]
 
 !! Alokuje `value` w arenie i zwraca jego indeks (odpowiednik "wskaznika").
-fun arena_alloc(a: Arena, value: Any) -> Int [
+fun arena_alloc(a: Arena, value: Int) -> Int [
     manual [
         if a.offset >= a.capacity [
-            log("arena: brak miejsca, powiekszam pojemnosc")
+            log("arena: brak miejsca w arenie")
         ]
     ]
     a.buffer = a.buffer + [value]
@@ -31,7 +24,7 @@ fun arena_alloc(a: Arena, value: Any) -> Int [
 ]
 
 !! Odczytuje wartosc spod danego indeksu areny.
-fun arena_get(a: Arena, idx: Int) -> Any [
+fun arena_get(a: Arena, idx: Int) -> Int [
     end a.buffer[idx]
 ]
 
