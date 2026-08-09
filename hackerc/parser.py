@@ -55,19 +55,41 @@ class Parser:
         return self.advance()
 
     def skip_newlines(self):
-        while self.match(TokKind.NEWLINE):
-            pass
+        while True:
+            if self.match(TokKind.NEWLINE):
+                continue
+            if self.match(TokKind.LINE_COMMENT):
+                continue
+            break
+
+    def skip_newlines_collect_comments(self) -> list[str]:
+        """Jak skip_newlines(), ale zwraca tekst napotkanych komentarzy
+        `!` (w kolejnosci wystapienia) zamiast je odrzucac - wywolujacy
+        doczepia je do nastepnej sparsowanej instrukcji jako
+        `_leading_comments`, zeby `hackerc fmt` mogl je odtworzyc."""
+        comments: list[str] = []
+        while True:
+            if self.match(TokKind.NEWLINE):
+                continue
+            c = self.match(TokKind.LINE_COMMENT)
+            if c is not None:
+                comments.append(c.value)
+                continue
+            break
+        return comments
 
     # -- program --------------------------------------------------------
 
     def parse_program(self) -> A.Program:
         body = []
-        self.skip_newlines()
+        comments = self.skip_newlines_collect_comments()
         while not self.at_end():
             stmt = self.parse_statement()
             if stmt is not None:
+                if comments:
+                    stmt._leading_comments = comments
                 body.append(stmt)
-            self.skip_newlines()
+            comments = self.skip_newlines_collect_comments()
         return A.Program(body=body, line=0)
 
     # -- statements -------------------------------------------------------
@@ -75,13 +97,16 @@ class Parser:
     def parse_block(self) -> list:
         """Parsuje blok otwierany '[' i zamykany ']'."""
         self.expect(TokKind.OPEN)
-        self.skip_newlines()
+        comments = self.skip_newlines_collect_comments()
         stmts = []
         while not self.check(TokKind.CLOSE):
             if self.at_end():
                 raise ParseError("nieoczekiwany koniec pliku wewnatrz bloku '[' ... ']'", self.cur().line, self.cur().col)
-            stmts.append(self.parse_statement())
-            self.skip_newlines()
+            stmt = self.parse_statement()
+            if comments and stmt is not None:
+                stmt._leading_comments = comments
+            stmts.append(stmt)
+            comments = self.skip_newlines_collect_comments()
         self.expect(TokKind.CLOSE)
         return stmts
 
@@ -108,13 +133,8 @@ class Parser:
                 if isinstance(inner, A.FunDecl):
                     inner.is_pub = True
                 return inner
-            if kw == "native":
-                self.advance()
-                inner = self.parse_statement()
-                if not isinstance(inner, A.FunDecl):
-                    raise ParseError("'native' moze poprzedzac tylko 'fun'", t.line, t.col)
-                inner.is_native = True
-                return inner
+            if kw == "extern":
+                return self.parse_extern()
             if kw == "fun":
                 return self.parse_fun()
             if kw == "if":
@@ -143,6 +163,12 @@ class Parser:
                 return self.parse_gc_pragma()
             if kw == "struct":
                 return self.parse_struct()
+            if kw == "enum":
+                return self.parse_enum()
+            if kw == "impl":
+                return self.parse_impl()
+            if kw == "match":
+                return self.parse_match()
 
         # wyrazenie / przypisanie
         expr = self.parse_expr()
@@ -192,10 +218,16 @@ class Parser:
     def parse_type(self) -> A.TypeRef:
         t = self.expect(TokKind.IDENT if self.check(TokKind.IDENT) else TokKind.KEYWORD)
         generic = None
+        generic2 = None
         if self.match(TokKind.LANGLE):
             generic = self.parse_type()
+            if self.match(TokKind.COMMA):
+                # Tylko `Result<T, E>` uzywa drugiego argumentu -
+                # ogolnych wieloargumentowych generykow uzytkownika
+                # jeszcze nie ma, patrz docs/ROADMAP.md.
+                generic2 = self.parse_type()
             self.expect(TokKind.RANGLE)
-        return A.TypeRef(name=t.value, generic=generic, line=t.line)
+        return A.TypeRef(name=t.value, generic=generic, generic2=generic2, line=t.line)
 
     def parse_let(self, is_const: bool) -> A.LetStmt:
         line = self.advance().line  # 'let' / 'const'
@@ -212,6 +244,16 @@ class Parser:
         params = []
         self.expect(TokKind.LPAREN)
         while not self.check(TokKind.RPAREN):
+            if self.check(TokKind.KEYWORD, "self"):
+                # Odbiornik metody wewnatrz 'impl' - bez typu/domyslnej
+                # wartosci, zawsze pierwszy parametr. Mutowalnosc (&self
+                # vs &mut self) jest wnioskowana z ciala metody, tak samo
+                # jak dla parametrow typu struct/List/Str - patrz codegen.py.
+                self.advance()
+                params.append(A.Param(name="self", type_=None))
+                if not self.match(TokKind.COMMA):
+                    break
+                continue
             pname = self.expect(TokKind.IDENT).value
             ptype = None
             if self.match(TokKind.COLON):
@@ -225,15 +267,31 @@ class Parser:
         self.expect(TokKind.RPAREN)
         return params
 
+    def parse_type_params(self) -> list:
+        """Opcjonalna lista parametrow generycznych `<T, U>` po nazwie
+        struct/fun/enum/impl - PRAWDZIWE generyki Rusta (Rust sam je
+        monomorfizuje). Patrz docs/ROADMAP.md."""
+        if not self.check(TokKind.LANGLE):
+            return []
+        self.advance()
+        params = []
+        while not self.check(TokKind.RANGLE):
+            params.append(self.expect(TokKind.IDENT).value)
+            if not self.match(TokKind.COMMA):
+                break
+        self.expect(TokKind.RANGLE)
+        return params
+
     def parse_fun(self) -> A.FunDecl:
         line = self.expect(TokKind.KEYWORD, "fun").line
         name = self.expect(TokKind.IDENT).value
+        type_params = self.parse_type_params()
         params = self.parse_params()
         ret_type = None
         if self.match(TokKind.OP, "->"):
             ret_type = self.parse_type()
         body = self.parse_block()
-        return A.FunDecl(name=name, params=params, ret_type=ret_type, body=body, line=line)
+        return A.FunDecl(name=name, params=params, ret_type=ret_type, body=body, line=line, type_params=type_params)
 
     def parse_if(self) -> A.IfStmt:
         line = self.expect(TokKind.KEYWORD, "if").line
@@ -257,7 +315,7 @@ class Parser:
         """Podglada czy po newline'ach jest elif/else, zeby obslugujic
         'else' na nowej linii po ']'. Cofa sie jesli nie."""
         save = self.pos
-        while self.match(TokKind.NEWLINE):
+        while self.match(TokKind.NEWLINE) or self.match(TokKind.LINE_COMMENT):
             pass
         if not (self.check(TokKind.KEYWORD, "elif") or self.check(TokKind.KEYWORD, "else")):
             self.pos = save
@@ -275,6 +333,17 @@ class Parser:
         iterable = self.parse_expr()
         body = self.parse_block()
         return A.ForStmt(var=var, iterable=iterable, body=body, line=line)
+
+    def parse_extern(self) -> A.ExternFunDecl:
+        line = self.expect(TokKind.KEYWORD, "extern").line
+        lib_tok = self.expect(TokKind.STRING)
+        self.expect(TokKind.KEYWORD, "fun")
+        name = self.expect(TokKind.IDENT).value
+        params = self.parse_params()
+        ret_type = None
+        if self.match(TokKind.OP, "->"):
+            ret_type = self.parse_type()
+        return A.ExternFunDecl(lib=lib_tok.value, name=name, params=params, ret_type=ret_type, line=line)
 
     def parse_direct(self) -> A.DirectBlock:
         line = self.expect(TokKind.KEYWORD, "direct").line
@@ -298,6 +367,7 @@ class Parser:
     def parse_struct(self) -> A.StructDecl:
         line = self.expect(TokKind.KEYWORD, "struct").line
         name = self.expect(TokKind.IDENT).value
+        type_params = self.parse_type_params()
         self.expect(TokKind.OPEN)
         self.skip_newlines()
         fields = []
@@ -309,7 +379,94 @@ class Parser:
             self.match(TokKind.COMMA)
             self.skip_newlines()
         self.expect(TokKind.CLOSE)
-        return A.StructDecl(name=name, fields=fields, line=line)
+        return A.StructDecl(name=name, fields=fields, line=line, type_params=type_params)
+
+    def parse_enum(self) -> A.EnumDecl:
+        """`enum Nazwa [ Wariant, Wariant2(Typ, Typ2), ... ]` - odpowiada
+        Rust `enum Nazwa { Wariant, Wariant2(Typ, Typ2) }`."""
+        line = self.expect(TokKind.KEYWORD, "enum").line
+        name = self.expect(TokKind.IDENT).value
+        type_params = self.parse_type_params()
+        self.expect(TokKind.OPEN)
+        self.skip_newlines()
+        variants = []
+        while not self.check(TokKind.CLOSE):
+            vname = self.expect(TokKind.IDENT).value
+            vfields = []
+            if self.match(TokKind.LPAREN):
+                while not self.check(TokKind.RPAREN):
+                    vfields.append(self.parse_type())
+                    if not self.match(TokKind.COMMA):
+                        break
+                self.expect(TokKind.RPAREN)
+            variants.append(A.EnumVariant(name=vname, fields=vfields, line=line))
+            self.match(TokKind.COMMA)
+            self.skip_newlines()
+        self.expect(TokKind.CLOSE)
+        return A.EnumDecl(name=name, variants=variants, line=line, type_params=type_params)
+
+    def parse_impl(self) -> A.ImplDecl:
+        """`impl Nazwa [ fun metoda(self, ...) -> Typ [ ... ] ... ]` -
+        metody dla struct zadeklarowanego gdzie indziej w pliku."""
+        line = self.expect(TokKind.KEYWORD, "impl").line
+        struct_name = self.expect(TokKind.IDENT).value
+        type_params = self.parse_type_params()
+        self.expect(TokKind.OPEN)
+        self.skip_newlines()
+        methods = []
+        pending_doc: list = []
+        while not self.check(TokKind.CLOSE):
+            doc_tok = self.match(TokKind.DOC_COMMENT)
+            if doc_tok is not None:
+                # Komentarz dokumentacyjny `!!` przed metoda - ta petla
+                # parsuje TYLKO 'fun', wiec bez specjalnej obslugi
+                # rzucalaby ParseError na prawidlowym `!!` przed metoda.
+                # Zbieramy tresc i doczepiamy do NASTEPNEJ sparsowanej
+                # metody (`_leading_doc_comments`) - `gen_method`
+                # (codegen.py) odtwarza to jako `///` (Rust doc comment)
+                # tuz przed `pub fn`.
+                pending_doc.append(doc_tok.value)
+                self.skip_newlines()
+                continue
+            if not self.check(TokKind.KEYWORD, "fun"):
+                raise ParseError(
+                    "'impl' moze zawierac tylko deklaracje 'fun' (metody)",
+                    self.cur().line, self.cur().col,
+                )
+            m = self.parse_fun()
+            if pending_doc:
+                m._leading_doc_comments = pending_doc
+                pending_doc = []
+            methods.append(m)
+            self.skip_newlines()
+        self.expect(TokKind.CLOSE)
+        return A.ImplDecl(struct_name=struct_name, methods=methods, line=line, type_params=type_params)
+
+    def parse_match(self) -> A.MatchStmt:
+        """`match wyrazenie [ Wariant(bind, ...) -> [ ... ] ... _ -> [...] ]`.
+        `_` to galaz domyslna/wildcard (dziala jak Rust `_ => ...`)."""
+        line = self.expect(TokKind.KEYWORD, "match").line
+        subject = self.parse_expr()
+        self.expect(TokKind.OPEN)
+        self.skip_newlines()
+        arms = []
+        while not self.check(TokKind.CLOSE):
+            if self.at_end():
+                raise ParseError("nieoczekiwany koniec pliku wewnatrz 'match'", self.cur().line, self.cur().col)
+            vname = self.expect(TokKind.IDENT).value  # wariant, albo '_' (rowniez leksykowane jako IDENT)
+            binds = []
+            if self.match(TokKind.LPAREN):
+                while not self.check(TokKind.RPAREN):
+                    binds.append(self.expect(TokKind.IDENT).value)
+                    if not self.match(TokKind.COMMA):
+                        break
+                self.expect(TokKind.RPAREN)
+            self.expect(TokKind.OP, "->")
+            body = self.parse_block()
+            arms.append(A.MatchArm(variant=vname, binds=binds, body=body, line=line))
+            self.skip_newlines()
+        self.expect(TokKind.CLOSE)
+        return A.MatchStmt(subject=subject, arms=arms, line=line)
 
     # -- expressions (precedence climbing) --------------------------------
 
@@ -387,6 +544,13 @@ class Parser:
                 self.advance()
                 name = self.expect(TokKind.IDENT).value
                 expr = A.Attr(target=expr, name=name)
+            elif self.check(TokKind.KEYWORD, "as"):
+                self.advance()
+                cast_type = self.parse_type()
+                expr = A.Cast(target=expr, type_=cast_type)
+            elif self.check(TokKind.QUESTION):
+                self.advance()
+                expr = A.TryOp(target=expr, line=getattr(expr, "line", 0))
             elif self.check(TokKind.OPEN) and self.cur().tight:
                 # x[i] - dozwolone TYLKO bez spacji przed '['. Z spacja ("if x [")
                 # to zawsze otwarcie bloku, nigdy indeksowanie - to rozstrzyga
