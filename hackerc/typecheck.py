@@ -4,16 +4,30 @@ from . import ast_nodes as A
 from .diagnostics import Diagnostic
 from .typeinfer import Signatures, TypeEnv, infer_expr_type, _types_equal
 
-KNOWN_GET_SOURCES = {"pypi", "crates", "std", "core"}
-_BUILTIN_FUNCS = {"log"}
+KNOWN_GET_SOURCES = {"pypi", "crates", "std", "core", "selfhost"}
+_BUILTIN_FUNCS = {"log", "__direct__", "some", "none", "ok", "err", "read_file", "write_file", "dict"}
 
 
 class Checker:
-    def __init__(self, program: A.Program):
+    def __init__(self, program: A.Program, extra_variant_names: set | None = None):
         self.program = program
         self.sigs = Signatures(program)
         self.diags: list[Diagnostic] = []
         self.imported_names: set[str] = set()
+        self.variant_names: set[str] = {
+            v.name for e in self.sigs.enums.values() for v in e.variants
+        }
+        if extra_variant_names:
+            # Warianty enum ZAIMPORTOWANYCH z innych plikow (`get
+            # <selfhost:ast_nodes> import <Expr>`) - bez tego
+            # konstruktor wariantu (`Var(...)`) z importowanego enuma
+            # dawal spurious W0002 ("nieznana funkcja"), bo Checker
+            # dziala na JEDNYM pliku i nie widzi wariantow zadeklarowanych
+            # w pliku, z ktorego ten enum pochodzi. Wypelniane przez
+            # `cmd_build` (cli.py) uzywajac
+            # `project.collect_project_signatures()` PRZED wywolaniem
+            # `check_program()` - patrz docs/ROADMAP.md.
+            self.variant_names |= extra_variant_names
         for stmt in program.body:
             if isinstance(stmt, A.GetImportStmt):
                 self.imported_names.update(stmt.details)
@@ -24,6 +38,9 @@ class Checker:
                 self._check_get(stmt)
             elif isinstance(stmt, A.FunDecl):
                 self._check_fun(stmt)
+            elif isinstance(stmt, A.ImplDecl):
+                for m in stmt.methods:
+                    self._check_fun(m, self_type=A.TypeRef(name=stmt.struct_name))
         return self.diags
 
     def _err(self, code: str, message: str, node):
@@ -41,10 +58,13 @@ class Checker:
                 node,
             )
 
-    def _check_fun(self, fn: A.FunDecl):
+    def _check_fun(self, fn: A.FunDecl, self_type: A.TypeRef | None = None):
         env = TypeEnv(self.sigs)
         for p in fn.params:
-            env.declare(p.name, p.type_)
+            if p.name == "self" and self_type is not None:
+                env.declare("self", self_type)
+            else:
+                env.declare(p.name, p.type_)
 
         used: set[str] = set()
         declared: dict[str, A.LetStmt] = {}
@@ -73,6 +93,18 @@ class Checker:
                     visit_expr(e.callee)
                 for a in e.args:
                     visit_expr(a)
+            elif isinstance(e, A.Cast):
+                visit_expr(e.target)
+            elif isinstance(e, A.TryOp):
+                visit_expr(e.target)
+                if fn.ret_type is None or fn.ret_type.name not in ("Result", "Option"):
+                    self.diags.append(Diagnostic(
+                        "error", "E0011",
+                        f"'?' uzyte w '{fn.name}', ktora nie zwraca Result<T,E> ani "
+                        f"Option<T> - '?' propaguje Err/None do OTACZAJACEJ funkcji, "
+                        f"wiec jej typ zwracany musi na to pozwalac",
+                        getattr(e, "line", fn.line),
+                    ))
 
         def visit_stmts(stmts: list):
             for s in stmts:
@@ -118,6 +150,12 @@ class Checker:
                 visit_stmts(s.body)
             elif isinstance(s, A.ExprStmt):
                 visit_expr(s.expr)
+            elif isinstance(s, A.MatchStmt):
+                visit_expr(s.subject)
+                for arm in s.arms:
+                    for b in arm.binds:
+                        env.declare(b, None)
+                    visit_stmts(arm.body)
 
         visit_stmts(fn.body)
 
@@ -140,7 +178,7 @@ class Checker:
 
     def _check_call(self, call: A.Call):
         name = call.callee.name
-        if name in _BUILTIN_FUNCS or name in self.sigs.structs or name in self.imported_names:
+        if name in _BUILTIN_FUNCS or name in self.sigs.structs or name in self.variant_names or name in self.imported_names:
             return
         fn = self.sigs.functions.get(name)
         if fn is None:
@@ -179,8 +217,12 @@ def _has_value_return(stmts: list) -> bool:
             return True
         if isinstance(s, A.ManualBlock) and _has_value_return(s.body):
             return True
+        if isinstance(s, A.MatchStmt):
+            for arm in s.arms:
+                if _has_value_return(arm.body):
+                    return True
     return False
 
 
-def check_program(program: A.Program) -> list[Diagnostic]:
-    return Checker(program).check()
+def check_program(program: A.Program, extra_variant_names: set | None = None) -> list[Diagnostic]:
+    return Checker(program, extra_variant_names=extra_variant_names).check()
