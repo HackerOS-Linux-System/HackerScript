@@ -1,0 +1,17 @@
+!! std - biblioteka standardowa HackerScript.
+!!
+!! Dostepne moduly:
+!!   get <std:cybersecurity::constant_time>  - porownania w stalym czasie
+!!   get <std:cybersecurity::entropy>        - entropia Shannona (detekcja packerow)
+!!   get <std:io>                            - pliki (read_file_or/file_readable/write_file_ok);
+!!                                              read_file()/write_file() sa wbudowane w kompilator
+!!                                              (jak log()), dzialaja WSZEDZIE bez importu
+!!   get <std:result>                        - unwrap_or/unwrap_or_default/is_ok/is_err/is_some
+!!                                              dla Result<T,E>/Option<T> (prawdziwe generyki)
+!!
+!! Reszta jest jeszcze pusta - patrz docs/ROADMAP.md.
+
+fun std_placeholder() [
+    log("std: patrz std/lib/cybersecurity/, std/lib/io.hcs, std/lib/result.hcs - reszta jeszcze pusta, patrz docs/ROADMAP.md")
+    end
+]
