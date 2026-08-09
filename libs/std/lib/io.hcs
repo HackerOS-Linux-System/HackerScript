@@ -1,0 +1,40 @@
+fun read_file_or(path: Str, domyslna: Str) -> Str [
+    let wynik = read_file(path)
+    match wynik [
+        Ok(tresc) -> [
+            end tresc
+        ]
+        Err(_e) -> [
+            end domyslna
+        ]
+    ]
+]
+
+!! Sprawdza, czy plik istnieje i da sie go odczytac (bez zwracania
+!! tresci) - przydatne przed operacjami, ktore zakladaja jego obecnosc.
+fun file_readable(path: Str) -> Bool [
+    let wynik = read_file(path)
+    match wynik [
+        Ok(_tresc) -> [
+            end true
+        ]
+        Err(_e) -> [
+            end false
+        ]
+    ]
+]
+
+!! Zapisuje `tresc` do pliku i zwraca `true` przy sukcesie, `false` przy
+!! bledzie (bez propagowania szczegolow bledu) - wygodne w miejscach,
+!! gdzie interesuje nas tylko czy operacja sie udala.
+fun write_file_ok(path: Str, tresc: Str) -> Bool [
+    let wynik = write_file(path, tresc)
+    match wynik [
+        Ok(_v) -> [
+            end true
+        ]
+        Err(_e) -> [
+            end false
+        ]
+    ]
+]
