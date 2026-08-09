@@ -4,8 +4,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from .transpiler import transpile_file, transpile_source_full, TranspileError
-from .project import build_project, ProjectError
+from .transpiler import transpile_file, transpile_source_full, TranspileError, _extract_direct_blocks
+from .project import build_project, collect_project_signatures, ProjectError
 from .parser import parse, ParseError
 from .lexer import LexError
 from .typecheck import check_program
@@ -19,6 +19,15 @@ _SUBCOMMANDS = {"check", "build", "fmt", "lint"}
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _parse_with_direct(source: str):
+    """parse() ale z tym samym preprocessingiem `direct [ ... ]` co
+    transpilacja - inaczej pliki z direct[] wywalalyby sie na 'check'/'lint'
+    z mylacym bledem parsera (direct jest normalnym slowem kluczowym tylko
+    na etapie preprocessingu)."""
+    stripped, _ = _extract_direct_blocks(source)
+    return parse(stripped)
 
 
 def _print_diagnostics(source: str, filename: str, diags, only_severity: str | None = None) -> int:
@@ -37,7 +46,7 @@ def cmd_check(args) -> int:
         return 1
     source = _read(src_path)
     try:
-        program = parse(source)
+        program = _parse_with_direct(source)
     except (ParseError, LexError) as exc:
         print(render(source, str(src_path), exc.line, exc.col, str(exc.message), severity="error"), file=sys.stderr)
         return 1
@@ -58,7 +67,7 @@ def cmd_lint(args) -> int:
         return 1
     source = _read(src_path)
     try:
-        program = parse(source)
+        program = _parse_with_direct(source)
     except (ParseError, LexError) as exc:
         print(render(source, str(src_path), exc.line, exc.col, str(exc.message), severity="error"), file=sys.stderr)
         return 1
@@ -78,22 +87,34 @@ def cmd_build(args) -> int:
         return 1
     source = _read(src_path)
 
-    # Najpierw diagnostyka - nie generujemy kodu z bledami typow/wywolan.
     try:
-        program = parse(source)
+        program = _parse_with_direct(source)
     except (ParseError, LexError) as exc:
         print(render(source, str(src_path), exc.line, exc.col, str(exc.message), severity="error"), file=sys.stderr)
         return 1
-    diags = check_program(program)
+
+    libs_root = Path(args.libs_root) if args.libs_root else None
+    bootstrap_root = Path(args.bootstrap_root) if getattr(args, "bootstrap_root", None) else None
+    # Sygnatury calego projektu PRZED check_program - inaczej konstruktor
+    # wariantu z zaimportowanego 'enum' (np. `get <selfhost:ast_nodes>
+    # import <Expr>` + `Var(...)`) dawalby spurious W0002 ("nieznana
+    # funkcja"), bo Checker widzi domyslnie tylko JEDEN plik - patrz
+    # docs/ROADMAP.md.
+    _fns, _structs, project_enums, _mp, _methods, _mmp, _sig_warnings = collect_project_signatures(
+        src_path, libs_root=libs_root, bootstrap_root=bootstrap_root
+    )
+    extra_variants = {v.name for e in project_enums.values() for v in e.variants}
+    diags = check_program(program, extra_variant_names=extra_variants)
     errors = _print_diagnostics(source, str(src_path), diags)
     if errors:
         print(f"\nhackerc build: przerwano - {errors} blad(ow) w {src_path}", file=sys.stderr)
         return 1
 
-    out_dir = Path(args.output) if args.output else src_path.parent
-    libs_root = Path(args.libs_root) if args.libs_root else None
+    out_dir = Path(args.output) if args.output else src_path.parent / "target-hcs"
     try:
-        result = build_project(src_path, out_dir, libs_root=libs_root, native_package=args.native_package)
+        result = build_project(
+            src_path, out_dir, libs_root=libs_root, bootstrap_root=bootstrap_root, crate_name=args.crate_name
+        )
     except ProjectError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -101,11 +122,14 @@ def cmd_build(args) -> int:
     for w in result.warnings:
         print(f"hackerc build: uwaga: {w}", file=sys.stderr)
 
-    print(f"hackerc build: zapisano {result.entry_output}")
-    for flat, path in result.module_outputs.items():
+    print(f"hackerc build: crate gotowy w {result.crate_dir} (uruchom `cargo build --release` tam)")
+    print(f"hackerc build: {result.main_rs}")
+    for flat, path in result.module_files.items():
         print(f"hackerc build: modul {flat} -> {path}")
-    for native_dir in result.native_dirs:
-        print(f"hackerc build: native fun -> {native_dir}/ (wymaga 'cargo build' - patrz virus)")
+    if result.needs_pyo3:
+        print("hackerc build: wykryto direct[ ... ] -> Cargo.toml zawiera zaleznosc pyo3 (auto-initialize)")
+    if result.crates_deps:
+        print(f"hackerc build: zaleznosci Cargo z get<crates:...>: {', '.join(result.crates_deps)}")
     return 0
 
 
@@ -135,20 +159,21 @@ def cmd_fmt(args) -> int:
 
 
 def cmd_transpile_legacy(args) -> int:
-    """Tryb kompatybilnosci wstecznej (uzywany przez virus/hackerc_bridge.rs)."""
+    """Tryb kompatybilnosci wstecznej: transpiluje JEDEN plik .hcs do .rs,
+    bez rozwiazywania `get <std/core:...>` (to robi tylko `build`/`virus`)."""
     src_path = Path(args.source)
     if not src_path.exists():
         print(f"hackerc: nie znaleziono pliku {src_path}", file=sys.stderr)
         return 1
     try:
         if args.output:
-            result = transpile_file(src_path, args.output, native_package=args.native_package)
+            result = transpile_file(src_path, args.output)
             if args.emit_stdout:
                 print(Path(args.output).read_text(encoding="utf-8"))
         else:
             source = _read(src_path)
-            result = transpile_source_full(source, filename=str(src_path), native_package=args.native_package)
-            print(result.python_code)
+            result = transpile_source_full(source, filename=str(src_path))
+            print(result.rust_code)
     except TranspileError as exc:
         if exc.line:
             print(
@@ -162,7 +187,7 @@ def cmd_transpile_legacy(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="hackerc", description="Transpilator HackerScript -> Python (+ native/Rust)")
+    parser = argparse.ArgumentParser(prog="hackerc", description="Transpilator HackerScript -> Rust")
     parser.add_argument("--version", action="store_true", help="pokaz wersje hackerc")
 
     sub = parser.add_subparsers(dest="command")
@@ -173,11 +198,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_lint = sub.add_parser("lint", help="tylko warningi (podzbior 'check')")
     p_lint.add_argument("source")
 
-    p_build = sub.add_parser("build", help="pelna transpilacja (Python + ew. native/Rust)")
+    p_build = sub.add_parser("build", help="pelny crate Rust (Cargo.toml + src/)")
     p_build.add_argument("source")
-    p_build.add_argument("-o", "--output", help="katalog wyjsciowy (domyslnie obok zrodla)")
-    p_build.add_argument("--native-package", default="hackerscript", help="nazwa bazowa modulu native")
+    p_build.add_argument("-o", "--output", help="katalog wyjsciowy crate'a (domyslnie <src>/target-hcs)")
+    p_build.add_argument("--crate-name", default="hackerscript_app", help="nazwa crate'a/binarki")
     p_build.add_argument("--libs-root", help="katalog libs/ (domyslnie: szukany w gore od pliku zrodlowego)")
+    p_build.add_argument(
+        "--bootstrap-root",
+        help="katalog bootstrap/hackerc-self/ dla get <selfhost:...> (domyslnie: szukany w gore od pliku zrodlowego)",
+    )
 
     p_fmt = sub.add_parser("fmt", help="formatuje kod .hcs")
     p_fmt.add_argument("source")
@@ -202,13 +231,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "fmt":
             return cmd_fmt(args)
 
-    # Tryb legacy / kompatybilnosci wstecznej: `hackerc plik.hcs [-o wyjscie.py]`
     legacy = argparse.ArgumentParser(prog="hackerc")
     legacy.add_argument("source", nargs="?")
     legacy.add_argument("-o", "--output")
     legacy.add_argument("--version", action="store_true")
     legacy.add_argument("--emit-stdout", action="store_true")
-    legacy.add_argument("--native-package", default="hackerscript")
     args = legacy.parse_args(argv)
 
     if args.version:
