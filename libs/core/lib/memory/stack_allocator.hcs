@@ -1,0 +1,34 @@
+struct StackAllocator [
+    data: List<Int>
+]
+
+fun stack_new() -> StackAllocator [
+    let s = StackAllocator([])
+    end s
+]
+
+!! Odklada wartosc na wierzch stosu. Zwraca nowy rozmiar stosu.
+fun stack_push(s: StackAllocator, value: Int) -> Int [
+    s.data = s.data + [value]
+    end s.data.len()
+]
+
+!! Zdejmuje i zwraca wartosc z wierzchu stosu.
+fun stack_pop(s: StackAllocator) -> Int [
+    manual [
+        if s.data.len() <= 0 [
+            log("stack_allocator: pop na pustym stosie")
+        ]
+    ]
+    end s.data.pop().unwrap()
+]
+
+!! Podglada wartosc na wierzchu bez zdejmowania.
+fun stack_peek(s: StackAllocator) -> Int [
+    let top_idx = s.data.len() - 1
+    end s.data[top_idx]
+]
+
+fun stack_len(s: StackAllocator) -> Int [
+    end s.data.len()
+]
