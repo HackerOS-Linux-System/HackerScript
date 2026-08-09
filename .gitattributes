@@ -1,0 +1,7 @@
+*.yml linguist-detectable=true
+*.yml linguist-documentation=false
+*.yml linguist-language=YAML
+
+*.hcs linguist-detectable=true
+*.hcs linguist-documentation=false
+*.hcs linguist-language=HackerScript
