@@ -1,0 +1,102 @@
+name: Release
+
+# Uruchamiane na tag w formacie v<wersja> (np. v1.2) - MUSI byc zgodne z
+# `using <wersja>` w Virus.hk i z adresem URL w
+# virus/cli/src/hackerc_bridge.rs (release_url/asset_name).
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-hackerc:
+    name: hackerc binarka (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset_name: hackerc-linux-x86_64
+          - os: macos-latest
+            asset_name: hackerc-macos-x86_64
+          - os: windows-latest
+            asset_name: hackerc-windows-x86_64.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Zainstaluj hackerc + PyInstaller
+        run: |
+          pip install -e ./hackerc
+          pip install pyinstaller
+      - name: Zbuduj samodzielna binarke (bez wymaganego interpretera obok)
+        working-directory: hackerc
+        run: |
+          pyinstaller --onefile --name hackerc-bin entrypoint.py
+      - name: Zmien nazwe assetu
+        shell: bash
+        run: |
+          mkdir -p dist_final
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp hackerc/dist/hackerc-bin.exe "dist_final/${{ matrix.asset_name }}"
+          else
+            cp hackerc/dist/hackerc-bin "dist_final/${{ matrix.asset_name }}"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: dist_final/${{ matrix.asset_name }}
+
+  build-virus:
+    name: virus binarka (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset_name: virus-linux-x86_64
+          - os: macos-latest
+            asset_name: virus-macos-x86_64
+          - os: windows-latest
+            asset_name: virus-windows-x86_64.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: virus
+      - name: cargo build --release
+        working-directory: virus
+        run: cargo build --release -p virus
+      - name: Zmien nazwe assetu
+        shell: bash
+        run: |
+          mkdir -p dist_final
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp virus/target/release/virus.exe "dist_final/${{ matrix.asset_name }}"
+          else
+            cp virus/target/release/virus "dist_final/${{ matrix.asset_name }}"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: dist_final/${{ matrix.asset_name }}
+
+  publish:
+    name: Publikuj GitHub Release
+    needs: [build-hackerc, build-virus]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Lista pobranych artefaktow
+        run: ls -la artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
