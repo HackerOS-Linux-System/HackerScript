@@ -1,0 +1,8 @@
+[package]
+-> name        => std
+-> version     => 0.0.1
+-> using       => 1.2
+-> description => std: biblioteka standardowa HackerScript (100% .hcs).
+
+[build]
+-> entry => lib/mod.hcs
