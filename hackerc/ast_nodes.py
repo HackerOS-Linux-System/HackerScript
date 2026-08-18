@@ -198,6 +198,18 @@ class GetImportStmt(Node):
 
 
 @dataclass
+class IncludeStmt(Node):
+    """`include <sciezka>` - odpowiednik Rustowego `mod` (patrz duza
+    uwaga w project.py przy `resolve_include_path`): sciezka WZGLEDEM
+    katalogu BIEZACEGO pliku, bez oznaczenia zrodla (w odroznieniu od
+    `get <source:name>`, ktory jest osobny i pozostaje nietkniety).
+    `path` to surowy tekst jak napisany (`memory/arena`, `io.hcs`,
+    `helpers`) - rozwiazywanie na prawdziwa sciezke pliku dzieje sie w
+    project.py, nie tutaj."""
+    path: str = ""
+
+
+@dataclass
 class UsingStmt(Node):
     version: str = ""
 
