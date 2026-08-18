@@ -57,6 +57,9 @@ class Formatter:
                 head += " import <" + "::".join(node.details) + ">"
             self.emit(head)
             return
+        if isinstance(node, A.IncludeStmt):
+            self.emit(f"include <{node.path}>")
+            return
         if isinstance(node, A.GcPragma):
             self.emit(f"gc:use::{node.mode}")
             return
