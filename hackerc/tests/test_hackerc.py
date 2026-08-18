@@ -712,9 +712,9 @@ def test_dict_maps_to_rust_hashmap():
     assert "std::collections::HashMap<String, i64>" in rust
     assert "std::collections::HashMap::new()" in rust
     assert 'scores.insert("alice".to_string(), 10);' in rust
-    assert '.get(&"alice".to_string()).cloned()' in rust
-    assert ".contains_key(&" in rust
-    assert ".remove(&" in rust
+    assert '.get("alice".to_string().as_str()).cloned()' in rust
+    assert ".contains_key(" in rust
+    assert ".remove(" in rust
     diags = check_program(parse(src))
     assert not [d for d in diags if d.severity == "error"]
 
@@ -1439,7 +1439,7 @@ def test_bootstrap_ast_nodes_and_parser_are_the_current_canonical_files():
     dokladnie ten blad napotkany przy pisaniu tego kroku)."""
     bootstrap_dir = Path(__file__).resolve().parent.parent.parent / "bootstrap" / "hackerc-self"
     existing = {p.name for p in bootstrap_dir.glob("*.hcs")}
-    assert existing == {"lexer.hcs", "ast_nodes.hcs", "parser.hcs", "diagnostics.hcs", "typeinfer.hcs", "typecheck.hcs", "codegen.hcs"}
+    assert existing == {"lexer.hcs", "ast_nodes.hcs", "parser.hcs", "diagnostics.hcs", "typeinfer.hcs", "typecheck.hcs", "codegen.hcs", "transpiler.hcs", "formatter.hcs", "project.hcs", "cli.hcs"}
 
 def test_bootstrap_typeinfer_links_and_builds_without_box_ref_mismatches():
     """typeinfer.hcs - krok 4/N (patrz docs/ROADMAP.md, 'W TOKU').
@@ -1543,7 +1543,7 @@ def test_bootstrap_typecheck_links_and_builds_without_ref_owned_mismatches():
     # Drugi bug: `extra_variant_names` (parametr, wiec `&Vec<String>`)
     # przekazywany BEZPOSREDNIO do konstruktora `Checker` (ktory
     # oczekuje OWNED `Vec<String>`) bylby niezgodnoscia typow.
-    assert "Checker::new(sigs, vec![], imported_names, extra_variant_names.clone());" in main_rs
+    assert "Checker::new((sigs).clone(), vec![], (imported_names).clone(), extra_variant_names.clone());" in main_rs
     assert "pub fn main() {" in main_rs
 
 
@@ -1606,7 +1606,7 @@ def test_bootstrap_codegen_mut_params_analysis_matches_transitive_self_calls():
     assert "pub struct MutTracker {" in main_rs
     assert "pub struct SelfCallTracker {" in main_rs
     assert "pub fn compute_mut_params(prog: &Program) -> std::collections::HashMap<String, bool> {" in main_rs
-    assert "pub fn compute_method_mut_params(prog: &Program, extra_method_mut_params: std::collections::HashMap<String, bool>) -> std::collections::HashMap<String, bool> {" in main_rs
+    assert "pub fn compute_method_mut_params(prog: &Program, extra_method_mut_params: &std::collections::HashMap<String, bool>) -> std::collections::HashMap<String, bool> {" in main_rs
     # Punkt staly (fixed-point) dla posredniej mutacji.
     assert "let mut changed: bool = true;" in main_rs
     assert "while changed {" in main_rs
@@ -1658,7 +1658,7 @@ def test_bootstrap_codegen_gen_expr_emits_correct_special_cases():
     assert "pub fn gen_binop(&self, op: &String, left: &Expr, right: &Expr) -> String {" in main_rs
     # Bug 1: gen_ident zwracalo goly `name` (parametr, zawsze &String w
     # tym codegen) - naprawione wymuszona konkatenacja.
-    assert 'return format!("{}{}", name, "".to_string());' in main_rs
+    assert 'return format!("{}{}", name, "".to_string()).to_string();' in main_rs
     assert "pub fn gen_ident(&self, name: &String) -> String {" in main_rs
     # Bug 2: type_ref_generic/type_ref_generic2 CALKOWICIE usuniete -
     # zastapione bezpiecznymi wariantami.
@@ -1667,14 +1667,14 @@ def test_bootstrap_codegen_gen_expr_emits_correct_special_cases():
     assert "pub fn type_ref_generic_name(&self" not in main_rs  # to WOLNA funkcja, nie metoda
     assert "pub fn type_ref_generic_name(t: &TypeRef) -> String {" in main_rs
     assert "pub fn rust_type_name_of_generic(t: &TypeRef, sigs: &Signatures, type_params: &Vec<String>) -> String {" in main_rs
-    assert "return rust_type_name(&inner, &sigs, &type_params);" in main_rs
+    assert "return rust_type_name(&inner, &sigs, &type_params).to_string();" in main_rs
     # `+` na Str -> format!, `+` na List -> chain().collect() (nigdy
     # surowy Rustowy `+` na String/Vec, ktory konsumowalby LHS).
     assert '.iter().cloned().chain(' in main_rs
     assert 'format!("{}{}", ' in main_rs
     # Dict.fetch/contains/remove specjalne wywolania.
-    assert '.get(&' in main_rs
-    assert '.contains_key(&' in main_rs
+    assert '.get(' in main_rs
+    assert '.contains_key(' in main_rs
     assert "pub fn main() {" in main_rs
 
 
@@ -1716,13 +1716,13 @@ def test_bootstrap_codegen_gen_stmt_emits_correct_special_cases():
     assert '.clone()".to_string()' in main_rs
     # gen_match zapisuje/przywraca stan `env_vars` wokol kazdej galezi.
     assert "prev_present.push(was_present);" in main_rs
-    assert "self.env_vars.remove(&b2);" in main_rs
+    assert "self.env_vars.remove(b2.as_str());" in main_rs
     # Demonstracyjne uzycie w main() rzeczywiscie konstruuje CodeGen i
     # woa gen_stmts - regresja na blad znaleziony PODCZAS pisania tego
     # demo: powtorne uzycie tego samego (nie-refable, wiec przenoszonego
     # przez wartosc) Dict jako DWOCH roznych argumentow konstruktora
     # bylby podwojnym przeniesieniem - naprawione osobnymi Dict-ami.
-    assert "CodeGen::new(empty_sigs, empty_vars, empty_dict1, empty_dict2, empty_dict3, empty_dict4, vec![]" in main_rs
+    assert "CodeGen::new((empty_sigs).clone(), (empty_vars).clone(), (empty_dict1).clone(), (empty_dict2).clone(), (empty_dict3).clone(), (empty_dict4).clone(), vec![]" in main_rs
     assert "gen.gen_stmts(&body);" in main_rs
 
 
@@ -1756,7 +1756,7 @@ def test_bootstrap_codegen_gen_struct_gen_fun_gen_impl_produce_correct_rust():
     ):
         assert fn_sig in main_rs, fn_sig
     # Bug: `sigs.clone()` konieczne w new_codegen (patrz docstring).
-    assert "return CodeGen::new(sigs.clone(), env_vars, variant_arity, boxed_fields, method_mut_params, mut_params, vec![], None, vec![], 0, no_default_structs);" in main_rs
+    assert "return CodeGen::new(sigs.clone(), (env_vars).clone(), (variant_arity).clone(), (boxed_fields).clone(), (method_mut_params).clone(), (mut_params).clone(), vec![], None, vec![], 0, (no_default_structs).clone(), false, (direct_blocks).clone(), false);" in main_rs
     # Struct bez generykow/rekurencji dostaje #[derive(..., Default)];
     # konstruktor pozycyjny `Nazwa::new(...)`.
     assert '#[derive(Debug, Clone, PartialEq, Default)]' in main_rs
@@ -1767,6 +1767,48 @@ def test_bootstrap_codegen_gen_struct_gen_fun_gen_impl_produce_correct_rust():
     # demo `main()` w tym pliku faktycznie WYWOLUJE `gen_program`.
     assert "let mut generated: Vec<String> = gen_program(&demo_prog);" in main_rs
     assert "pub fn main() {" in main_rs
+
+
+def test_bootstrap_codegen_gen_direct_pyo3_and_gen_toplevel():
+    """codegen.hcs - dopelnienie kroku 6/N na wyrazna prosbe: `gen_direct`
+    (`direct[ ... ]` -> PyO3 `Python::with_gil`) + `gen_toplevel`
+    (dysponent WSZYSTKICH form najwyzszego poziomu, nie tylko
+    struct/enum/fun/impl - dodaje `using`/`get <...>`/`gc:use::`/
+    `extern`/`const`) + naglowek pliku (`#![allow(...)]` +
+    `use pyo3::prelude::*;` TYLKO gdy `needs_pyo3`).
+
+    `direct_blocks: Dict<Str,Str>` (surowy tekst Pythona per-indeks)
+    jest DANE WEJSCIOWE tej funkcji - populowane przez ekstrakcje ZE
+    ZRODLA .hcs PRZED tokenizacja (`transpiler.py`/`_extract_direct_blocks`,
+    NIE przepisane w tej sesji, patrz parser.hcs::parse_direct) -
+    `gen_direct` samo w sobie jest KOMPLETNE, gotowe na dane wejsciowe
+    kiedy `transpiler.hcs` (przyszly krok) zacznie je dostarczac."""
+    root = Path(__file__).resolve().parent.parent.parent
+    entry = root / "bootstrap" / "hackerc-self" / "codegen.hcs"
+    out_dir = Path(tempfile.mkdtemp())
+    result = build_project(entry, out_dir)
+    assert not result.warnings, result.warnings
+    main_rs = result.main_rs.read_text(encoding="utf-8")
+    assert "pub fn gen_direct(&mut self, idx_text: &String) {" in main_rs
+    assert "self.needs_pyo3 = true;" in main_rs
+    assert 'self.emit(&"Python::with_gil(|py| -> PyResult<()> {".to_string());' in main_rs
+    assert 'py.run(' in main_rs
+    assert 'python_raw_string(&raw)' in main_rs
+    assert 'block failed' in main_rs
+    assert "pub fn python_raw_string(s: &String) -> String {" in main_rs
+    assert "pub fn gen_toplevel(&mut self, node: &Stmt) {" in main_rs
+    assert "pub fn gen_get_import(&mut self, source: &String, name: &String, version: Option<String>, details: &Vec<String>) {" in main_rs
+    assert "pub fn gen_extern(&mut self, lib: &String, name: &String, params: &Vec<Param>, ret_type: Option<TypeRef>) {" in main_rs
+    assert "pub fn gen_const(&mut self, name: &String, type_ref: Option<TypeRef>, value: Option<Expr>) {" in main_rs
+    assert "pub fn str_to_upper(s: &String) -> String {" in main_rs
+    assert "pub fn flat_module_name(source: &String, name: &String, version: Option<String>) -> String {" in main_rs
+    # Naglowek pliku dodaje `use pyo3::prelude::*;` WARUNKOWO.
+    assert 'if gen.needs_pyo3 {' in main_rs
+    assert 'header.push("use pyo3::prelude::*;".to_string());' in main_rs
+    # CodeGen ma teraz needs_pyo3/direct_blocks jako pola.
+    codegen_struct_block = main_rs.split("pub struct CodeGen {")[1].split("}")[0]
+    assert "pub needs_pyo3: bool," in codegen_struct_block
+    assert "pub direct_blocks: std::collections::HashMap<String, String>," in codegen_struct_block
 
 
 def test_bootstrap_diagnostics_checks_and_transpiles_without_ref_owned_mismatch():
@@ -1811,8 +1853,8 @@ def test_bootstrap_diagnostics_split_lines_matches_python_splitlines_edge_cases(
     entry = root / "bootstrap" / "hackerc-self" / "diagnostics.hcs"
     src = entry.read_text(encoding="utf-8")
     rust = transpile_source(src)
-    assert 'if ((cur != "".to_string()) || ((lines.len() as i64) == 0)) {' in rust
-    assert "lines.push(cur);" in rust
+    assert 'if ((cur.to_string() != "".to_string().to_string()) || ((lines.len() as i64) == 0)) {' in rust
+    assert "lines.push((cur).to_string());" in rust
 
 
 def test_not_equal_inside_doc_comment_does_not_break_parsing():
