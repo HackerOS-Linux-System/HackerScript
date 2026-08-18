@@ -76,6 +76,8 @@ def _rust_string_literal(s: str) -> str:
             out.append("\\n")
         elif ch == "\t":
             out.append("\\t")
+        elif ch == "\r":
+            out.append("\\r")
         else:
             out.append(ch)
     out.append('"')
@@ -318,6 +320,15 @@ class CodeGen:
         self.module_name = module_name
         self.sigs: Signatures | None = None
         self.needs_pyo3 = False
+        # Rust tylko pozwala `//!` (inner doc) PRZED wszystkimi innymi
+        # elementami pliku - `!!` na najwyzszym poziomie WYSTĘPUJĄCE PO
+        # jakiejkolwiek deklaracji (np. sekcja "## Ograniczenia" na koncu
+        # pliku, konwencja uzywana w calym bootstrap/hackerc-self/) musi
+        # wiec zostac zwyklym komentarzem `//`, nie `//!` - inaczej Rust
+        # odrzuca plik z E0753 "expected outer doc comment" (bug znaleziony
+        # przy pierwszej realnej kompilacji `cargo build` wygenerowanego
+        # kodu w tej sesji - patrz bootstrap/README.md).
+        self._seen_real_toplevel_item = False
         self.extern_libs: set[str] = set()
         self.mut_params: dict[str, set[str]] = {}
         self.method_mut_params: dict[str, set[str]] = {}
@@ -569,27 +580,43 @@ class CodeGen:
             self.emit(f"// using <{node.version}> (wymagana wersja hackerc)")
             return
         if isinstance(node, A.GetImportStmt):
+            # `gen_get_import` moze wyemitowac prawdziwy item Rusta (`use
+            # ...;`) - traktuj to zachowawczo jako "widziano juz realny
+            # element", zeby kolejny `!!` (np. bezposrednio przed pierwsza
+            # deklaracja) nie probowal juz byc `//!` (patrz komentarz przy
+            # `_seen_real_toplevel_item` w __init__).
+            self._seen_real_toplevel_item = True
             self.gen_get_import(node)
+            return
+        if isinstance(node, A.IncludeStmt):
+            self._seen_real_toplevel_item = True
+            self.gen_include(node)
             return
         if isinstance(node, A.GcPragma):
             self.emit(f"// gc:use::{node.mode} - Rust: brak GC, wlasnosc/pozyczanie zamiast tego")
             return
         if isinstance(node, A.StructDecl):
+            self._seen_real_toplevel_item = True
             self.gen_struct(node)
             return
         if isinstance(node, A.EnumDecl):
+            self._seen_real_toplevel_item = True
             self.gen_enum(node)
             return
         if isinstance(node, A.ImplDecl):
+            self._seen_real_toplevel_item = True
             self.gen_impl(node)
             return
         if isinstance(node, A.ExternFunDecl):
+            self._seen_real_toplevel_item = True
             self.gen_extern(node)
             return
         if isinstance(node, A.FunDecl):
+            self._seen_real_toplevel_item = True
             self.gen_fun(node)
             return
         if isinstance(node, A.LetStmt) and node.is_const:
+            self._seen_real_toplevel_item = True
             # stala globalna. Str MUSI byc &str (nie String) - .to_string()
             # nie jest funkcja const, wiec `const X: String = "y".to_string()`
             # nie skompilowalby sie.
@@ -602,9 +629,21 @@ class CodeGen:
             self.emit(f"pub const {node.name.upper()}: {hint} = {self.gen_expr(node.value)};")
             return
         if isinstance(node, A.ExprStmt) and isinstance(node.expr, A.StringLit) and getattr(node.expr, "_is_doc", False):
-            self.emit(f"//! {node.expr.value}")
+            if self._seen_real_toplevel_item:
+                # Po co najmniej jednej deklaracji `//!` (inner doc) nie jest
+                # juz poprawnym Rustem - patrz komentarz przy
+                # `_seen_real_toplevel_item` w __init__.
+                self.emit(f"// {node.expr.value}")
+            else:
+                self.emit(f"//! {node.expr.value}")
             return
         raise CodegenError(f"nieobslugiwana instrukcja na najwyzszym poziomie: {node!r}", getattr(node, "line", 0))
+
+    def gen_include(self, node: A.IncludeStmt):
+        from .project import flat_include_module_name
+
+        module = flat_include_module_name(node.path)
+        self.emit(f"use crate::{module}::*;")
 
     def gen_get_import(self, node: A.GetImportStmt):
         src = node.source
@@ -810,7 +849,7 @@ class CodeGen:
     def _is_refable(self, type_: A.TypeRef | None) -> bool:
         if type_ is None:
             return False
-        return type_.name in self.sigs.structs or type_.name in self.sigs.enums or type_.name in ("Str", "List")
+        return type_.name in self.sigs.structs or type_.name in self.sigs.enums or type_.name in ("Str", "List", "Dict")
 
     def _param_type_str(self, fun_name: str, param: A.Param, line: int) -> str:
         """Typ parametru w sygnaturze Rusta. Dla parametrow typu struct/
@@ -824,20 +863,54 @@ class CodeGen:
             return f"&mut {base}" if param.name in mutated else f"&{base}"
         return base
 
+    def _gen_owned_arg(self, arg_node) -> str:
+        """Generuje wyrazenie argumentu, ktore MUSI byc WLASNOSCIA (nie
+        referencja) - np. pole struct/argument konstruktora/`Some(...)`.
+        Identyfikator odnoszacy sie do auto-zreferencjonowanego parametru
+        (`&String`/`&SomeStruct`) przekazany WPROST w takie miejsce nie
+        kompiluje sie (E0308 "expected String, found &String" / "expected
+        TypeRef, found &TypeRef"). `.to_string()`/`.clone()` dziala
+        jednakowo na referencje i wlasnosc (bezpieczna heurystyka "zawsze
+        konwertuj", ta sama klasa co przy `Index`/porownaniach Str wyzej -
+        czasem nadmiarowe, nigdy niepoprawne). Bug znaleziony przy
+        pierwszej realnej kompilacji `cargo build` wielomodulowego
+        projektu w tej sesji (typeinfer.hcs/typecheck.hcs - poprzednio
+        niemozliwe bez dostepu do rustc, patrz bootstrap/README.md).
+
+        OGRANICZONE do `Ident`/`Attr` - to jedyne ksztalty wyrazen, ktore
+        MOGA byc referencja (auto-`&` parametru/pola). `Call`/`ListLit`/
+        literaly/`BinOp`/itp. ZAWSZE produkuja SWIEZA wlasnosc w Rust -
+        doklejanie `.clone()` tam jest bezuzyteczne (i psulo dokladne
+        dopasowania w testach regresyjnych, patrz
+        tests/test_hackerc.py). `Index` jest CELOWO pominiety - `gen_expr`
+        dla `A.Index` juz sam dokleja `.clone()` gdy trzeba (patrz wyzej),
+        wiec powtorne klonowanie tu byloby podwojne."""
+        rendered = self.gen_expr(arg_node)
+        if not isinstance(arg_node, (A.Ident, A.Attr)):
+            return rendered
+        t = infer_expr_type(arg_node, self.env) if self.env is not None else None
+        if t is not None:
+            if t.name == "Str":
+                return f"({rendered}).to_string()"
+            if t.name in ("Dict", "List") or (self.sigs and (t.name in self.sigs.structs or t.name in self.sigs.enums)):
+                return f"({rendered}).clone()"
+        return rendered
+
     def _call_arg_str(self, fun_name: str, index: int, arg_node) -> str:
         """Generuje wyrazenie argumentu wywolania, dodajac `&`/`&mut`
         jesli odpowiadajacy parametr znanej funkcji jest referencja
-        (patrz _param_type_str)."""
+        (patrz _param_type_str) - w przeciwnym razie (parametr chce
+        WLASNOSCI) normalizuje przez `_gen_owned_arg`."""
         fn = self.sigs.functions.get(fun_name)
-        rendered = self.gen_expr(arg_node)
         if fn is None or index >= len(fn.params):
-            return rendered
+            return self.gen_expr(arg_node)
         p = fn.params[index]
         if self._is_refable(p.type_):
+            rendered = self.gen_expr(arg_node)
             mutated = self.mut_params.get(fun_name, set())
             prefix = "&mut " if p.name in mutated else "&"
             return f"{prefix}{rendered}"
-        return rendered
+        return self._gen_owned_arg(arg_node)
 
     def gen_fun(self, node: A.FunDecl):
         self.current_type_params = set(node.type_params)
@@ -877,6 +950,35 @@ class CodeGen:
         rendered = self.gen_expr(value)
         if isinstance(value, A.Attr) and self._is_refable(self.current_ret_type):
             return f"{rendered}.clone()"
+        if (
+            not isinstance(value, A.Attr)
+            and not isinstance(value, A.StringLit)
+            and self.current_ret_type is not None
+            and self.current_ret_type.name == "Str"
+        ):
+            # Zwracanie GOLEGO identyfikatora (np. `name` zwiazanego
+            # dopasowaniem `match f [ FunDecl(name, ...) -> ... ]`) typu
+            # Str z funkcji `-> Str` - identyfikator moze byc `&String`
+            # (auto-referencja parametru/pola), a `-> Str` oczekuje
+            # WLASNOSCI (`String`). `.to_string()` dziala jednakowo na
+            # `&String` i `String`. Bug znaleziony przy pierwszej
+            # realnej kompilacji `cargo build` w tej sesji (typecheck.hcs).
+            return f"{rendered}.to_string()"
+        if (
+            isinstance(value, A.Attr)
+            and value.name in ("generic", "generic2")
+            and self.current_ret_type is not None
+            and self.current_ret_type.name == "Option"
+        ):
+            # `TypeRef.generic`/`.generic2` sa ZAWSZE `Option<Box<TypeRef>>`
+            # w wygenerowanym Ruscie (TypeRef jest bezposrednio rekurencyjny -
+            # patrz `TypeRef::new` w ast_nodes.hcs) - zwrocenie ich wprost z
+            # funkcji zadeklarowanej jako `-> Option<TypeRef>` (bez `Box`)
+            # nie kompiluje sie (E0308: "expected Option<TypeRef>, found
+            # Option<Box<TypeRef>>"). `.map(|b| *b)` odpakowuje `Box` przy
+            # zachowaniu `Option`. Bug znaleziony przy pierwszej realnej
+            # kompilacji `cargo build` w tej sesji (typeinfer.hcs).
+            return f"{rendered}.map(|b| *b)"
         return rendered
 
     def gen_stmt(self, node):
@@ -895,12 +997,20 @@ class CodeGen:
                 ))
             )
             hint = f": {rust_type(type_, node.line, self.sigs.structs, self.sigs.enums, self.current_type_params)}" if (type_ and not skip_hint) else ""
-            value = self.gen_expr(node.value) if node.value is not None else "Default::default()"
+            value = self._gen_owned_arg(node.value) if node.value is not None else "Default::default()"
             kw = "let" if node.is_const else "let mut"
             self.emit(f"{kw} {node.name}{hint} = {value};")
             return
         if isinstance(node, A.AssignStmt):
-            self.emit(f"{self.gen_expr(node.target)} {node.op} {self.gen_expr(node.value)};")
+            if node.op == "=":
+                # Zwykle przypisanie `x = wyrazenie` wymaga WLASNOSCI po
+                # prawej (tak jak `let`/argument wywolania) - patrz
+                # `_gen_owned_arg` (bug tej samej klasy co przy `let`,
+                # znaleziony przy pierwszej realnej kompilacji `cargo
+                # build` wielomodulowego projektu w tej sesji, cli.hcs).
+                self.emit(f"{self.gen_expr(node.target)} {node.op} {self._gen_owned_arg(node.value)};")
+            else:
+                self.emit(f"{self.gen_expr(node.target)} {node.op} {self.gen_expr(node.value)};")
             return
         if isinstance(node, A.IfStmt):
             self.emit(f"if {self.gen_expr(node.cond)} {{")
@@ -1051,6 +1161,26 @@ class CodeGen:
 
     # -- expressions ------------------------------------------------------
 
+    def _expr_is_strish(self, e) -> bool:
+        """Czy `e` na pewno da String/&str po wygenerowaniu - rekurencyjnie
+        po lancuchach `a + b + c` (lewostronnie laczne w gramatyce), bo
+        `infer_expr_type` na WEWNETRZNYM `BinOp("+")` czesto nie zwraca
+        Str nawet gdy oba operandy sa Str (typ wyniku konkatenacji nie
+        zawsze jest wywnioskowany), co psulo zewnetrzny `+`/porownanie w
+        lancuchu (np. `a + "::" + b`) - `format!(...) + b` z `b: &String`
+        nie kompiluje sie (String + &String nie ma impl Add). Bug
+        znaleziony przy pierwszej realnej kompilacji `cargo build` w tej
+        sesji (typeinfer.hcs)."""
+        if isinstance(e, A.StringLit):
+            return True
+        if isinstance(e, A.BinOp) and e.op == "+":
+            return self._expr_is_strish(e.left) or self._expr_is_strish(e.right)
+        if self.env is not None:
+            t = infer_expr_type(e, self.env)
+            if t is not None and t.name == "Str":
+                return True
+        return False
+
     def gen_expr(self, node) -> str:
         if isinstance(node, A.NumberLit):
             return node.value
@@ -1078,8 +1208,7 @@ class CodeGen:
             if node.op == "+":
                 lt = infer_expr_type(node.left, self.env) if self.env else None
                 rt = infer_expr_type(node.right, self.env) if self.env else None
-                is_str = (lt is not None and lt.name == "Str") or (rt is not None and rt.name == "Str") \
-                    or isinstance(node.left, A.StringLit) or isinstance(node.right, A.StringLit)
+                is_str = self._expr_is_strish(node.left) or self._expr_is_strish(node.right)
                 is_list = (lt is not None and lt.name == "List") or (rt is not None and rt.name == "List") \
                     or isinstance(node.left, A.ListLit) or isinstance(node.right, A.ListLit)
                 if is_list:
@@ -1099,6 +1228,29 @@ class CodeGen:
                     )
                 if is_str:
                     return f"format!(\"{{}}{{}}\", {self.gen_expr(node.left)}, {self.gen_expr(node.right)})"
+            if node.op in ("==", "!=", "<", ">", "<=", ">="):
+                # Comparacja Str: parametry typu Str dostaja automatyczne
+                # `&T` (patrz docs/SYNTAX.md - "Parametry typu struct/List/Str
+                # dostaja automatycznie &mut T ... albo &T"), wiec porownanie
+                # takiego parametru (`&String`) z literalem (`String`, kazdy
+                # `StringLit` konczy sie `.to_string()` powyzej) odrzuca Rust
+                # (E0277: "can't compare &String with String" - brak
+                # `PartialEq<String> for &String`). `.to_string()` po OBU
+                # stronach dziala jednakowo na `&String` i `String` (przez
+                # blanket `impl<T: Display> ToString for T`, a `&T: Display`
+                # gdy `T: Display`) i normalizuje oba operandy do tego
+                # samego, porownywalnego typu - bez potrzeby wiedziec z gory,
+                # ktora strona jest referencja. Bug znaleziony przy
+                # pierwszej realnej kompilacji `cargo build` wygenerowanego
+                # kodu w tej sesji (poprzednio niemozliwe w tym srodowisku,
+                # patrz bootstrap/README.md) - test:
+                # test_str_comparison_handles_mixed_ref_and_owned_operands.
+                lt = infer_expr_type(node.left, self.env) if self.env else None
+                rt = infer_expr_type(node.right, self.env) if self.env else None
+                is_str_cmp = (lt is not None and lt.name == "Str") or (rt is not None and rt.name == "Str") \
+                    or isinstance(node.left, A.StringLit) or isinstance(node.right, A.StringLit)
+                if is_str_cmp:
+                    return f"({self.gen_expr(node.left)}.to_string() {op} {self.gen_expr(node.right)}.to_string())"
             return f"({self.gen_expr(node.left)} {op} {self.gen_expr(node.right)})"
         if isinstance(node, A.Attr):
             return f"{self.gen_expr(node.target)}.{node.name}"
@@ -1142,6 +1294,21 @@ class CodeGen:
                 # typ bledu do Str, zeby pasowal do deklarowanego Result<T,Str>.
                 path_expr = self.gen_expr(node.args[0])
                 return f"std::fs::read_to_string(&{path_expr}).map_err(|e| e.to_string())"
+            if isinstance(node.callee, A.Ident) and node.callee.name == "args" and len(node.args) == 0:
+                # args() -> List<Str> - argumenty linii polecen BEZ nazwy
+                # programu (parytet z sys.argv[1:] w Pythonie, nie z
+                # env::args() surowym, ktore zawiera argv[0] na indeksie 0).
+                # Umozliwia cli.hcs prawdziwy dispatch podkomend zamiast
+                # tylko demo w main() - patrz cli.hcs.
+                return "std::env::args().skip(1).collect::<Vec<String>>()"
+            if isinstance(node.callee, A.Ident) and node.callee.name == "exit" and len(node.args) == 1:
+                # exit(kod) -> nigdy nie wraca (`std::process::exit` ma typ
+                # `!`, ktory Rust automatycznie dopasowuje do KAZDEGO
+                # oczekiwanego typu, wiec dziala jako ExprStmt bez
+                # dodatkowej obslugi) - pozwala cli.hcs::main() faktycznie
+                # ustawic kod wyjscia procesu (Python: sys.exit(main())).
+                code_expr = self.gen_expr(node.args[0])
+                return f"std::process::exit(({code_expr}) as i32)"
             if isinstance(node.callee, A.Ident) and node.callee.name == "write_file" and len(node.args) == 2:
                 # get <std:io> - write_file(sciezka, tresc) -> Result<Void, Str>.
                 path_expr = self.gen_expr(node.args[0])
@@ -1149,7 +1316,7 @@ class CodeGen:
                 return f"std::fs::write(&{path_expr}, {content_expr}).map_err(|e| e.to_string())"
             if isinstance(node.callee, A.Ident) and node.callee.name in ("some", "ok", "err"):
                 rust_name = {"some": "Some", "ok": "Ok", "err": "Err"}[node.callee.name]
-                args = ", ".join(self.gen_expr(a) for a in node.args)
+                args = ", ".join(self._gen_owned_arg(a) for a in node.args)
                 return f"{rust_name}({args})"
             if isinstance(node.callee, A.Ident) and node.callee.name == "none" and not node.args:
                 return "None"
@@ -1158,7 +1325,7 @@ class CodeGen:
                 box_flags = self.boxed_variant_fields.get((enum_name, node.callee.name))
                 rendered = []
                 for i, a in enumerate(node.args):
-                    expr = self.gen_expr(a)
+                    expr = self._gen_owned_arg(a)
                     kind = box_flags[i] if box_flags and i < len(box_flags) else None
                     if kind == "option":
                         expr = f"{expr}.map(Box::new)"
@@ -1208,10 +1375,10 @@ class CodeGen:
                     key_expr = self.gen_expr(node.args[0])
                     target_expr = self.gen_expr(node.callee.target)
                     if node.callee.name == "fetch":
-                        return f"{target_expr}.get(&{key_expr}).cloned()"
+                        return f"{target_expr}.get({key_expr}.as_str()).cloned()"
                     if node.callee.name == "contains":
-                        return f"{target_expr}.contains_key(&{key_expr})"
-                    return f"{target_expr}.remove(&{key_expr})"
+                        return f"{target_expr}.contains_key({key_expr}.as_str())"
+                    return f"{target_expr}.remove({key_expr}.as_str())"
             if isinstance(node.callee, A.Attr) and self.env is not None:
                 # Wywolanie metody (obj.method(args)) zadeklarowanej w
                 # 'impl' - target_t pozwala znalezc sygnature metody w
@@ -1229,20 +1396,23 @@ class CodeGen:
                         mutated = self.method_mut_params.get(f"{target_t.name}::{m.name}", set())
                         rendered_args = []
                         for i, a in enumerate(node.args):
-                            rendered = self.gen_expr(a)
                             if i < len(method_params) and self._is_refable(method_params[i].type_):
-                                prefix = "&mut " if method_params[i].name in mutated else "&"
+                                rendered = self.gen_expr(a)
+                                mutated_m = self.method_mut_params.get(f"{target_t.name}::{m.name}", set())
+                                prefix = "&mut " if method_params[i].name in mutated_m else "&"
                                 rendered = f"{prefix}{rendered}"
+                            else:
+                                rendered = self._gen_owned_arg(a)
                             rendered_args.append(rendered)
                         args_str = ", ".join(rendered_args)
                         return f"{self.gen_expr(node.callee.target)}.{node.callee.name}({args_str})"
             if isinstance(node.callee, A.Ident) and self.sigs and node.callee.name in self.sigs.structs:
-                args = ", ".join(self.gen_expr(a) for a in node.args)
+                args = ", ".join(self._gen_owned_arg(a) for a in node.args)
                 return f"{node.callee.name}::new({args})"
             if isinstance(node.callee, A.Ident) and self.sigs and node.callee.name in self.sigs.functions:
                 args = ", ".join(self._call_arg_str(node.callee.name, i, a) for i, a in enumerate(node.args))
                 return f"{node.callee.name}({args})"
-            args = ", ".join(self.gen_expr(a) for a in node.args)
+            args = ", ".join(self._gen_owned_arg(a) for a in node.args)
             return f"{self.gen_expr(node.callee)}({args})"
         raise CodegenError(f"nieobslugiwane wyrazenie: {node!r}", getattr(node, "line", 0))
 
