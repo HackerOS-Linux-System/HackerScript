@@ -125,6 +125,8 @@ class Parser:
                 return self.parse_using()
             if kw == "get":
                 return self.parse_get_import()
+            if kw == "include":
+                return self.parse_include()
             if kw in ("let", "const"):
                 return self.parse_let(is_const=(kw == "const"))
             if kw == "pub":
@@ -214,6 +216,17 @@ class Parser:
             self.expect(TokKind.RANGLE)
 
         return A.GetImportStmt(source=source, name=name, version=version, details=details, line=line)
+
+    def parse_include(self) -> A.IncludeStmt:
+        """`include <sciezka>` - patrz duza uwaga przy `IncludeStmt` w
+        ast_nodes.py i `resolve_include_path` w project.py. Skladniowo
+        prostsze niz `get` - jeden segment, bez `source:`/`::wersja`/
+        `import <szczegoly>`."""
+        line = self.expect(TokKind.KEYWORD, "include").line
+        self.expect(TokKind.LANGLE)
+        path = self._read_angle_segment()
+        self.expect(TokKind.RANGLE)
+        return A.IncludeStmt(path=path, line=line)
 
     def parse_type(self) -> A.TypeRef:
         t = self.expect(TokKind.IDENT if self.check(TokKind.IDENT) else TokKind.KEYWORD)
