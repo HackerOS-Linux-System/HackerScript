@@ -39,6 +39,41 @@ def flat_module_name(source: str, name: str, version: str | None) -> str:
     return "_hks_" + "_".join(safe)
 
 
+def flat_include_module_name(path: str) -> str:
+    """Splaszczona nazwa modulu dla `include <sciezka>` - odpowiednik
+    `flat_module_name` ale dla sciezek wzglednych zamiast trojki
+    (source, name, version) - patrz `IncludeStmt` w ast_nodes.py i
+    `resolve_include_path` ponizej. Prefiks `_hks_inc_` (zamiast
+    samego `_hks_`) zeby NIGDY nie kolidowac z nazwa modulu z `get
+    <...>` nawet przy tej samej "koncowce" (np. `include <io>` vs
+    `get <std:io>` musza dac RozNE nazwy)."""
+    p = path[:-4] if path.endswith(".hcs") else path
+    safe = p.replace("-", "_").replace("/", "_")
+    return "_hks_inc_" + safe
+
+
+def resolve_include_path(raw_path: str, base_dir: Path) -> Path | None:
+    """Rozwiazuje `include <raw_path>` na prawdziwy plik `.hcs`, WZGLEDEM
+    `base_dir` (katalog pliku, w ktorym jest `include`) - w odroznieniu
+    od `get <...>`, ktory zawsze szuka od `libs_root`/`bootstrap_root`.
+    Kolejnosc dokladnie jak Rustowe `mod nazwa;` (plik przed
+    katalogiem):
+      1. `raw_path` juz konczy sie na `.hcs` -> uzyj WPROST.
+      2. `base_dir / (raw_path + ".hcs")` jesli istnieje jako PLIK.
+      3. `base_dir / raw_path / "mod.hcs"` jesli istnieje (katalog).
+    Zwraca `None` jesli zaden wariant nie istnieje."""
+    if raw_path.endswith(".hcs"):
+        candidate = base_dir / raw_path
+        return candidate if candidate.is_file() else None
+    file_candidate = base_dir / f"{raw_path}.hcs"
+    if file_candidate.is_file():
+        return file_candidate
+    dir_candidate = base_dir / raw_path / "mod.hcs"
+    if dir_candidate.is_file():
+        return dir_candidate
+    return None
+
+
 def _module_file(libs_root: Path, source: str, name: str, version: str | None) -> Path:
     parts = [name] + ([version] if version else [])
     return libs_root / source / "lib" / Path(*parts).with_suffix(".hcs")
@@ -119,12 +154,40 @@ def _resolve_project_files(
     entry_file = parse_one(entry, "main")
     files.append(entry_file)
 
-    queue: list[A.GetImportStmt] = [
-        s for s in entry_file.program.body if isinstance(s, A.GetImportStmt) and s.source in _MODULE_SOURCES
-    ]
+    # Kolejka trzyma pary (stmt, base_dir) - `base_dir` to katalog PLIKU,
+    # w ktorym `stmt` sie znajduje (potrzebne wylacznie dla `IncludeStmt`,
+    # ktory jest rozwiazywany WZGLEDEM tego katalogu - `GetImportStmt`
+    # ignoruje `base_dir`, zawsze szuka od libs_root/bootstrap_root).
+    def module_stmts(df: "_DiscoveredFile"):
+        base_dir = df.path.parent
+        for s in df.program.body:
+            if isinstance(s, A.GetImportStmt) and s.source in _MODULE_SOURCES:
+                yield (s, base_dir)
+            elif isinstance(s, A.IncludeStmt):
+                yield (s, base_dir)
+
+    queue: list[tuple] = list(module_stmts(entry_file))
 
     while queue:
-        imp = queue.pop(0)
+        imp, base_dir = queue.pop(0)
+
+        if isinstance(imp, A.IncludeStmt):
+            flat = flat_include_module_name(imp.path)
+            if flat in seen:
+                continue
+            seen.add(flat)
+            mod_file = resolve_include_path(imp.path, base_dir)
+            if mod_file is None:
+                warnings.append(
+                    f"include <{imp.path}> -> nie znaleziono (szukano {base_dir / (imp.path + '.hcs')} "
+                    f"i {base_dir / imp.path / 'mod.hcs'})"
+                )
+                continue
+            df = parse_one(mod_file, flat)
+            files.append(df)
+            queue.extend(module_stmts(df))
+            continue
+
         flat = flat_module_name(imp.source, imp.name, imp.version)
         if flat in seen:
             continue
@@ -153,7 +216,7 @@ def _resolve_project_files(
 
         df = parse_one(mod_file, flat)
         files.append(df)
-        queue.extend(s for s in df.program.body if isinstance(s, A.GetImportStmt) and s.source in _MODULE_SOURCES)
+        queue.extend(module_stmts(df))
 
     return files
 
@@ -289,10 +352,31 @@ def build_project(
             result.module_files[df.flat_name] = mod_out
             mod_declarations.append(df.flat_name)
 
+    # Deklaracje `mod X;` w Ruscie sa ZWYKLYMI ITEMAMI (moga stac gdziekolwiek
+    # po atrybutach wewnetrznych `#![...]`), ale atrybuty wewnetrzne MUSZA
+    # byc pierwszymi tokenami w pliku (poza komentarzami) - Rust odrzuca je
+    # (E0753 "an inner attribute is not permitted in this context"), jesli
+    # cokolwiek innego niz komentarz/inny atrybut wewnetrzny je poprzedza.
+    # `entry_rust` zaczyna sie od `#![allow(...)]` (naglowek dopisywany przez
+    # `codegen.py`/`codegen.hcs`) - dawne, naiwne `mod_header + entry_rust`
+    # wstawialo `mod X;` PRZED tym atrybutem i lamalo kompilacje na KAZDYM
+    # projekcie wieloplikowym. Bug znaleziony przy pierwszej realnej
+    # kompilacji `cargo build` wielomodulowego projektu w tej sesji
+    # (poprzednio niemozliwe bez dostepu do rustc, patrz bootstrap/README.md).
+    # Naprawa: wstaw `mod X;` PO ostatniej wiodacej linii `#![...]`, nie przed
+    # nia.
     mod_header = "\n".join(f"mod {m};" for m in mod_declarations)
     if mod_header:
-        mod_header += "\n\n"
-    result.main_rs.write_text(mod_header + entry_rust, encoding="utf-8")
+        entry_lines = entry_rust.split("\n")
+        insert_at = 0
+        for idx, line in enumerate(entry_lines):
+            if line.startswith("//") or line.startswith("#![") or line.strip() == "":
+                insert_at = idx + 1
+            else:
+                break
+        entry_lines[insert_at:insert_at] = ["", mod_header, ""]
+        entry_rust = "\n".join(entry_lines)
+    result.main_rs.write_text(entry_rust, encoding="utf-8")
 
     # Cargo.toml
     deps_lines = []
