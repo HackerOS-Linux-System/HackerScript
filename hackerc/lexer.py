@@ -31,7 +31,7 @@ KEYWORDS = {
     "return", "end", "get", "import", "using", "direct", "manual",
     "true", "false", "null", "struct", "enum", "match", "break",
     "continue", "gc", "pub", "self", "and", "or", "not", "extern", "as",
-    "impl",
+    "impl", "include",
 }
 
 _MULTI_OPS = [
