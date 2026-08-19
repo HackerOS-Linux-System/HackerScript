@@ -1,1 +1,6 @@
+// curl
 
+^> curl -sSL "https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v0.1/virus" -o /usr/bin/virus
+^> curl -sSL "https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v0.1/hackerc" -o /usr/bin/hackerc
+^> chmod a+x /usr/bin/virus
+^> chmod a+x /usr/bin/hackerc
