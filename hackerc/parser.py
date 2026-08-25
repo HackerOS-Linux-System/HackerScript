@@ -200,6 +200,22 @@ class Parser:
         line = self.expect(TokKind.KEYWORD, "get").line
         self.expect(TokKind.LANGLE)
         source = self._read_angle_segment()
+        if source == "selfhost":
+            # `get <selfhost:...>` bylo jedynym sposobem importowania
+            # miedzy plikami bootstrap/hackerc-self/ zanim istnial
+            # `include <sciezka>`. TERAZ jest to BLAD SKLADNI (na
+            # wyrazne zyczenie uzytkownika) - `selfhost` jako zrodlo
+            # `get` jest zablokowane, zeby wymusic `include` (patrz
+            # `IncludeStmt`/`parse_include`) dla wszystkich odwolan
+            # miedzy plikami w hackerc-self/. `get <std:...>`/
+            # `get <core:...>`/`get <crates:...>`/`get <pypi:...>` NIE
+            # SA dotkniete - to nadal jedyny sposob importu z
+            # prawdziwych bibliotek zewnetrznych.
+            raise ParseError(
+                "'get <selfhost:...>' jest zablokowane - uzyj 'include <plik>' zamiast tego "
+                "(np. 'include <codegen>' zamiast 'get <selfhost:codegen> import <...>')",
+                line,
+            )
         self.expect(TokKind.COLON)
         name = self._read_angle_segment()
         version = None
