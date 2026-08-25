@@ -1,0 +1,151 @@
+fun str_is_space(c: Str) -> Bool [
+    end c == " " or c == "\t" or c == "\n" or c == "\r"
+]
+
+!! Czy `s` zaczyna sie od `prefix`.
+fun str_starts_with(s: Str, prefix: Str) -> Bool [
+    let n = prefix.len()
+    if n > s.len() [
+        end false
+    ]
+    end s.slice(0, n) == prefix
+]
+
+!! Czy `s` konczy sie na `suffix`.
+fun str_ends_with(s: Str, suffix: Str) -> Bool [
+    let n = suffix.len()
+    let m = s.len()
+    if n > m [
+        end false
+    ]
+    end s.slice(m - n, m) == suffix
+]
+
+!! Indeks PIERWSZEGO wystapienia `needle` w `s` (w znakach, nie
+!! bajtach), albo `none()` gdy nie znaleziono. Pusty `needle` "znajduje
+!! sie" na pozycji 0 (parytet z Rust `str::find("")`).
+fun str_index_of(s: Str, needle: Str) -> Option<Int> [
+    let n = needle.len()
+    let m = s.len()
+    if n == 0 [
+        end some(0)
+    ]
+    if n > m [
+        end none()
+    ]
+    let i = 0
+    let last = m - n
+    while i <= last [
+        if s.slice(i, i + n) == needle [
+            end some(i)
+        ]
+        i = i + 1
+    ]
+    end none()
+]
+
+!! Czy `s` zawiera `needle` (gdziekolwiek).
+fun str_contains(s: Str, needle: Str) -> Bool [
+    match str_index_of(s, needle) [
+        Some(_i) -> [
+            end true
+        ]
+        None -> [
+            end false
+        ]
+    ]
+]
+
+!! Dzieli `s` po KAZDYM (niezachodzacym na siebie, od lewej) wystapieniu
+!! `sep`. Pusty `sep` zwraca `[s]` bez dzielenia (unika nieskonczonej
+!! petli - odpowiednik zachowania wielu jezykow dla pustego separatora).
+!! Parytet z Rust `str::split` - kolejne separatory dają puste elementy
+!! (`"a,,b".split(",")` -> `["a", "", "b"]`).
+fun str_split(s: Str, sep: Str) -> List<Str> [
+    let out: List<Str> = []
+    let n = sep.len()
+    let m = s.len()
+    if n == 0 [
+        out.push(s)
+        end out
+    ]
+    let start = 0
+    let i = 0
+    while i + n <= m [
+        if s.slice(i, i + n) == sep [
+            out.push(s.slice(start, i))
+            i = i + n
+            start = i
+        ] else [
+            i = i + 1
+        ]
+    ]
+    out.push(s.slice(start, m))
+    end out
+]
+
+!! Usuwa biale znaki (spacja/tab/\n/\r) z obu koncow `s`.
+fun str_trim(s: Str) -> Str [
+    let m = s.len()
+    let start = 0
+    while start < m and str_is_space(s.char_at(start)) [
+        start = start + 1
+    ]
+    let end_i = m
+    while end_i > start and str_is_space(s.char_at(end_i - 1)) [
+        end_i = end_i - 1
+    ]
+    end s.slice(start, end_i)
+]
+
+!! Zamienia WSZYSTKIE (niezachodzace na siebie, od lewej) wystapienia
+!! `from` na `to` w `s`. Pusty `from` zwraca `s` bez zmian (unika
+!! nieskonczonej petli).
+fun str_replace(s: Str, from: Str, to: Str) -> Str [
+    let n = from.len()
+    let m = s.len()
+    if n == 0 [
+        end s
+    ]
+    let out = ""
+    let start = 0
+    let i = 0
+    while i + n <= m [
+        if s.slice(i, i + n) == from [
+            out = out + s.slice(start, i) + to
+            i = i + n
+            start = i
+        ] else [
+            i = i + 1
+        ]
+    ]
+    out = out + s.slice(start, m)
+    end out
+]
+
+!! Powtarza `s` `n` razy (`n <= 0` daje pusty string).
+fun str_repeat(s: Str, n: Int) -> Str [
+    let out = ""
+    let i = 0
+    while i < n [
+        out = out + s
+        i = i + 1
+    ]
+    end out
+]
+
+!! Laczy elementy `parts` w jeden `Str`, wstawiajac `sep` MIEDZY nimi
+!! (nie na koncu) - odpowiednik Rust `parts.join(sep)`.
+fun str_join(parts: List<Str>, sep: Str) -> Str [
+    let out = ""
+    let i = 0
+    let n = parts.len()
+    while i < n [
+        if i > 0 [
+            out = out + sep
+        ]
+        out = out + parts[i].clone()
+        i = i + 1
+    ]
+    end out
+]
