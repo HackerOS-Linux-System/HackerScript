@@ -1,0 +1,47 @@
+get <std:string> import <str_trim::str_join>
+
+!! Jak `run_command`, ale przy niepowodzeniu opakowuje komunikat
+!! bledu informacja O KTORYM programie/argumentach chodzilo -
+!! wygodniejsze do logowania/wyswietlania uzytkownikowi niz surowy
+!! stderr bez kontekstu.
+fun run_command_checked(program: Str, args: List<Str>) -> Result<Str, Str> [
+    match run_command(program.clone(), args.clone()) [
+        Ok(out) -> [
+            end ok(out)
+        ]
+        Err(e) -> [
+            end err("polecenie '" + program + "' nie powiodlo sie: " + str_trim(e))
+        ]
+    ]
+]
+
+!! Jak `run_command`, ale IGNORUJE stdout/stderr i zwraca tylko
+!! sukces/porazke jako `Bool` - wygodne, gdy interesuje Cie tylko czy
+!! polecenie sie udalo (np. sprawdzenie czy narzedzie jest
+!! zainstalowane: `command_succeeds("rustc", ["--version"])`).
+fun command_succeeds(program: Str, args: List<Str>) -> Bool [
+    match run_command(program, args) [
+        Ok(_out) -> [
+            end true
+        ]
+        Err(_e) -> [
+            end false
+        ]
+    ]
+]
+
+!! Uruchamia `program` BEZ zadnych argumentow - skrot dla
+!! najczestszego przypadku (np. `run_command_simple("pwd")`).
+fun run_command_simple(program: Str) -> Result<Str, Str> [
+    let no_args: List<Str> = []
+    end run_command(program, no_args)
+]
+
+!! `run_command_combined()` (builtin) z komunikatem OKALAJACYM
+!! (`"$ program args\n" + wyjscie`) - wygodne do logowania/pokazania
+!! uzytkownikowi PELNEGO przebiegu polecenia (np. `virus lint`, gdzie
+!! interesuje nas i stdout, i stderr, bez wzgledu na kod wyjscia -
+!! patrz uwaga przy `run_command_combined`).
+fun run_command_combined_labeled(program: Str, args: List<Str>) -> Str [
+    end "$ " + program.clone() + " " + str_join(args.clone(), " ") + "\n" + run_command_combined(program, args)
+]
