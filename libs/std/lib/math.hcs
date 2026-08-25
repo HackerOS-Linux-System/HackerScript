@@ -1,0 +1,135 @@
+const PI: Float = 3.14159265358979323846
+
+!! Podstawa logarytmu naturalnego (przyblizenie do precyzji `f64`).
+const E: Float = 2.71828182845904523536
+
+!! Wartosc bezwzgledna liczby calkowitej.
+fun math_abs_int(x: Int) -> Int [
+    if x < 0 [
+        end 0 - x
+    ]
+    end x
+]
+
+!! Wartosc bezwzgledna liczby zmiennoprzecinkowej.
+fun math_abs_float(x: Float) -> Float [
+    if x < 0.0 [
+        end 0.0 - x
+    ]
+    end x
+]
+
+!! Mniejsza z dwoch liczb calkowitych.
+fun math_min_int(a: Int, b: Int) -> Int [
+    if a < b [
+        end a
+    ]
+    end b
+]
+
+!! Wieksza z dwoch liczb calkowitych.
+fun math_max_int(a: Int, b: Int) -> Int [
+    if a > b [
+        end a
+    ]
+    end b
+]
+
+!! Mniejsza z dwoch liczb zmiennoprzecinkowych.
+fun math_min_float(a: Float, b: Float) -> Float [
+    if a < b [
+        end a
+    ]
+    end b
+]
+
+!! Wieksza z dwoch liczb zmiennoprzecinkowych.
+fun math_max_float(a: Float, b: Float) -> Float [
+    if a > b [
+        end a
+    ]
+    end b
+]
+
+!! `base` podniesione do calkowitej, NIEUJEMNEJ potegi `exp` (Int).
+!! `exp < 0` zwraca 0 - wynik ulamkowy nie mialby sensu jako `Int`
+!! (uzyj `math_pow_float` dla ujemnych potreg).
+fun math_pow_int(base: Int, exp: Int) -> Int [
+    if exp <= 0 [
+        end 1
+    ]
+    let result = 1
+    let i = 0
+    while i < exp [
+        result = result * base
+        i = i + 1
+    ]
+    end result
+]
+
+!! `base` podniesione do calkowitej potegi `exp` (Int, moze byc
+!! ujemna - wtedy wynik to odwrotnosc `base^(-exp)`).
+fun math_pow_float(base: Float, exp: Int) -> Float [
+    if exp == 0 [
+        end 1.0
+    ]
+    let neg = exp < 0
+    let e = exp
+    if neg [
+        e = 0 - e
+    ]
+    let result = 1.0
+    let i = 0
+    while i < e [
+        result = result * base
+        i = i + 1
+    ]
+    if neg [
+        end 1.0 / result
+    ]
+    end result
+]
+
+!! Pierwiastek kwadratowy (metoda Newtona, 40 iteracji). `x <= 0.0`
+!! zwraca `0.0` (bez obslugi liczb zespolonych).
+fun math_sqrt(x: Float) -> Float [
+    if x <= 0.0 [
+        end 0.0
+    ]
+    let guess = x
+    let i = 0
+    while i < 40 [
+        guess = (guess + x / guess) / 2.0
+        i = i + 1
+    ]
+    end guess
+]
+
+!! Zaokragla w dol (w strone -nieskonczonosci) - odpowiednik Rust
+!! `f64::floor`.
+fun math_floor(x: Float) -> Float [
+    let t = (x as Int) as Float
+    if t > x [
+        end t - 1.0
+    ]
+    end t
+]
+
+!! Zaokragla w gore (w strone +nieskonczonosci) - odpowiednik Rust
+!! `f64::ceil`.
+fun math_ceil(x: Float) -> Float [
+    let t = (x as Int) as Float
+    if t < x [
+        end t + 1.0
+    ]
+    end t
+]
+
+!! Zaokragla do najblizszej liczby calkowitej (0.5 zaokragla "od zera",
+!! tak jak Rust `f64::round`).
+fun math_round(x: Float) -> Float [
+    if x >= 0.0 [
+        end math_floor(x + 0.5)
+    ]
+    end math_ceil(x - 0.5)
+]
