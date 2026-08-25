@@ -1,11 +1,15 @@
 // virus
 // cargo
 // rustc
+// python3.14-venv
+// python3.14
 
 > virus build --release
   
 ;; install missing libs 
-;; > sudo apt install build-essential cmake g++
+;; > sudo apt install build-essential cmake g++ ccache python3-dev patchelf nuitka
+;; build hackerc
+;; > cd hackerc && python -m nuitka --onefile --include-package=hackerc --output-dir=dist --output-filename=hackerc entrypoint.py
 
 ;; build for older versions > cd virus && cargo build --release && sudo apt install libpython3.14 python3.14-dev && cd .. && cd hackerc && pyinstaller --onefile hackerc/cli.py
 
