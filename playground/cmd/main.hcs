@@ -1,4 +1,4 @@
-using <1.2>
+using <0.1>
 
 !! struct - kompiluje sie do prawdziwego struct Rusta + konstruktora.
 struct Point [
