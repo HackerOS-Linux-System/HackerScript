@@ -1,1 +1,47 @@
+using <1.2>
 
+!! struct - kompiluje sie do prawdziwego struct Rusta + konstruktora.
+struct Point [
+    x: Int,
+    y: Int
+]
+
+!! Rekurencja + if/else - Fibonacci, klasyka.
+fun fib(n: Int) -> Int [
+    if n <= 1 [
+        end n
+    ] else [
+        end fib(n - 1) + fib(n - 2)
+    ]
+]
+
+!! Odleglosc miedzy dwoma punktami (pierwiastek liczony reczne -
+!! metoda Newtona - zobacz get <std:math> dla gotowej wersji).
+fun distance(a: Point, b: Point) -> Float [
+    let dx = (a.x - b.x) as Float
+    let dy = (a.y - b.y) as Float
+    let squared = dx * dx + dy * dy
+    let guess = squared
+    let i = 0
+    while i < 20 [
+        guess = (guess + squared / guess) / 2.0
+        i = i + 1
+    ]
+    end guess
+]
+
+!! Punkt wejscia - `end` bez wartosci konczy `fun main()`.
+fun main() [
+    let origin = Point(0, 0)
+    let target = Point(3, 4)
+
+    log("fib(10) =", fib(10))
+    log("dystans origin->target =", distance(origin, target))
+
+    let names = ["Ala", "Basia", "Czarek"]
+    for name in names [
+        log("czesc,", name)
+    ]
+
+    end
+]
