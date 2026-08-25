@@ -4,8 +4,8 @@ from . import ast_nodes as A
 from .diagnostics import Diagnostic
 from .typeinfer import Signatures, TypeEnv, infer_expr_type, _types_equal
 
-KNOWN_GET_SOURCES = {"pypi", "crates", "std", "core", "selfhost"}
-_BUILTIN_FUNCS = {"log", "__direct__", "some", "none", "ok", "err", "read_file", "write_file", "dict"}
+KNOWN_GET_SOURCES = {"pypi", "crates", "std", "core", "selfhost", "virus"}
+_BUILTIN_FUNCS = {"log", "elog", "__direct__", "some", "none", "ok", "err", "read_file", "write_file", "dict", "env_var", "run_command", "run_command_combined", "http_get", "current_dir"}
 
 
 class Checker:
