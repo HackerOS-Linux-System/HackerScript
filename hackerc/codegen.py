@@ -179,6 +179,118 @@ def _mutated_names_in_body(body: list) -> set[str]:
     return mutated
 
 
+def _char_indexed_str_params(body: list, str_param_names: set[str], sigs, env) -> set[str]:
+    """Zwraca nazwy zmiennych typu Str (parametrow LUB `let`-ow na
+    NAJWYZSZYM poziomie ciala funkcji), na ktorych `.char_at`/`.slice`
+    jest wywolywane WIELOKROTNIE (>=2 razy) gdziekolwiek w ciele -
+    uzywane przez `gen_fun`/`gen_stmt` (LetStmt) do zdecydowania, ktore
+    zmienne oplaca sie zmaterializowac raz jako `Vec<char>` (patrz
+    `_char_cache_var`) zamiast re-skanowac string od poczatku przy
+    KAZDYM wywolaniu `.char_at(i)`/`.slice(a,b)` (`.chars().nth(i)` w
+    Rust jest O(i) - w petli `while i < s.len() [ ... s.char_at(i) ...
+    ]` to O(n^2) calkowicie). Bug wydajnosciowy znaleziony przy
+    uzyciu skompilowanego stage1 (samo-hostowanego hackerc) do
+    zbudowania duzych plikow (parser.hcs/codegen.hcs) w tej sesji -
+    `check`/`build` na wiekszych plikach trwalo dziesiatki sekund
+    zamiast ulamka sekundy, mimo ze semantyka byla poprawna (nie byla
+    to petla nieskonczona, tylko zla zlozonosc).
+
+    WAZNE: pierwsza wersja tej funkcji (poprzednia sesja) sledzila
+    WYLACZNIE parametry - `lexer.hcs::tokenize` (najgorszy przypadek w
+    calym bootstrapie) robi `let src = strip_multiline_comments(source)`
+    na SAMYM POCZATKU i pozniej indeksuje `src` (LOKALNA zmienna, NIE
+    parametr) w scislej petli - ta wersja pomijala go calkowicie,
+    zostawiajac O(n^2) nietkniete dla dokladnie najgorszego przypadku.
+    Naprawione: `str_names` teraz obejmuje TEZ `let`-y najwyzszego
+    poziomu typu Str (z adnotacja LUB wywnioskowane przez `env`,
+    budowane W TEJ SAMEJ KOLEJNOSCI co realny `gen_stmt` pozniej)."""
+    str_names = set(str_param_names)
+    for s in body:
+        if isinstance(s, A.LetStmt):
+            t = s.type_
+            if t is None and s.value is not None:
+                t = infer_expr_type(s.value, env)
+            if env is not None:
+                env.declare(s.name, t)
+            if t is not None and t.name == "Str":
+                str_names.add(s.name)
+
+    counts: dict[str, int] = {}
+
+    def bump(name):
+        counts[name] = counts.get(name, 0) + 1
+
+    def walk_expr(e):
+        if e is None:
+            return
+        if isinstance(e, A.Call):
+            if (
+                isinstance(e.callee, A.Attr)
+                and e.callee.name in ("char_at", "slice")
+                and isinstance(e.callee.target, A.Ident)
+                and e.callee.target.name in str_names
+            ):
+                bump(e.callee.target.name)
+            walk_expr(e.callee)
+            for a in e.args:
+                walk_expr(a)
+        elif isinstance(e, A.BinOp):
+            walk_expr(e.left)
+            walk_expr(e.right)
+        elif isinstance(e, A.UnaryOp):
+            walk_expr(e.operand)
+        elif isinstance(e, A.Attr):
+            walk_expr(e.target)
+        elif isinstance(e, A.Index):
+            walk_expr(e.target)
+            walk_expr(e.index)
+        elif isinstance(e, A.ListLit):
+            for it in e.items:
+                walk_expr(it)
+        elif isinstance(e, A.Cast):
+            walk_expr(e.target)
+        elif isinstance(e, A.TryOp):
+            walk_expr(e.target)
+
+    def walk(node):
+        if isinstance(node, A.AssignStmt):
+            walk_expr(node.target)
+            walk_expr(node.value)
+        elif isinstance(node, A.ExprStmt):
+            walk_expr(node.expr)
+        elif isinstance(node, A.LetStmt):
+            walk_expr(node.value)
+        elif isinstance(node, A.ReturnStmt):
+            walk_expr(node.value)
+        elif isinstance(node, A.IfStmt):
+            walk_expr(node.cond)
+            for s in node.body:
+                walk(s)
+            for econd, ebody in node.elifs:
+                walk_expr(econd)
+                for s in ebody:
+                    walk(s)
+            if node.else_body:
+                for s in node.else_body:
+                    walk(s)
+        elif isinstance(node, A.WhileStmt):
+            walk_expr(node.cond)
+            for s in node.body:
+                walk(s)
+        elif isinstance(node, (A.ForStmt, A.ManualBlock)):
+            for s in node.body:
+                walk(s)
+        elif isinstance(node, A.MatchStmt):
+            walk_expr(node.subject)
+            for arm in node.arms:
+                for s in arm.body:
+                    walk(s)
+
+    for s in body:
+        walk(s)
+    return {name for name, n in counts.items() if n >= 2}
+
+
 def _compute_mut_params(prog: A.Program) -> dict[str, set[str]]:
     """Zwraca {nazwa_funkcji: {nazwy parametrow ktorych POLA sa gdzies w
     ciele przypisywane LUB mutowane metoda typu .push/.pop}} - potrzebne,
@@ -329,6 +441,7 @@ class CodeGen:
         # przy pierwszej realnej kompilacji `cargo build` wygenerowanego
         # kodu w tej sesji - patrz bootstrap/README.md).
         self._seen_real_toplevel_item = False
+        self._char_cache_params: set[str] = set()
         self.extern_libs: set[str] = set()
         self.mut_params: dict[str, set[str]] = {}
         self.method_mut_params: dict[str, set[str]] = {}
@@ -648,7 +761,7 @@ class CodeGen:
     def gen_get_import(self, node: A.GetImportStmt):
         src = node.source
         name = node.name
-        if src in ("std", "core", "selfhost"):
+        if src in ("std", "core", "selfhost", "virus"):
             from .project import flat_module_name
 
             module = flat_module_name(src, name, node.version)
@@ -888,6 +1001,21 @@ class CodeGen:
         rendered = self.gen_expr(arg_node)
         if not isinstance(arg_node, (A.Ident, A.Attr)):
             return rendered
+        if isinstance(arg_node, A.Attr) and arg_node.name in ("generic", "generic2"):
+            # `TypeRef.generic`/`.generic2` sa ZAWSZE `Option<Box<TypeRef>>`
+            # w wygenerowanym Ruscie (TypeRef jest bezposrednio
+            # rekurencyjny), ale `Option<TypeRef>` (bez Box) na poziomie
+            # zrodla .hcs - przekazanie ich WPROST tam, gdzie oczekiwana
+            # jest wlasnosc (argument/`let`), nie kompiluje sie (E0308
+            # "expected Option<TypeRef>, found Option<Box<TypeRef>>").
+            # `.map(|b| *b)` odpakowuje `Box` przy zachowaniu `Option` -
+            # ta sama poprawka co w `_gen_return_expr` (tam TYLKO dla
+            # `return`), tu uogolniona na KAZDA pozycje wymagajaca
+            # wlasnosci. Bug znaleziony przy uzyciu skompilowanego stage1
+            # (samo-hostowanego hackerc) do zbudowania cli.hcs w tej
+            # sesji - `typeinfer.hcs::types_equal` wywoluje siebie
+            # rekurencyjnie na `ta.generic`/`tb.generic`.
+            return f"({rendered}).map(|b| *b)"
         t = infer_expr_type(arg_node, self.env) if self.env is not None else None
         if t is not None:
             if t.name == "Str":
@@ -926,6 +1054,16 @@ class CodeGen:
         self.current_ret_type = node.ret_type
         self.emit(f"pub fn {node.name}{gen_head}({params}){ret} {{")
         self.indent += 1
+        str_param_names = {p.name for p in node.params if p.type_ is not None and p.type_.name == "Str"}
+        # `.char_at(i)`/`.slice(a,b)` na PARAMETRZE uzywanym wielokrotnie
+        # (typowo w petli skanujacej caly string znak-po-znaku) sa
+        # zmaterializowane RAZ jako `Vec<char>` na poczatku funkcji -
+        # patrz `_char_indexed_str_params`/`_char_cache_var` - zamiast
+        # O(n) `.chars().nth(i)`/`.chars().skip().take()` przy KAZDYM
+        # wywolaniu (O(n^2) razem).
+        self._char_cache_params = _char_indexed_str_params(node.body, str_param_names, self.sigs, self.env)
+        for pname in sorted(self._char_cache_params & str_param_names):
+            self.emit(f"let {self._char_cache_var(pname)}: Vec<char> = {pname}.chars().collect();")
         for s in node.body:
             self.gen_stmt(s)
         self.indent -= 1
@@ -933,6 +1071,11 @@ class CodeGen:
         self.emit("")
         self.current_type_params = set()
         self.current_ret_type = None
+        self._char_cache_params = set()
+
+    @staticmethod
+    def _char_cache_var(param_name: str) -> str:
+        return f"__hks_chars_{param_name}"
 
     # -- statements ---------------------------------------------------
 
@@ -1000,6 +1143,8 @@ class CodeGen:
             value = self._gen_owned_arg(node.value) if node.value is not None else "Default::default()"
             kw = "let" if node.is_const else "let mut"
             self.emit(f"{kw} {node.name}{hint} = {value};")
+            if type_ is not None and type_.name == "Str" and node.name in self._char_cache_params:
+                self.emit(f"let {self._char_cache_var(node.name)}: Vec<char> = {node.name}.chars().collect();")
             return
         if isinstance(node, A.AssignStmt):
             if node.op == "=":
@@ -1135,6 +1280,9 @@ class CodeGen:
         if isinstance(e, A.Call) and isinstance(e.callee, A.Ident) and e.callee.name == "log":
             self.emit(self._gen_log(e.args) + ";")
             return
+        if isinstance(e, A.Call) and isinstance(e.callee, A.Ident) and e.callee.name == "elog":
+            self.emit(self._gen_log(e.args, macro="eprintln") + ";")
+            return
         self.emit(self.gen_expr(e) + ";")
 
     def gen_direct(self, idx: int):
@@ -1153,11 +1301,11 @@ class CodeGen:
         self.indent -= 1
         self.emit("}")
 
-    def _gen_log(self, args: list) -> str:
+    def _gen_log(self, args: list, macro: str = "println") -> str:
         fmt = " ".join(["{}"] * len(args))
         rendered = ", ".join(self.gen_expr(a) for a in args)
         sep = ", " if args else ""
-        return f'println!("{fmt}"{sep}{rendered})'
+        return f'{macro}!("{fmt}"{sep}{rendered})'
 
     # -- expressions ------------------------------------------------------
 
@@ -1287,6 +1435,8 @@ class CodeGen:
         if isinstance(node, A.Call):
             if isinstance(node.callee, A.Ident) and node.callee.name == "log":
                 return self._gen_log(node.args)
+            if isinstance(node.callee, A.Ident) and node.callee.name == "elog":
+                return self._gen_log(node.args, macro="eprintln")
             if isinstance(node.callee, A.Ident) and node.callee.name == "read_file" and len(node.args) == 1:
                 # get <std:io> - read_file(sciezka) -> Result<Str, Str>.
                 # std::fs::read_to_string zwraca io::Result<String>=
@@ -1301,6 +1451,92 @@ class CodeGen:
                 # Umozliwia cli.hcs prawdziwy dispatch podkomend zamiast
                 # tylko demo w main() - patrz cli.hcs.
                 return "std::env::args().skip(1).collect::<Vec<String>>()"
+            if isinstance(node.callee, A.Ident) and node.callee.name == "current_dir" and len(node.args) == 0:
+                # current_dir() -> Result<Str, Str> - get <std:env>. Biezacy
+                # katalog roboczy procesu (skad zostal uruchomiony) -
+                # potrzebne przez `virus`, ktore szuka `Virus.hk` zaczynajac
+                # od CWD (patrz virus:cache::find_project_root).
+                return "std::env::current_dir().map(|p| p.to_string_lossy().to_string()).map_err(|e| e.to_string())"
+            if isinstance(node.callee, A.Ident) and node.callee.name == "env_var" and len(node.args) == 1:
+                # env_var(nazwa) -> Option<Str> - get <std:env>. `.ok()`
+                # zamienia Result<String, VarError> (np. brak zmiennej,
+                # albo nie-UTF8) na Option<String> - dla naszych celow
+                # (odczyt configu/tokenow) rozroznienie "brak" vs
+                # "nieprawidlowa" nie jest istotne.
+                name_expr = self.gen_expr(node.args[0])
+                return f"std::env::var(&{name_expr}).ok()"
+            if isinstance(node.callee, A.Ident) and node.callee.name == "run_command" and len(node.args) == 2:
+                # run_command(program, argumenty) -> Result<Str, Str> -
+                # get <std:process>. Uruchamia PROCES POTOMNY (fork/exec
+                # albo CreateProcess pod Windows - NIGDY powloki/shell),
+                # CZEKA na jego zakonczenie i zwraca CALY zebrany stdout
+                # jako Ok przy kodzie wyjscia 0, albo CALY stderr jako Err
+                # w przeciwnym razie (w tym gdy programu nie da sie
+                # uruchomic w ogole - np. nie istnieje w PATH).
+                # Zamkniete w IIFE (`(|| -> Result<...> { ... })()`), bo to
+                # WIELE instrukcji Rust w miejscu, gdzie oczekywane jest
+                # JEDNO wyrazenie.
+                program_expr = self.gen_expr(node.args[0])
+                args_expr = self.gen_expr(node.args[1])
+                return (
+                    "(|| -> Result<String, String> {\n"
+                    f"        let __hks_cmd_out = std::process::Command::new(&{program_expr})\n"
+                    f"            .args({args_expr})\n"
+                    "            .output()\n"
+                    "            .map_err(|e| e.to_string())?;\n"
+                    "        if __hks_cmd_out.status.success() {\n"
+                    "            Ok(String::from_utf8_lossy(&__hks_cmd_out.stdout).to_string())\n"
+                    "        } else {\n"
+                    "            Err(String::from_utf8_lossy(&__hks_cmd_out.stderr).to_string())\n"
+                    "        }\n"
+                    "    })()"
+                )
+            if isinstance(node.callee, A.Ident) and node.callee.name == "run_command_combined" and len(node.args) == 2:
+                # run_command_combined(program, argumenty) -> Str -
+                # get <std:process>. Jak `run_command`, ale ZAWSZE zwraca
+                # POLACZONY stdout+stderr (w TEJ kolejnosci, stdout
+                # pierwszy) BEZ WZGLEDU na kod wyjscia - nigdy nie zwraca
+                # bledu (nawet gdy samego procesu nie da sie uruchomic -
+                # wtedy zwraca opis bledu jako zwykly tekst). Potrzebne dla
+                # programow, ktore pisza uzyteczna diagnostyke na stderr
+                # NAWET przy sukcesie (np. `hackerc lint` - warningi na
+                # stderr, kod wyjscia 0) - `run_command` (Ok=stdout,
+                # Err=stderr) w takim wypadku gubi diagnostyke.
+                program_expr = self.gen_expr(node.args[0])
+                args_expr = self.gen_expr(node.args[1])
+                return (
+                    "(|| -> String {\n"
+                    f"        let __hks_cmd_out2 = match std::process::Command::new(&{program_expr})\n"
+                    f"            .args({args_expr})\n"
+                    "            .output() {\n"
+                    "            Ok(o) => o,\n"
+                    "            Err(e) => return e.to_string(),\n"
+                    "        };\n"
+                    "        let mut __hks_combined = String::from_utf8_lossy(&__hks_cmd_out2.stdout).to_string();\n"
+                    "        __hks_combined.push_str(&String::from_utf8_lossy(&__hks_cmd_out2.stderr));\n"
+                    "        __hks_combined\n"
+                    "    })()"
+                )
+            if isinstance(node.callee, A.Ident) and node.callee.name == "http_get" and len(node.args) == 1:
+                # http_get(url) -> Result<Str, Str> - get <std:http>.
+                # WYMAGA `get <crates:ureq::2>` (deklarowane raz w
+                # libs/std/lib/http.hcs - prawdziwa zaleznosc Cargo,
+                # dopisywana do Cargo.toml automatycznie przez
+                # hackerc.project, patrz gen_get_import). GET
+                # SYNCHRONICZNY (ureq jest blokujace, bez async runtime -
+                # najprostsza, najlzejsza opcja dla tego projektu). Zwraca
+                # CALE cialo odpowiedzi jako Str przy statusie 2xx, albo
+                # opis bledu (siec/DNS/status spoza 2xx/nie-UTF8 cialo)
+                # jako Err w przeciwnym razie.
+                url_expr = self.gen_expr(node.args[0])
+                return (
+                    "(|| -> Result<String, String> {\n"
+                    f"        let __hks_http_resp = ureq::get(&{url_expr})\n"
+                    "            .call()\n"
+                    "            .map_err(|e| e.to_string())?;\n"
+                    "        __hks_http_resp.into_string().map_err(|e| e.to_string())\n"
+                    "    })()"
+                )
             if isinstance(node.callee, A.Ident) and node.callee.name == "exit" and len(node.args) == 1:
                 # exit(kod) -> nigdy nie wraca (`std::process::exit` ma typ
                 # `!`, ktory Rust automatycznie dopasowuje do KAZDEGO
@@ -1314,6 +1550,64 @@ class CodeGen:
                 path_expr = self.gen_expr(node.args[0])
                 content_expr = self.gen_expr(node.args[1])
                 return f"std::fs::write(&{path_expr}, {content_expr}).map_err(|e| e.to_string())"
+            if isinstance(node.callee, A.Ident) and node.callee.name == "dir_exists" and len(node.args) == 1:
+                # get <std:fs> - dir_exists(sciezka) -> Bool. Prawdziwe
+                # sprawdzenie katalogu (w odroznieniu od `file_readable`,
+                # ktore dziala TYLKO na plikach) - odblokowuje
+                # `find_libs_root`/`find_bootstrap_root` w project.hcs,
+                # ktore wczesniej musialy sondowac plik-znacznik.
+                path_expr = self.gen_expr(node.args[0])
+                return f"std::path::Path::new(&{path_expr}).is_dir()"
+            if isinstance(node.callee, A.Ident) and node.callee.name == "path_exists" and len(node.args) == 1:
+                # get <std:fs> - path_exists(sciezka) -> Bool. Sprawdza
+                # ISTNIENIE (plik LUB katalog) BEZ probowania odczytac
+                # zawartosc - w odroznieniu od `file_readable` (ktore
+                # dekoduje jako UTF-8 i zawodzi dla plikow binarnych, np.
+                # skompilowanych binarek - patrz virus/hackerc_bridge.hcs).
+                path_expr = self.gen_expr(node.args[0])
+                return f"std::path::Path::new(&{path_expr}).exists()"
+            if isinstance(node.callee, A.Ident) and node.callee.name == "create_dir" and len(node.args) == 1:
+                # get <std:fs> - create_dir(sciezka) -> Result<Void, Str>.
+                # `create_dir_all` (nie `create_dir`) - tworzy tez
+                # katalogi posrednie, jak `mkdir -p` - odblokowuje
+                # `project.hcs::build_project`, ktore wczesniej NIE
+                # MOGLO samo utworzyc `out_dir/src`.
+                path_expr = self.gen_expr(node.args[0])
+                return f"std::fs::create_dir_all(&{path_expr}).map_err(|e| e.to_string())"
+            if isinstance(node.callee, A.Ident) and node.callee.name == "remove_file" and len(node.args) == 1:
+                path_expr = self.gen_expr(node.args[0])
+                return f"std::fs::remove_file(&{path_expr}).map_err(|e| e.to_string())"
+            if isinstance(node.callee, A.Ident) and node.callee.name == "remove_dir_all" and len(node.args) == 1:
+                # get <std:fs> - remove_dir_all(sciezka) -> Result<Void, Str>.
+                # Usuwa CALY katalog REKURENCYJNIE (jak `rm -rf`) - odpowiednik
+                # `virus clean` czyszczacego `cache/`. NIE ma zabezpieczenia
+                # przed pomylkowym `remove_dir_all("/")` na tym poziomie -
+                # odpowiedzialnosc wywolujacego (patrz cache.hcs w virus/,
+                # ktore woła to TYLKO na `<projekt>/cache`).
+                path_expr = self.gen_expr(node.args[0])
+                return f"std::fs::remove_dir_all(&{path_expr}).map_err(|e| e.to_string())"
+            if isinstance(node.callee, A.Ident) and node.callee.name == "copy_file" and len(node.args) == 2:
+                # get <std:fs> - copy_file(src, dest) -> Result<Void, Str>.
+                # Kopiuje PLIK (nie katalog) - odpowiednik `cp` - uzywane
+                # przez `virus build` do skopiowania zbudowanej binarki z
+                # katalogu crate'a do cache/build/.
+                src_expr = self.gen_expr(node.args[0])
+                dest_expr = self.gen_expr(node.args[1])
+                return f"std::fs::copy(&{src_expr}, &{dest_expr}).map(|_| ()).map_err(|e| e.to_string())"
+            if isinstance(node.callee, A.Ident) and node.callee.name == "list_dir" and len(node.args) == 1:
+                # get <std:fs> - list_dir(sciezka) -> Result<List<Str>, Str>.
+                # IIFE (natychmiast wywolane domkniecie) - jedyny sposob
+                # zapakowania petli/`?` w POJEDYNCZE wyrazenie Rusta,
+                # ktorego oczekuje ten punkt w `gen_expr` (nie ma tu
+                # dostepu do generowania wielu instrukcji).
+                path_expr = self.gen_expr(node.args[0])
+                return (
+                    "(|| -> Result<Vec<String>, String> { let mut out = Vec::new(); "
+                    f"for entry in std::fs::read_dir(&{path_expr}).map_err(|e| e.to_string())? "
+                    "{ let entry = entry.map_err(|e| e.to_string())?; "
+                    "out.push(entry.file_name().to_string_lossy().to_string()); } "
+                    "Ok(out) })()"
+                )
             if isinstance(node.callee, A.Ident) and node.callee.name in ("some", "ok", "err"):
                 rust_name = {"some": "Some", "ok": "Ok", "err": "Err"}[node.callee.name]
                 args = ", ".join(self._gen_owned_arg(a) for a in node.args)
@@ -1354,6 +1648,13 @@ class CodeGen:
                 target_t = infer_expr_type(node.callee.target, self.env)
                 if target_t is not None and target_t.name == "Str":
                     idx_expr = self.gen_expr(node.args[0])
+                    if isinstance(node.callee.target, A.Ident) and node.callee.target.name in self._char_cache_params:
+                        # Parametr zmaterializowany jako `Vec<char>` w
+                        # prologu funkcji (patrz `gen_fun`/
+                        # `_char_indexed_str_params`) - O(1) indeksowanie
+                        # zamiast O(i) `.chars().nth(i)`.
+                        cache_var = self._char_cache_var(node.callee.target.name)
+                        return f"({cache_var}.get({idx_expr} as usize).map(|c| c.to_string()).unwrap_or_default())"
                     target_expr = self.gen_expr(node.callee.target)
                     # Str to UTF-8 - indeksowanie bajtowe (jak w Ruscie
                     # 's[i]') mogloby przeciac znak wielobajtowy w polowie,
@@ -1364,6 +1665,29 @@ class CodeGen:
                 if target_t is not None and target_t.name == "Str":
                     start_expr = self.gen_expr(node.args[0])
                     end_expr = self.gen_expr(node.args[1])
+                    if isinstance(node.callee.target, A.Ident) and node.callee.target.name in self._char_cache_params:
+                        cache_var = self._char_cache_var(node.callee.target.name)
+                        # `.len()` na Str zwraca dlugosc w BAJTACH
+                        # (`String::len()`), nie w znakach - dla
+                        # tekstu z wielobajtowymi znakami (np. polskie
+                        # `!!` komentarze w tych samych plikach) indeksy
+                        # liczone wzgledem `.len()` moga WYJSC POZA
+                        # faktyczna liczbe znakow w `cache_var: Vec<char>`.
+                        # Wolna sciezka (`.chars().skip().take()`) po
+                        # prostu ucina sie na koncu bez panikowania -
+                        # `vec[a..b]` PANIKUJE na zlym zakresie (E xxx
+                        # "range end index out of range"), wiec szybka
+                        # sciezka MUSI przycinac indeksy do `cache_var.len()`
+                        # zeby zachowac TA SAMA tolerancje. Bug znaleziony
+                        # przy uzyciu skompilowanego stage1 (samo-
+                        # hostowanego hackerc) na duzym pliku (parser.hcs,
+                        # pelnym polskich komentarzy) w tej sesji.
+                        return (
+                            f"({{ let __v = &{cache_var}; "
+                            f"let __s = (({start_expr}) as usize).min(__v.len()); "
+                            f"let __e = (({end_expr}) as usize).min(__v.len()).max(__s); "
+                            f"__v[__s..__e].iter().collect::<String>() }})"
+                        )
                     target_expr = self.gen_expr(node.callee.target)
                     return (
                         f"({target_expr}.chars().skip({start_expr} as usize)"
