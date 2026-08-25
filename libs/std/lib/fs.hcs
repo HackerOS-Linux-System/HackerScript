@@ -1,0 +1,79 @@
+fun ensure_dir(path: Str) -> Result<Void, Str> [
+    end create_dir(path)
+]
+
+!! `create_dir` zwracajace `true`/`false` zamiast `Result` - wygodne,
+!! gdy interesuje nas tylko czy operacja sie udala (parytet z
+!! `write_file_ok` w io.hcs).
+fun create_dir_ok(path: Str) -> Bool [
+    match create_dir(path) [
+        Ok(_v) -> [
+            end true
+        ]
+        Err(_e) -> [
+            end false
+        ]
+    ]
+]
+
+!! `list_dir` zwracajace pusta liste zamiast propagowac `Result` -
+!! wygodne, gdy brakujacy/nieczytelny katalog ma byc traktowany jak
+!! pusty (parytet z `read_file_or` w io.hcs, ale bez wartosci
+!! domyslnej innej niz "pusto").
+fun list_dir_or_empty(path: Str) -> List<Str> [
+    match list_dir(path) [
+        Ok(names) -> [
+            end names
+        ]
+        Err(_e) -> [
+            end []
+        ]
+    ]
+]
+
+!! `remove_dir_all` zwracajace `true`/`false` zamiast `Result` -
+!! parytet z `create_dir_ok`. Usuwa CALY katalog rekurencyjnie (jak
+!! `rm -rf`) - patrz ostrzezenie przy `remove_dir_all` (kompilator).
+fun remove_dir_all_ok(path: Str) -> Bool [
+    match remove_dir_all(path) [
+        Ok(_v) -> [
+            end true
+        ]
+        Err(_e) -> [
+            end false
+        ]
+    ]
+]
+
+!! Sklada `path` (katalog) z kazda nazwa z `list_dir` w PELNA sciezke
+!! (`path + "/" + nazwa`) - `list_dir` samo w sobie zwraca SAME nazwy.
+fun list_dir_full_paths(path: Str) -> Result<List<Str>, Str> [
+    match list_dir(path.clone()) [
+        Ok(names) -> [
+            let out: List<Str> = []
+            let i = 0
+            let n = names.len()
+            while i < n [
+                out.push(path.clone() + "/" + names[i].clone())
+                i = i + 1
+            ]
+            end ok(out)
+        ]
+        Err(e) -> [
+            end err(e)
+        ]
+    ]
+]
+
+!! `copy_file` zwracajace `true`/`false` zamiast `Result` - parytet z
+!! `create_dir_ok`/`remove_dir_all_ok`.
+fun copy_file_ok(src: Str, dest: Str) -> Bool [
+    match copy_file(src, dest) [
+        Ok(_v) -> [
+            end true
+        ]
+        Err(_e) -> [
+            end false
+        ]
+    ]
+]
