@@ -134,6 +134,16 @@ def infer_expr_type(expr, env: TypeEnv) -> A.TypeRef | None:
                 return _t("Result", _t("Str"), _t("Str"))
             if callee.name == "write_file":
                 return _t("Result", _t("Void"), _t("Str"))
+            if callee.name == "env_var":
+                return _t("Option", _t("Str"))
+            if callee.name == "run_command":
+                return _t("Result", _t("Str"), _t("Str"))
+            if callee.name == "run_command_combined":
+                return _t("Str")
+            if callee.name == "current_dir":
+                return _t("Result", _t("Str"), _t("Str"))
+            if callee.name == "http_get":
+                return _t("Result", _t("Str"), _t("Str"))
             if callee.name in ("some", "none", "ok", "err", "dict"):
                 return None  # zalezy od kontekstu (adnotacja 'let x: Option<T>/Result<T,E>/Dict<K,V> = ...')
             if callee.name in env.sigs.functions:
