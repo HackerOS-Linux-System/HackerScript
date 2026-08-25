@@ -1,0 +1,113 @@
+get <std:string> import <str_ends_with::str_split>
+
+!! Sklada dwa segmenty sciezki jednym `/` - nie dubluje separatora,
+!! gdy `a` juz konczy sie na `/` albo `b` zaczyna sie od `/`.
+fun path_join(a: Str, b: Str) -> Str [
+    if a.len() == 0 [
+        end b
+    ]
+    if b.len() == 0 [
+        end a
+    ]
+    let a_has_slash = str_ends_with(a, "/")
+    let b_has_slash = b.char_at(0) == "/"
+    if a_has_slash and b_has_slash [
+        end a + b.slice(1, b.len())
+    ]
+    if a_has_slash or b_has_slash [
+        end a + b
+    ]
+    end a + "/" + b
+]
+
+!! Ostatni segment sciezki (nazwa pliku/katalogu) - odpowiednik Rust
+!! `Path::file_name`. Ignoruje koncowy `/`, jesli jest.
+fun path_basename(p: Str) -> Str [
+    let m = p.len()
+    if m == 0 [
+        end ""
+    ]
+    let end_i = m
+    if p.char_at(end_i - 1) == "/" [
+        end_i = end_i - 1
+    ]
+    if end_i == 0 [
+        end "/"
+    ]
+    let i = end_i - 1
+    while i > 0 [
+        if p.char_at(i - 1) == "/" [
+            end p.slice(i, end_i)
+        ]
+        i = i - 1
+    ]
+    end p.slice(0, end_i)
+]
+
+!! Sciezka BEZ ostatniego segmentu (katalog nadrzedny) - odpowiednik
+!! Rust `Path::parent`. Zwraca `""`, gdy `p` nie ma `/` (brak
+!! rodzica poza biezacym katalogiem).
+fun path_dirname(p: Str) -> Str [
+    let m = p.len()
+    let end_i = m
+    if end_i > 0 and p.char_at(end_i - 1) == "/" [
+        end_i = end_i - 1
+    ]
+    let i = end_i
+    while i > 0 [
+        if p.char_at(i - 1) == "/" [
+            if i - 1 == 0 [
+                end "/"
+            ]
+            end p.slice(0, i - 1)
+        ]
+        i = i - 1
+    ]
+    end ""
+]
+
+!! Rozszerzenie pliku (BEZ kropki), np. `path_extension("a/b.tar.gz")`
+!! -> `"gz"`. Zwraca `""`, gdy nazwa pliku nie ma kropki (albo zaczyna
+!! sie od kropki - pliki ukryte typu `.gitignore` NIE maja
+!! rozszerzenia, tak jak w Rust `Path::extension`).
+fun path_extension(p: Str) -> Str [
+    let name = path_basename(p)
+    let m = name.len()
+    let i = m
+    while i > 0 [
+        if name.char_at(i - 1) == "." [
+            if i - 1 == 0 [
+                end ""
+            ]
+            end name.slice(i, m)
+        ]
+        i = i - 1
+    ]
+    end ""
+]
+
+!! Czy `p` jest sciezka bezwzgledna (zaczyna sie od `/`).
+fun path_is_absolute(p: Str) -> Bool [
+    if p.len() == 0 [
+        end false
+    ]
+    end p.char_at(0) == "/"
+]
+
+!! Dzieli sciezke na segmenty po `/`, POMIJAJAC puste segmenty
+!! (kolejne `//`, wiodacy/koncowy `/`) - odpowiednik iteracji po
+!! `Path::components` dla zwyklych nazw.
+fun path_segments(p: Str) -> List<Str> [
+    let raw = str_split(p, "/")
+    let out: List<Str> = []
+    let i = 0
+    let n = raw.len()
+    while i < n [
+        let seg = raw[i].clone()
+        if seg.len() > 0 [
+            out.push(seg)
+        ]
+        i = i + 1
+    ]
+    end out
+]
