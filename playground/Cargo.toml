@@ -1,0 +1,13 @@
+[package]
+name = "playground-wasm"
+version = "0.0.1"
+edition = "2021"
+description = "WASM checker HackerScript dla playground w przegladarce (patrz README.md) - bez wasm-bindgen, surowy interfejs C ABI"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
