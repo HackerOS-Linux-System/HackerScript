@@ -1,123 +1,108 @@
 # HackerScript
 
-Jezyk programowania ogolnego przeznaczenia inspirowany Swiftem, Zigiem,
-Rustem i Lua. Statyczne typowanie (z realna inferencja), bezpieczenstwo
-pamieci, wykrywanie bledow w trakcie kompilacji (jak w Adzie) - ale ze
-skladnia zaprojektowana tak, zeby byla **holernie latwa**.
+Jezyk programowania ogolnego przeznaczenia. Zwykla `fun` kompiluje sie
+do **prawdziwego Rusta** (statyczne typy, bezpieczenstwo pamieci,
+zero-cost abstractions). `direct [ ... ]` to ucieczka do czystego
+Pythona, wykonywanego przez wbudowany interpreter (PyO3) - dla tego
+niewielkiego fragmentu kodu, ktory nigdy nie bedzie wymagal wydajnosci.
 
 ```hcs
-using <1.2>
+struct Point [
+    x: Int,
+    y: Int
+]
 
-native fun add(a: Int, b: Int) -> Int [
-    end a + b
+fun distance_squared(p: Point) -> Int [
+    end (p.x * p.x) + (p.y * p.y)
 ]
 
 fun main() [
-    log("2 + 3 =", add(2, 3))
+    let p = Point(3, 4)
+    log("dist^2 =", distance_squared(p))
+
+    direct [
+        print("To jest czysty Python wykonywany wewnatrz binarki Rust.")
+    ]
     end
 ]
 ```
 
-`fun` -> transpilowane do Pythona. `native fun` -> **kompilowane do
-prawdziwego Rusta** (przez PyO3) i linkowane statycznie - to jest
-realizacja zalozenia "mala czesc kodu w Pythonie, reszta wydajnosciowa w
-Rust jako wrapper", nie tylko deklaracja w dokumentacji.
+Zobacz **`examples/showcase.hcs`** - jeden plik demonstrujacy CALA
+dzisiejsza skladnie.
 
 ## Struktura repozytorium
 
 ```
 HackerScript/
-  hackerc/          transpilator .hcs -> Python + Rust/PyO3 (Python)
+  hackerc/          transpilator .hcs -> Rust (Python)
   virus/            manager pakietow i narzedzie budowania (Rust)
     cli/              binarka `virus`
-    hk-parser/        parser formatu manifestu Virus.hk
-  libs/             biblioteki napisane w 100% w HackerScript
-    core/             alternatywne systemy pamieci (areny, ...)
-    std/              biblioteka standardowa (na razie pusta)
+    hk-parser/        parser PRAWDZIWEGO formatu .hk (nie TOML!)
+  libs/
+    core/lib/memory/  4 alokatory: arena, chained_arena, stack_allocator, pool_allocator
+    std/lib/cybersecurity/  constant_time_eq, shannon_entropy
   examples/
-    hello-world/      podstawowy przykladowy projekt
-    module-demo/       przyklad systemu modulow (get <core:...>)
+    hello-world/       podstawowy przyklad
+    module-demo/        przyklad systemu modulow (get <core:...>)
+    showcase.hcs         WSZYSTKIE funkcje skladni w jednym pliku
   docs/
     SYNTAX.md         pelny opis skladni
-    ROADMAP.md        co jeszcze brakuje do wersji 0.0.1
-  .github/workflows/  CI (testy) + Release (publikacja binarek)
+    ROADMAP.md        co jeszcze brakuje
+  .github/workflows/  CI (buduje I URUCHAMIA wygenerowany crate) + Release
 ```
 
 ## Jak to dziala
 
-1. Kod uzytkownika (`cmd/*.hcs`) jest **transpilowany** przez `hackerc`.
-   Zwykla `fun` -> Python. `native fun` -> Rust + bindingi PyO3,
-   kompilowane przez `cargo` do `.so`/`.pyd`/`.dylib` i importowane z
-   powrotem do Pythona (`hackerc/native_codegen.py`).
-2. `get <core:...>` / `get <std:...>` **realnie importuje kod z innych
-   plikow `.hcs`** (`hackerc/project.py`) - nie tylko generuje pusty
-   import. `get <pypi:...>` / `get <crates:...>` pobiera zewnetrzne
-   zaleznosci.
-3. `virus` (odpowiednik `cargo`, ale niezalezny od `pip`/`cargo` jako
-   menedzer WLASNYCH zaleznosci - rozmawia bezposrednio z PyPI/crates.io
-   API) orkiestruje cala reszte: pobiera `hackerc`, zarzadza
-   zaleznosciami, woła `hackerc build`, kompiluje wygenerowany `native
-   fun` przez `cargo` (jako toolchain, nie menedzer pakietow), pakuje
-   wynik do wybranego targetu.
-
-Wszystko ladujde sie do `cache/` projektu uzytkownika:
-
-```
-cache/
-  libs/     pobrane zaleznosci
-  source/   przetlumaczony (przez hackerc) kod Pythona + skompilowany native
-  env/      pobrane narzedzia (hackerc, itd.)
-  build/    finalna binarka
-```
+1. `fun` -> `hackerc` generuje prawdziwy Rust (struct -> `struct`+`impl
+   new()`, `manual[]` -> `unsafe{}`, `List<T>` -> `Vec<T>`, parametry
+   struct/List/Str automatycznie dostaja `&`/`&mut` zamiast przenoszenia
+   wlasnosci).
+2. `direct [ ... ]` -> surowy Python wykonywany w trakcie dzialania
+   programu przez `Python::with_gil` (PyO3, tryb `auto-initialize`) -
+   Rust jest hostem.
+3. `get <core:memory::arena>` -> realnie importuje kod z
+   `libs/core/lib/memory/arena.hcs` (system modulow: `hackerc/project.py`
+   dwufazowo zbiera sygnatury z calego projektu, zeby wywolania
+   cross-plikowe tez dostaly poprawne `&`/`&mut`).
+4. `get <crates:nazwa>` -> prawdziwa zaleznosc Cargo. `get
+   <pypi/npm/jsr:...>` -> pobierane przez `virus install`
+   (bezposrednio z PyPI/crates.io/npm/JSR API, BEZ `pip`/`cargo add`/
+   `npm install`).
+5. `virus build` -> `hackerc build` (generuje cargo crate) -> `cargo
+   build` (jedyne miejsce gdzie `virus` uzywa cargo - jako kompilator,
+   nie menedzer pakietow).
 
 ## Szybki start
 
 ```bash
 cd hackerc && pip install -e . && cd ..
 
-# podstawowy przyklad
-hackerc check examples/hello-world/cmd/main.hcs
-hackerc build examples/hello-world/cmd/main.hcs -o /tmp/out
-python3 /tmp/out/main.py
-
-# przyklad z systemem modulow (get <core:memory::arena>)
-hackerc build examples/module-demo/cmd/main.hcs -o /tmp/out2
-python3 /tmp/out2/main.py   # "hello 42"
-
-# formatowanie i lint
-hackerc fmt cmd/main.hcs
-hackerc lint cmd/main.hcs
+hackerc check examples/showcase.hcs
+hackerc build examples/showcase.hcs -o /tmp/out
+cd /tmp/out && cargo run   # wymaga zainstalowanego Rust
 ```
-
-Docelowo (po zbudowaniu `virus` z `virus/`) to wszystko dzieje sie przez
-`virus build`/`virus check`/`virus fmt` - `hackerc` jest wywolywane jako
-podproces.
 
 ## Status projektu
 
 **Strona Python (`hackerc/`) jest w calosci przetestowana**: 23/23
-testow przechodzi (`hackerc/tests/test_hackerc.py`), pokrywajac
-transpilacje, inferencje typow, typecheck, `native fun` -> Rust,
-system modulow, formatter i diagnostyke.
+testow (`hackerc/tests/test_hackerc.py`) pokrywajacych transpilacje do
+Rusta, `struct`/`&mut`/`&`, `direct[]`->PyO3, system modulow, formatter,
+diagnostyke. W trakcie tej pracy znaleziono i naprawiono kilka realnych
+bledow (m.in. `!=` mylone z komentarzem, `Vec::len()` zwracajace
+`usize` a nie `i64`, przenoszenie wlasnosci struct/Vec/String przy
+wielokrotnym uzyciu tej samej zmiennej) - patrz `docs/ROADMAP.md`.
 
-**Strona Rust (`virus/`) jest napisana kompletnie, ale NIE zostala
-skompilowana** w srodowisku, w ktorym powstal ten kod (brak `cargo` w
-sandboxie). Przed pierwszym uzyciem: `cd virus && cargo build
---workspace` i napraw ewentualne bledy kompilacji wynikajace z wersji
-zaleznosci (`indicatif`/`clap`/`reqwest`/`zip`/`serde_json`/PyO3).
-
-CI (`.github/workflows/ci.yml`, `release.yml`) jest napisane i powinno
-to zweryfikowac automatycznie przy pierwszym pushu do repo, ale rowniez
-nie zostalo jeszcze uruchomione naprawde (brak dostepu do GitHub
-Actions z tego srodowiska).
+**Strona Rust (`virus/`) jest napisana kompletnie, ale w tym
+srodowisku nadal nie ma `cargo`/`rustc` do jej zbudowania.** CI
+(`.github/workflows/ci.yml`) teraz KOMPILUJE I URUCHAMIA wygenerowany
+crate na prawdziwym runnerze z Rustem - to jedyne miejsce gdzie
+poprawnosc generowanego kodu Rust jest realnie zweryfikowana.
 
 Pelna, szczera lista tego co jeszcze brakuje: **`docs/ROADMAP.md`**.
-Najpilniejsze pozostale: **realne zbudowanie `virus` przez `cargo`**
-i naprawienie tego co przy tym wyjdzie.
 
 ## Dokumentacja
 
 - [`docs/SYNTAX.md`](docs/SYNTAX.md) - pelny opis skladni
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) - co brakuje do bootstrapu / 0.0.1
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) - co brakuje
 - [`hackerc/README.md`](hackerc/README.md) - architektura transpilatora
-- Format `Virus.hk`: https://hackeros-linux-system.github.io/HackerOS-Website/tools-docs/hk.html
+- Format `.hk`: https://hackeros-linux-system.github.io/HackerOS-Website/tools-docs/hk.html
