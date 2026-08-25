@@ -1,0 +1,787 @@
+get <std:string> import <str_trim::str_split::str_starts_with::str_ends_with::str_contains::str_index_of::str_repeat::str_is_space>
+get <std:json> import <JsonValue::JsonEntry::json_is_digit::json_digit_value>
+get <std:toml> import <toml_set_path::toml_find_or_empty>
+get <std:env> import <env_var_or>
+
+!! Wynik `hk_parse_arrow_prefix` - glebokosc zagniezdzenia (liczba
+!! myslnikow) + reszta linii PO `->`/`-->`/...
+struct HkArrowPrefix [
+    depth: Int,
+    rest: Str
+]
+
+!! Wynik `hk_parse_key` - klucz (bez cudzyslowow, jesli byly), czy byl
+!! w cudzyslowie (wtedy TRAKTOWANY JAKO LITERAL - kropki wewnatrz NIE
+!! dziela na zagniezdzenie), i reszta linii po kluczu.
+struct HkKeyResult [
+    key: Str,
+    quoted: Bool,
+    rest: Str
+]
+
+fun hk_trim_start(s: Str) -> Str [
+    let m = s.len()
+    let start = 0
+    while start < m and str_is_space(s.char_at(start)) [
+        start = start + 1
+    ]
+    end s.slice(start, m)
+]
+
+!! Parsuje `->`/`-->`/`--->`/... na poczatku `line` - zwraca glebokosc
+!! (liczba `-`) i reszte linii (lewostronnie przycieta) PO `>`.
+fun hk_parse_arrow_prefix(line: Str, line_no: Int) -> Result<HkArrowPrefix, Str> [
+    if line.len() == 0 or line.char_at(0) != "-" [
+        end err("linia " + (line_no as Str) + ": oczekiwano '->' (klucz musi zaczynac sie od strzalki)")
+    ]
+    let i = 0
+    let n = line.len()
+    while i < n and line.char_at(i) == "-" [
+        i = i + 1
+    ]
+    let depth = i
+    if i >= n or line.char_at(i) != ">" [
+        end err("linia " + (line_no as Str) + ": oczekiwano '>' po myslnikach (Hint: sprobuj: -> klucz => wartosc)")
+    ]
+    end ok(HkArrowPrefix(depth, hk_trim_start(line.slice(i + 1, n))))
+]
+
+!! Parsuje klucz (cytowany `"..."` albo goly, do pierwszej bialej
+!! spacji) z poczatku `rest` (juz po strzalce) - zwraca klucz i reszte
+!! linii po nim.
+fun hk_parse_key(rest: Str, line_no: Int) -> Result<HkKeyResult, Str> [
+    if rest.len() > 0 and rest.char_at(0) == "\"" [
+        match str_index_of(rest.slice(1, rest.len()), "\"") [
+            Some(end_rel) -> [
+                let key = rest.slice(1, 1 + end_rel)
+                let after = rest.slice(1 + end_rel + 1, rest.len())
+                end ok(HkKeyResult(key, true, after))
+            ]
+            None -> [
+                end err("linia " + (line_no as Str) + ": niezamkniety klucz w cudzyslowach")
+            ]
+        ]
+    ]
+    let m = rest.len()
+    let idx = m
+    let i = 0
+    while i < m [
+        if str_is_space(rest.char_at(i)) [
+            idx = i
+            break
+        ]
+        i = i + 1
+    ]
+    let key = rest.slice(0, idx)
+    if key.len() == 0 [
+        end err("linia " + (line_no as Str) + ": brakujacy klucz po strzalce")
+    ]
+    end ok(HkKeyResult(key, false, rest.slice(idx, m)))
+]
+
+!! Pierwsze `keep` elementow `stack` (odpowiednik `Vec::truncate`).
+fun hk_truncate(stack: List<Str>, keep: Int) -> List<Str> [
+    let out: List<Str> = []
+    let i = 0
+    while i < keep [
+        out.push(stack[i].clone())
+        i = i + 1
+    ]
+    end out
+]
+
+!! `[section_name] + stack` jako jedna pelna sciezka do drzewa.
+fun hk_full_path(section: Str, stack: List<Str>) -> List<Str> [
+    let out: List<Str> = [section.clone()]
+    let i = 0
+    let n = stack.len()
+    while i < n [
+        out.push(stack[i].clone())
+        i = i + 1
+    ]
+    end out
+]
+
+!! Odescape'owuje `\n \t \r \" \\` - NIEZNANA sekwencja escape jest
+!! zachowywana DOSLOWNIE (backslash + znak) zamiast bledu - parytet z
+!! oryginalnym `unescape` (Rust).
+fun hk_unescape(s: Str) -> Str [
+    let out = ""
+    let i = 0
+    let n = s.len()
+    while i < n [
+        let c = s.char_at(i)
+        if c == "\\" and i + 1 < n [
+            let e = s.char_at(i + 1)
+            if e == "n" [
+                out = out + "\n"
+            ] elif e == "t" [
+                out = out + "\t"
+            ] elif e == "r" [
+                out = out + "\r"
+            ] elif e == "\"" [
+                out = out + "\""
+            ] elif e == "\\" [
+                out = out + "\\"
+            ] else [
+                out = out + "\\" + e
+            ]
+            i = i + 2
+        ] else [
+            out = out + c
+            i = i + 1
+        ]
+    ]
+    end out
+]
+
+!! Wielka litera odpowiadajaca `c` - TYLKO dla liter potrzebnych do
+!! rozpoznania "true"/"false" bez rozroznienia wielkosci liter
+!! (t/r/u/e/f/a/l/s) - nie jest to pelne `to_uppercase`.
+fun hk_upper_of_bool_letter(c: Str) -> Str [
+    if c == "t" [
+        end "T"
+    ]
+    if c == "r" [
+        end "R"
+    ]
+    if c == "u" [
+        end "U"
+    ]
+    if c == "e" [
+        end "E"
+    ]
+    if c == "f" [
+        end "F"
+    ]
+    if c == "a" [
+        end "A"
+    ]
+    if c == "l" [
+        end "L"
+    ]
+    if c == "s" [
+        end "S"
+    ]
+    end c
+]
+
+!! Czy `raw` to `word` (ZAWSZE male litery) ignorujac wielkosc liter -
+!! uzywane TYLKO do rozpoznania "true"/"false".
+fun hk_matches_ci(raw: Str, word: Str) -> Bool [
+    if raw.len() != word.len() [
+        end false
+    ]
+    let i = 0
+    let n = raw.len()
+    while i < n [
+        let a = raw.char_at(i)
+        let b = word.char_at(i)
+        if not (a == b or a == hk_upper_of_bool_letter(b)) [
+            end false
+        ]
+        i = i + 1
+    ]
+    end true
+]
+
+!! Probuje sparsowac `raw` jako liczbe (Float) - `none()` jesli `raw`
+!! nie jest w calosci poprawna liczba (parytet z Rust
+!! `raw.parse::<f64>()`, ktore w takim wypadku pozwala sparsowac
+!! wartosc jako zwykly string).
+fun hk_try_parse_number(raw: Str) -> Option<Float> [
+    let m = raw.len()
+    if m == 0 [
+        end none()
+    ]
+    let i = 0
+    let neg = false
+    if raw.char_at(i) == "-" or raw.char_at(i) == "+" [
+        neg = raw.char_at(i) == "-"
+        i = i + 1
+    ]
+    let int_start = i
+    while i < m and json_is_digit(raw.char_at(i)) [
+        i = i + 1
+    ]
+    if i == int_start [
+        end none()
+    ]
+    let value = 0.0
+    let k = int_start
+    while k < i [
+        value = value * 10.0 + (json_digit_value(raw.char_at(k)) as Float)
+        k = k + 1
+    ]
+    if i < m and raw.char_at(i) == "." [
+        i = i + 1
+        let frac_start = i
+        while i < m and json_is_digit(raw.char_at(i)) [
+            i = i + 1
+        ]
+        if i == frac_start [
+            end none()
+        ]
+        let frac_value = 0.0
+        let scale = 1.0
+        let k2 = frac_start
+        while k2 < i [
+            frac_value = frac_value * 10.0 + (json_digit_value(raw.char_at(k2)) as Float)
+            scale = scale * 10.0
+            k2 = k2 + 1
+        ]
+        value = value + frac_value / scale
+    ]
+    if i != m [
+        end none()
+    ]
+    if neg [
+        value = 0.0 - value
+    ]
+    end some(value)
+]
+
+!! Dzieli `s` na jednoznakowym `sep`, tylko na najwyzszym poziomie
+!! zagniezdzenia `[...]` i poza stringami - uzywane do elementow
+!! tablicy `.hk`.
+fun hk_split_top_level(s: Str, sep: Str) -> List<Str> [
+    let out: List<Str> = []
+    let m = s.len()
+    let depth = 0
+    let in_str = false
+    let quote = "\""
+    let start = 0
+    let i = 0
+    while i < m [
+        let c = s.char_at(i)
+        if in_str [
+            if c == quote [
+                in_str = false
+            ]
+        ] else [
+            if c == "\"" or c == "'" [
+                in_str = true
+                quote = c
+            ] elif c == "[" [
+                depth = depth + 1
+            ] elif c == "]" [
+                depth = depth - 1
+            ] elif depth == 0 and c == sep [
+                out.push(s.slice(start, i))
+                start = i + 1
+            ]
+        ]
+        i = i + 1
+    ]
+    out.push(s.slice(start, m))
+    end out
+]
+
+!! Parsuje POJEDYNCZY token wartosci `.hk` (string/tablica/bool/liczba,
+!! z fallbackiem na zwykly nie-cytowany string) - `raw` MUSI byc juz
+!! przycietym calym tokenem.
+fun hk_parse_value(raw: Str) -> Result<JsonValue, Str> [
+    let trimmed = str_trim(raw)
+    if trimmed.len() == 0 [
+        end ok(JsonString(""))
+    ]
+    if trimmed.char_at(0) == "[" [
+        end hk_parse_array(trimmed)
+    ]
+    if trimmed.char_at(0) == "\"" and str_ends_with(trimmed, "\"") and trimmed.len() >= 2 [
+        end ok(JsonString(hk_unescape(trimmed.slice(1, trimmed.len() - 1))))
+    ]
+    if hk_matches_ci(trimmed, "true") [
+        end ok(JsonBool(true))
+    ]
+    if hk_matches_ci(trimmed, "false") [
+        end ok(JsonBool(false))
+    ]
+    match hk_try_parse_number(trimmed.clone()) [
+        Some(n) -> [
+            end ok(JsonNumber(n))
+        ]
+        None -> [
+            end ok(JsonString(trimmed))
+        ]
+    ]
+]
+
+!! Parsuje tablice `[v1, v2, ...]` - `raw` MUSI zaczynac sie od `[` i
+!! konczyc na `]` (MUSI miescic sie w jednej linii).
+fun hk_parse_array(raw: Str) -> Result<JsonValue, Str> [
+    let m = raw.len()
+    if raw.char_at(m - 1) != "]" [
+        end err("niezamknieta tablica - brakuje ']'")
+    ]
+    let inner = raw.slice(1, m - 1)
+    let out: List<JsonValue> = []
+    let items = hk_split_top_level(inner, ",")
+    let i = 0
+    let n = items.len()
+    while i < n [
+        let item = str_trim(items[i].clone())
+        if item.len() > 0 [
+            let v = hk_parse_value(item)?
+            out.push(v)
+        ]
+        i = i + 1
+    ]
+    end ok(JsonArray(out))
+]
+
+!! Parsuje CALA zawartosc pliku `.hk` na drzewo `JsonValue`
+!! (`JsonObject` na najwyzszym poziomie: nazwa sekcji -> zawartosc).
+!! NIE rozwiazuje interpolacji `${...}` - patrz `hk_resolve_interpolations`.
+fun hk_parse(source: Str) -> Result<JsonValue, Str> [
+    let lines = str_split(source, "\n")
+    let root = JsonObject([])
+    let current_section: Option<Str> = none()
+    let stack: List<Str> = []
+    let line_no = 0
+    let i = 0
+    let n = lines.len()
+    while i < n [
+        line_no = line_no + 1
+        let trimmed = str_trim(lines[i].clone())
+        if trimmed.len() == 0 or trimmed.char_at(0) == "!" [
+            ! pusta linia/komentarz - nic (pojedynczy '!' = zwykly
+            ! komentarz, nie doc-comment '!!' - unika osieroconego
+            ! `///` bez nastepujacej deklaracji w Rust)
+        ] elif trimmed.char_at(0) == "[" [
+            match str_index_of(trimmed, "]") [
+                Some(end_idx) -> [
+                    let name = str_trim(trimmed.slice(1, end_idx))
+                    let existing = toml_find_or_empty(root.clone(), [name.clone()])
+                    root = toml_set_path(root, [name.clone()], existing)
+                    current_section = some(name)
+                    stack = []
+                ]
+                None -> [
+                    end err("linia " + (line_no as Str) + ": brakujacy ']' w naglowku sekcji")
+                ]
+            ]
+        ] else [
+            match current_section.clone() [
+                None -> [
+                    end err("linia " + (line_no as Str) + ": klucz poza sekcja - kazdy plik .hk musi zaczynac sie od [sekcja]")
+                ]
+                Some(section_name) -> [
+                    let prefix = hk_parse_arrow_prefix(trimmed, line_no)?
+                    let keyres = hk_parse_key(prefix.rest, line_no)?
+                    if prefix.depth == 0 or prefix.depth > stack.len() + 1 [
+                        end err("linia " + (line_no as Str) + ": nieprawidlowa glebokosc zagniezdzenia")
+                    ]
+                    stack = hk_truncate(stack, prefix.depth - 1)
+                    if keyres.quoted [
+                        stack.push(keyres.key)
+                    ] else [
+                        let key_parts = str_split(keyres.key, ".")
+                        let j = 0
+                        let kn = key_parts.len()
+                        while j < kn [
+                            stack.push(key_parts[j].clone())
+                            j = j + 1
+                        ]
+                    ]
+                    let value_part = str_trim(keyres.rest)
+                    if str_starts_with(value_part, "=>") [
+                        let val = hk_parse_value(str_trim(value_part.slice(2, value_part.len())))?
+                        let full_path = hk_full_path(section_name.clone(), stack.clone())
+                        root = toml_set_path(root, full_path, val)
+                    ] elif value_part.len() == 0 [
+                        let full_path = hk_full_path(section_name.clone(), stack.clone())
+                        let existing = toml_find_or_empty(root.clone(), full_path.clone())
+                        root = toml_set_path(root, full_path, existing)
+                    ] else [
+                        end err("linia " + (line_no as Str) + ": oczekiwano '=>' po kluczu")
+                    ]
+                ]
+            ]
+        ]
+        i = i + 1
+    ]
+    end ok(root)
+]
+
+!! Czy `lst` zawiera `needle` (rownosc, liniowe przeszukanie -
+!! wystarczajace dla typowego rozmiaru konfigow `.hk`).
+fun hk_list_contains(lst: List<Str>, needle: Str) -> Bool [
+    let i = 0
+    let n = lst.len()
+    while i < n [
+        if lst[i].clone() == needle [
+            end true
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+!! Formatuje liczbe: calkowite (bez czesci ulamkowej) BEZ `.0` -
+!! parytet z Rust `format_number`.
+fun hk_format_number(n: Float) -> Str [
+    let truncated = (n as Int) as Float
+    if truncated == n [
+        end (n as Int) as Str
+    ]
+    end n as Str
+]
+
+!! `JsonValue` -> `Str` "do wyswietlenia" (dla interpolacji wartosci
+!! nie-stringowych) - parytet z `impl Display for HkValue`.
+fun hk_value_to_string(v: JsonValue) -> Str [
+    match v [
+        JsonString(s) -> [
+            end s
+        ]
+        JsonNumber(n) -> [
+            end hk_format_number(n.clone())
+        ]
+        JsonBool(b) -> [
+            if b.clone() [
+                end "true"
+            ]
+            end "false"
+        ]
+        JsonArray(items) -> [
+            let out = "["
+            let i = 0
+            let n = items.len()
+            while i < n [
+                if i > 0 [
+                    out = out + ", "
+                ]
+                out = out + hk_value_to_string(items[i].clone())
+                i = i + 1
+            ]
+            end out + "]"
+        ]
+        JsonObject(_entries) -> [
+            end "<map>"
+        ]
+        JsonNull -> [
+            end ""
+        ]
+    ]
+]
+
+!! Usuwa koncowy `]`, jesli jest (dla indeksu tablicy w
+!! `sekcja.tablica[0]`).
+fun hk_strip_trailing_bracket(s: Str) -> Str [
+    if str_ends_with(s, "]") [
+        end s.slice(0, s.len() - 1)
+    ]
+    end s
+]
+
+fun hk_parse_int_or_err(s: Str, path: Str) -> Result<Int, Str> [
+    let m = s.len()
+    if m == 0 [
+        end err("nieprawidlowa referencja interpolacji: " + path)
+    ]
+    let value = 0
+    let i = 0
+    while i < m [
+        if not json_is_digit(s.char_at(i)) [
+            end err("nieprawidlowa referencja interpolacji: " + path)
+        ]
+        value = value * 10 + json_digit_value(s.char_at(i))
+        i = i + 1
+    ]
+    end ok(value)
+]
+
+fun hk_step_into(current: JsonValue, key: Str, path: Str) -> Result<JsonValue, Str> [
+    match current [
+        JsonObject(entries) -> [
+            let i = 0
+            let n = entries.len()
+            while i < n [
+                let e = entries[i].clone()
+                if e.key == key [
+                    end ok(e.value)
+                ]
+                i = i + 1
+            ]
+            end err("nieprawidlowa referencja interpolacji: " + path)
+        ]
+        _ -> [
+            end err("nieprawidlowa referencja interpolacji: " + path)
+        ]
+    ]
+]
+
+fun hk_step_index(current: JsonValue, idx: Int, path: Str) -> Result<JsonValue, Str> [
+    match current [
+        JsonArray(items) -> [
+            if idx < 0 or idx >= items.len() [
+                end err("nieprawidlowa referencja interpolacji: " + path)
+            ]
+            end ok(items[idx].clone())
+        ]
+        _ -> [
+            end err("nieprawidlowa referencja interpolacji: " + path)
+        ]
+    ]
+]
+
+!! Odnajduje wartosc pod sciezka `sekcja.klucz.podklucz` albo
+!! `sekcja.tablica[0]` w `root`.
+fun hk_lookup_path(root: JsonValue, path: Str) -> Result<JsonValue, Str> [
+    let raw_parts = str_split(path, ".")
+    if raw_parts.len() == 0 [
+        end err("nieprawidlowa referencja interpolacji: " + path)
+    ]
+    let current = root
+    let i = 0
+    let n = raw_parts.len()
+    while i < n [
+        let raw_part: Str = raw_parts[i].clone()
+        match str_index_of(raw_part, "[") [
+            Some(bracket) -> [
+                let name = raw_part.slice(0, bracket)
+                let idx_str = hk_strip_trailing_bracket(raw_part.slice(bracket + 1, raw_part.len()))
+                current = hk_step_into(current, name, path.clone())?
+                let idx = hk_parse_int_or_err(idx_str, path.clone())?
+                current = hk_step_index(current, idx, path.clone())?
+            ]
+            None -> [
+                current = hk_step_into(current, raw_part, path.clone())?
+            ]
+        ]
+        i = i + 1
+    ]
+    end ok(current)
+]
+
+!! Rozwiazuje `${...}` wewnatrz `s` - `${env:VAR}` -> zmienna
+!! srodowiskowa (pusty string jesli brak), `${sciezka}` -> wartosc z
+!! `root` (rekurencyjnie, jesli sama zawiera `${...}` - z wykrywaniem
+!! cykli poprzez `visiting`).
+fun hk_resolve_string(s: Str, root: JsonValue, visiting: List<Str>) -> Result<Str, Str> [
+    let out = ""
+    let rest = s
+    while str_contains(rest, "${") [
+        match str_index_of(rest, "${") [
+            Some(start) -> [
+                out = out + rest.slice(0, start)
+                let after = rest.slice(start + 2, rest.len())
+                match str_index_of(after, "}") [
+                    Some(end_idx) -> [
+                        let expr = after.slice(0, end_idx)
+                        rest = after.slice(end_idx + 1, after.len())
+                        if str_starts_with(expr, "env:") [
+                            out = out + env_var_or(expr.slice(4, expr.len()), "")
+                        ] else [
+                            if hk_list_contains(visiting, expr) [
+                                end err("cykliczna referencja interpolacji: " + expr)
+                            ]
+                            let new_visiting = visiting.clone()
+                            new_visiting.push(expr.clone())
+                            let resolved = hk_lookup_path(root.clone(), expr.clone())?
+                            let resolved_str = hk_value_to_string(resolved)
+                            if str_contains(resolved_str.clone(), "${") [
+                                resolved_str = hk_resolve_string(resolved_str, root.clone(), new_visiting)?
+                            ]
+                            out = out + resolved_str
+                        ]
+                    ]
+                    None -> [
+                        end err("niezamknieta interpolacja w " + rest)
+                    ]
+                ]
+            ]
+            None -> [
+                rest = ""
+            ]
+        ]
+    ]
+    end ok(out + rest)
+]
+
+!! Rozwiazuje `${...}` we WSZYSTKICH stringach w drzewie `value`
+!! (rekurencyjnie po tablicach/mapach) wzgledem `root` (calego drzewa
+!! configu - referencje moga wskazywac gdziekolwiek).
+fun hk_resolve_value(value: JsonValue, root: JsonValue) -> Result<JsonValue, Str> [
+    match value [
+        JsonString(s) -> [
+            let visiting: List<Str> = []
+            let resolved = hk_resolve_string(s, root, visiting)?
+            end ok(JsonString(resolved))
+        ]
+        JsonArray(items) -> [
+            let out: List<JsonValue> = []
+            let i = 0
+            let n = items.len()
+            while i < n [
+                let r = hk_resolve_value(items[i].clone(), root.clone())?
+                out.push(r)
+                i = i + 1
+            ]
+            end ok(JsonArray(out))
+        ]
+        JsonObject(entries) -> [
+            let out: List<JsonEntry> = []
+            let i = 0
+            let n = entries.len()
+            while i < n [
+                let e = entries[i].clone()
+                let r = hk_resolve_value(e.value, root.clone())?
+                out.push(JsonEntry(e.key, r))
+                i = i + 1
+            ]
+            end ok(JsonObject(out))
+        ]
+        JsonNull -> [
+            end ok(JsonNull)
+        ]
+        JsonBool(b) -> [
+            end ok(JsonBool(b.clone()))
+        ]
+        JsonNumber(n) -> [
+            end ok(JsonNumber(n.clone()))
+        ]
+    ]
+]
+
+!! Rozwiazuje `${...}` w CALYM drzewie `config` (kazdy string moze
+!! odwolywac sie do dowolnego innego miejsca w tym samym drzewie).
+!! Zwraca NOWE drzewo (nie mutuje `config`).
+fun hk_resolve_interpolations(config: JsonValue) -> Result<JsonValue, Str> [
+    end hk_resolve_value(config.clone(), config)
+]
+
+!! Serializuje `config` (drzewo `JsonValue`, `JsonObject` na
+!! najwyzszym poziomie) z powrotem do tekstu `.hk`.
+fun hk_serialize(config: JsonValue) -> Str [
+    match config [
+        JsonObject(sections) -> [
+            let out = ""
+            let i = 0
+            let n = sections.len()
+            while i < n [
+                let sec = sections[i].clone()
+                out = out + "[" + sec.key + "]\n"
+                match sec.value [
+                    JsonObject(inner) -> [
+                        out = out + hk_serialize_map(inner, 1)
+                    ]
+                    _ -> [
+                    ]
+                ]
+                out = out + "\n"
+                i = i + 1
+            ]
+            end out
+        ]
+        _ -> [
+            end ""
+        ]
+    ]
+]
+
+fun hk_serialize_map(entries: List<JsonEntry>, depth: Int) -> Str [
+    let arrows = str_repeat("-", depth) + ">"
+    let out = ""
+    let i = 0
+    let n = entries.len()
+    while i < n [
+        let e = entries[i].clone()
+        match e.value [
+            JsonObject(inner) -> [
+                out = out + arrows + " " + e.key + "\n"
+                out = out + hk_serialize_map(inner, depth + 1)
+            ]
+            JsonNull -> [
+                out = out + arrows + " " + e.key + " => " + hk_serialize_scalar(JsonNull) + "\n"
+            ]
+            JsonBool(b) -> [
+                out = out + arrows + " " + e.key + " => " + hk_serialize_scalar(JsonBool(b.clone())) + "\n"
+            ]
+            JsonNumber(num) -> [
+                out = out + arrows + " " + e.key + " => " + hk_serialize_scalar(JsonNumber(num.clone())) + "\n"
+            ]
+            JsonString(s) -> [
+                out = out + arrows + " " + e.key + " => " + hk_serialize_scalar(JsonString(s.clone())) + "\n"
+            ]
+            JsonArray(items) -> [
+                out = out + arrows + " " + e.key + " => " + hk_serialize_scalar(JsonArray(items.clone())) + "\n"
+            ]
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+fun hk_needs_quotes(s: Str) -> Bool [
+    if s.len() == 0 [
+        end true
+    ]
+    let i = 0
+    let n = s.len()
+    while i < n [
+        if str_is_space(s.char_at(i)) [
+            end true
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+fun hk_escape_for_serialize(s: Str) -> Str [
+    let out = ""
+    let i = 0
+    let n = s.len()
+    while i < n [
+        let c = s.char_at(i)
+        if c == "\\" [
+            out = out + "\\\\"
+        ] elif c == "\"" [
+            out = out + "\\\""
+        ] else [
+            out = out + c
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+fun hk_serialize_scalar(v: JsonValue) -> Str [
+    match v [
+        JsonString(s) -> [
+            if hk_needs_quotes(s.clone()) [
+                end "\"" + hk_escape_for_serialize(s) + "\""
+            ]
+            end s
+        ]
+        JsonNumber(n) -> [
+            end hk_format_number(n.clone())
+        ]
+        JsonBool(b) -> [
+            if b.clone() [
+                end "true"
+            ]
+            end "false"
+        ]
+        JsonArray(items) -> [
+            let out = "["
+            let i = 0
+            let n = items.len()
+            while i < n [
+                if i > 0 [
+                    out = out + ", "
+                ]
+                out = out + hk_serialize_scalar(items[i].clone())
+                i = i + 1
+            ]
+            end out + "]"
+        ]
+        JsonObject(_e) -> [
+            end ""
+        ]
+        JsonNull -> [
+            end ""
+        ]
+    ]
+]
