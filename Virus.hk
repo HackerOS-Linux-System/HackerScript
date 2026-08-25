@@ -1,1 +1,72 @@
+! Virus.hk - manifest workspace GLOWNEGO projektu HackerScript: docelowo
+! JEDNA binarka `virus` laczaca CLI virus (menedzer pakietow/projektow)
+! i hackerc (transpilator HackerScript -> Rust), statycznie linkujaca
+! biblioteki z libs/ (core + std) - patrz "Stan dzisiaj" ponizej za
+! dokladne wyjasnienie co z tego DZIALA JUZ TERAZ, a co jest planem na
+! przyszla sesje (patrz bootstrap/README.md).
 
+[package]
+-> name        => virus
+-> version     => 0.0.1
+-> using       => 1.2
+-> edition     => 2026
+-> authors     => ["HackerOS-Linux-System"]
+-> description => virus + hackerc, jedna binarka - menedzer pakietow/projektow i transpilator HackerScript -> Rust, statycznie linkujace libs/core i libs/std.
+
+[workspace]
+-> members => ["bootstrap/hackerc-self", "libs/core", "libs/std"]
+
+[dependencies]
+-> std
+--> io => "*"
+--> fs => "*"
+
+[build]
+-> entry => bootstrap/hackerc-self/cli.hcs
+
+! ## Stan dzisiaj (przeczytaj przed uzyciem)
+!
+! `[build] -> entry` wskazuje na `bootstrap/hackerc-self/cli.hcs` -
+! JUZ DZIALAJACY, samo-hostowany CLI hackerc (check/lint/build/fmt +
+! tryb kompatybilnosci wstecznej, patrz bootstrap/README.md) - `hackerc
+! build bootstrap/hackerc-self/cli.hcs` (albo `virus build` po tym, jak
+! `virus` bedzie umial czytac ten manifest - patrz nizej) produkuje
+! DZIS dzialajaca binarke `hackerscript_app`, ktora sama w sobie jest
+! kompletnym CLI hackerc.
+!
+! `[workspace] -> members` obejmuje `bootstrap/hackerc-self` (pakiet
+! hackerc, patrz bootstrap/hackerc-self/Virus.hk) oraz `libs/core`/
+! `libs/std` - to jest RZECZYWISTE, dzialajace statyczne linkowanie:
+! `cli.hcs` importuje je (`include <...>` dla plikow siostrzanich w
+! bootstrap/hackerc-self/, `get <std:io>`/`get <std:fs>` dla libs/std)
+! i `hackerc build` kompiluje WSZYSTKO w jedno drzewo `src/*.rs` +
+! jeden `Cargo.toml` - jedna binarka, jedna kompilacja `cargo build`,
+! zweryfikowane w tej sesji (patrz bootstrap/README.md).
+!
+! Czego TU JESZCZE NIE MA: `virus/` (Rust, 2208 linii - `virus/cli/`
+! + `virus/hk-parser/`) NIE JEST czlonkiem workspace powyzej - wciaz
+! istnieje jako ODDZIELNY projekt Rust (`virus/Cargo.toml`), zero kodu
+! HackerScript odpowiadajacego jego komendom (install/cache/build-
+! orchestration/pobieranie zaleznosci). To jest NASTEPNY, wiekszy krok
+! (przepisanie calego `virus/` na HackerScript) - PO nim ten manifest
+! zostanie rozszerzony tak, zeby `[build] -> entry` (albo osobna
+! sekcja) wskazywal RowNIEZ na przepisany `virus` (np. jako kolejny
+! plik dolaczony przez `include <virus>` w `cli.hcs`, albo jako
+! kolejny czlonek workspace z wlasnym `Virus.hk`), i dopiero WTEDY
+! `hackerc build` (uruchomiony na tym manifescie) faktycznie da JEDNA
+! binarke robiaca i to, co dzis robi `virus`, i to, co dzis robi
+! `hackerc`. Dzisiejszy plik jest wiec CELOWO przygotowany pod ten stan
+! docelowy (nazwa pakietu `virus`, opis wspominajacy oba), ale
+! szczerze mowiac o tym, co dziala JUZ DZIS a co jest planem.
+!
+! Ten manifest jest zweryfikowany PRAWDZIWYM `hk-parser` (Rust) w tej
+! sesji - parsuje sie bez bledow (`parse_file` -> `Manifest` z
+! poprawnymi `package`/`workspace.members`/`dependencies`/`build.entry`).
+! `virus/cli` (pelne CLI z `clap`/`reqwest`/itp.) nie dalo sie w tym
+! srodowisku zbudowac az do konca (starsze `rustc 1.75` z apt nie
+! obsluguje `edition2024`, ktorego wymagaja najnowsze wersje kilku
+! zaleznosci przechodnich - `hashbrown`/`clap_lex` - a pobranie
+! nowszego `rustc` ze zrodel nie jest wykonalne w tym sandboxie) -
+! `hk-parser` SAMO W SOBIE (bez ciezkich zaleznosci `cli/`) zbudowano
+! i uruchomiono osobno (z przypietymi starszymi, kompatybilnymi
+! wersjami `indexmap`/`hashbrown`) wylacznie do tej weryfikacji.
