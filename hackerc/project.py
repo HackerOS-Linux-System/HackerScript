@@ -9,7 +9,7 @@ from . import ast_nodes as A
 from .transpiler import transpile_source_full, TranspileError, _extract_direct_blocks
 from .codegen import _compute_mut_params, _compute_method_mut_params
 
-_MODULE_SOURCES = ("std", "core", "selfhost")
+_MODULE_SOURCES = ("std", "core", "selfhost", "virus")
 
 CARGO_TOML_TEMPLATE = """[package]
 name = "{name}"
