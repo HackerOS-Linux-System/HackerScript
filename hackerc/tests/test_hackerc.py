@@ -790,8 +790,12 @@ def test_str_char_at_and_slice():
         """
     )
     rust = transpile_source(src)
-    assert ".chars().nth(0 as usize)" in rust
-    assert ".chars().skip(0 as usize).take(((5) - (0)) as usize).collect::<String>()" in rust
+    # `s` jest uzywane dwukrotnie (`char_at` + `slice`) - kwalifikuje sie
+    # do materializacji `Vec<char>` (patrz `_char_indexed_str_params`),
+    # wiec obie operacje korzystaja z szybkiej, zbuforowanej sciezki.
+    assert "let __hks_chars_s: Vec<char> = s.chars().collect();" in rust
+    assert "__hks_chars_s.get(0 as usize)" in rust
+    assert "__v[__s..__e].iter().collect::<String>()" in rust
     diags = check_program(parse(src))
     assert not [d for d in diags if d.severity == "error"]
 
@@ -1291,10 +1295,10 @@ def test_bootstrap_parser_full_grammar_links_and_builds():
     result = build_project(entry, out_dir)
     assert not result.warnings, result.warnings
     main_rs = result.main_rs.read_text(encoding="utf-8")
-    lexer_rs = (out_dir / "src" / "_hks_selfhost_lexer.rs").read_text(encoding="utf-8")
-    ast_rs = (out_dir / "src" / "_hks_selfhost_ast_nodes.rs").read_text(encoding="utf-8")
+    lexer_rs = (out_dir / "src" / "_hks_inc_lexer.rs").read_text(encoding="utf-8")
+    ast_rs = (out_dir / "src" / "_hks_inc_ast_nodes.rs").read_text(encoding="utf-8")
 
-    assert "use crate::_hks_selfhost_lexer::{TokKind, Token, tokenize};" in main_rs
+    assert "use crate::_hks_inc_lexer::*;" in main_rs
     assert "pub struct Parser {" in main_rs
     # Bug znaleziony i naprawiony w TEJ sesji: `kind: TokKind` jest
     # ZAWSZE przekazywany jako `&TokKind` (enum = "refable" w
@@ -1336,21 +1340,35 @@ def test_bootstrap_parser_full_grammar_links_and_builds():
     assert "pub fn main() {" in main_rs
 
 
+def test_get_selfhost_source_is_a_syntax_error():
+    """`get <selfhost:...>` jest ZABLOKOWANE na wyrazne zyczenie
+    uzytkownika - `include <plik>` jest jedynym sposobem importu miedzy
+    plikami w bootstrap/hackerc-self/. `get <std:...>`/`get <core:...>`/
+    `get <crates:...>`/`get <pypi:...>` (prawdziwe biblioteki
+    zewnetrzne) pozostaja NIETKNIETE."""
+    with pytest.raises(ParseError, match="selfhost"):
+        parse("get <selfhost:codegen> import <foo>\n")
+    # get <std:...>/<core:...> nadal dziala normalnie (nie jest zablokowane).
+    prog = parse("get <std:io> import <read_file>\n")
+    assert len(prog.body) == 1
+    assert prog.body[0].__class__.__name__ == "GetImportStmt"
+    assert prog.body[0].source == "std"
+
+
 def test_selfhost_module_system_links_bootstrap_files():
-    """`get <selfhost:...>` laczy pliki w `bootstrap/hackerc-self/`
-    przez ten sam mechanizm co `get <core:...>`/`get <std:...>` dla
-    `libs/` - `find_bootstrap_root` auto-wykrywa katalog, cross-file
-    sygnatury (w tym enumy) pozwalaja skonstruowac warianty z pliku,
-    ktory tylko IMPORTUJE enum, nie deklaruje go u siebie. (Test
-    zaktualizowany w kroku 3/N - `expr_parser.hcs` zastapione przez
-    `parser.hcs` po konsolidacji AST+parsera w dwa pliki.)"""
+    """`include <plik>` laczy pliki w `bootstrap/hackerc-self/` (od
+    sesji z `include` - zastapilo `get <selfhost:...>`, ktore jest
+    dzis BLOKOWANE jako blad skladni, patrz `parse_get_import`) -
+    `resolve_include_path` szuka WZGLEDEM katalogu pliku z `include`,
+    cross-file sygnatury (w tym enumy) pozwalaja skonstruowac warianty
+    z pliku, ktory tylko IMPORTUJE enum, nie deklaruje go u siebie."""
     root = Path(__file__).resolve().parent.parent.parent
     entry = root / "bootstrap" / "hackerc-self" / "parser.hcs"
     out_dir = Path(tempfile.mkdtemp())
     result = build_project(entry, out_dir)
     assert not result.warnings
-    assert (out_dir / "src" / "_hks_selfhost_lexer.rs").exists()
-    assert (out_dir / "src" / "_hks_selfhost_ast_nodes.rs").exists()
+    assert (out_dir / "src" / "_hks_inc_lexer.rs").exists()
+    assert (out_dir / "src" / "_hks_inc_ast_nodes.rs").exists()
     assert (out_dir / "Cargo.toml").exists()
 
 
@@ -1413,7 +1431,7 @@ def test_check_program_accepts_cross_file_variant_names():
     check_program(), zeby znac warianty z innych plikow."""
     src_import_only = textwrap.dedent(
         """
-        get <selfhost:ast_nodes> import <Expr>
+        include <ast_nodes>
 
         fun main() [
             let e = Var("x")
@@ -1464,7 +1482,7 @@ def test_bootstrap_typeinfer_links_and_builds_without_box_ref_mismatches():
     # Param.type_ref NIE jest Boxowane (Param nie jest czescia cyklu
     # TypeRef -> TypeRef, w przeciwienstwie do TypeRef.generic, ktore
     # JEST) - zweryfikowane, ze te dwa rozne przypadki maja rozny ksztalt.
-    ast_rs = (out_dir / "src" / "_hks_selfhost_ast_nodes.rs").read_text(encoding="utf-8")
+    ast_rs = (out_dir / "src" / "_hks_inc_ast_nodes.rs").read_text(encoding="utf-8")
     assert "pub type_ref: Option<TypeRef>," in ast_rs
     assert "pub generic: Option<Box<TypeRef>>," in ast_rs
     # AttrCallShape unika przechowywania surowego `Expr` (bezpieczne -
@@ -1756,7 +1774,7 @@ def test_bootstrap_codegen_gen_struct_gen_fun_gen_impl_produce_correct_rust():
     ):
         assert fn_sig in main_rs, fn_sig
     # Bug: `sigs.clone()` konieczne w new_codegen (patrz docstring).
-    assert "return CodeGen::new(sigs.clone(), (env_vars).clone(), (variant_arity).clone(), (boxed_fields).clone(), (method_mut_params).clone(), (mut_params).clone(), vec![], None, vec![], 0, (no_default_structs).clone(), false, (direct_blocks).clone(), false);" in main_rs
+    assert "return CodeGen::new(sigs.clone(), (env_vars).clone(), (variant_arity).clone(), (boxed_fields).clone(), (method_mut_params).clone(), (mut_params).clone(), vec![], None, vec![], 0, (no_default_structs).clone(), false, (direct_blocks).clone(), false, std::collections::HashMap::new());" in main_rs
     # Struct bez generykow/rekurencji dostaje #[derive(..., Default)];
     # konstruktor pozycyjny `Nazwa::new(...)`.
     assert '#[derive(Debug, Clone, PartialEq, Default)]' in main_rs
@@ -1832,13 +1850,16 @@ def test_bootstrap_diagnostics_checks_and_transpiles_without_ref_owned_mismatch(
     assert "pub fn render(source: &String" in rust
     assert "pub fn render_many(source: &String, filename: &String, diagnostics: &Vec<Diagnostic>) -> String {" in rust
     assert "pub fn main() {" in rust
-    # Regresja: te dwie linie NIGDY nie moga wrocic w tej formie -
+    # Regresja: `let tag = severity` NIGDY nie moze wrocic w tej formie -
     # `String` po lewej, `&String`-owy parametr bez konkatenacji po
-    # prawej, to niezgodnosc typow w prawdziwym Rust.
+    # prawej, to niezgodnosc typow w prawdziwym Rust. `d.filename =
+    # filename` zostalo CALKOWICIE USUNIETE w tej sesji (patrz
+    # `render_many` - `render_from_lines` dostaje `filename` wprost,
+    # bez posredniej mutacji `d.filename`, zeby uniknac wolania
+    # `split_lines` osobno na kazda diagnostyke - patrz nastepny test).
     assert "let mut tag: String = severity;" not in rust
     assert "d.filename = filename;" not in rust
     assert 'let mut tag: String = format!("{}{}", severity, "".to_string());' in rust
-    assert 'd.filename = format!("{}{}", filename, "".to_string());' in rust
 
 
 def test_bootstrap_diagnostics_split_lines_matches_python_splitlines_edge_cases():
@@ -1846,15 +1867,20 @@ def test_bootstrap_diagnostics_split_lines_matches_python_splitlines_edge_cases(
     `source.splitlines() or [\"\"]` w trzech granicznych przypadkach:
     zrodlo puste -> [\"\"], zrodlo z koncowym '\\n' -> BEZ fantomowej
     dodatkowej puste linii, zrodlo bez koncowego '\\n' -> ostatnia
-    czesciowa linia ZACHOWANA. Weryfikacja strukturalna (ksztalt
+    czesciowa linia ZACHOWANA. Przepisane w tej sesji z budowania
+    `cur = cur + c` znak-po-znaku (O(L^2) na linie - bug wydajnosciowy
+    znaleziony przy uzyciu skompilowanego stage1 na duzych plikach) na
+    `.slice(start, i)` (O(L)) - test zaktualizowany pod NOWY ksztalt,
+    te same przypadki brzegowe. Weryfikacja strukturalna (ksztalt
     wygenerowanego Rusta), nie wykonanie (brak rustc w tym
     srodowisku - patrz docs/ROADMAP.md)."""
     root = Path(__file__).resolve().parent.parent.parent
     entry = root / "bootstrap" / "hackerc-self" / "diagnostics.hcs"
     src = entry.read_text(encoding="utf-8")
     rust = transpile_source(src)
-    assert 'if ((cur.to_string() != "".to_string().to_string()) || ((lines.len() as i64) == 0)) {' in rust
-    assert "lines.push((cur).to_string());" in rust
+    assert "if ((start < n) || ((lines.len() as i64) == 0)) {" in rust
+    assert "lines.push(strip_cr(" in rust
+    assert "fn split_lines(source: &String) -> Vec<String> {" in rust
 
 
 def test_not_equal_inside_doc_comment_does_not_break_parsing():
