@@ -1,0 +1,409 @@
+get <std:string> import <str_is_space>
+get <std:math> import <math_pow_float>
+
+!! Drzewo wartosci JSON. Warianty nazwane z prefiksem `Json*`, zeby nie
+!! kolidowaly z nazwami wariantow innych modulow (patrz docs/SYNTAX.md
+!! - ograniczenie bootstrapu: nazwy wariantow enum musza byc unikalne w
+!! calym programie).
+enum JsonValue [
+    JsonNull,
+    JsonBool(Bool),
+    JsonNumber(Float),
+    JsonString(Str),
+    JsonArray(List<JsonValue>),
+    JsonObject(List<JsonEntry>)
+]
+
+!! Jedna para klucz-wartosc obiektu JSON (lista `JsonEntry` zamiast
+!! `Dict` - zachowuje kolejnosc kluczy, patrz uwaga wyzej).
+struct JsonEntry [
+    key: Str,
+    value: JsonValue
+]
+
+!! Wewnetrzny stan parsera: sparsowana wartosc + pozycja TUZ ZA nia w
+!! wejsciowym stringu (parser nie ma tupli, wiec to jest sposob na
+!! "podwojny zwrot" wartosc+pozycja z funkcji rekurencyjnych).
+struct JsonParseState [
+    value: JsonValue,
+    pos: Int
+]
+
+!! Jak `JsonParseState`, ale dla surowego (juz odescape'owanego)
+!! stringa - uzywane wewnetrznie przez `json_parse_string`.
+struct JsonStrState [
+    value: Str,
+    pos: Int
+]
+
+!! Parsuje `s` jako JSON i zwraca sparsowane drzewo `JsonValue`, albo
+!! `Err(opis)` przy pierwszym napotkanym bledzie skladni. Zawartosc PO
+!! poprawnej wartosci (poza biala spacja) jest IGNOROWANA (parser nie
+!! wymaga, zeby `s` byl wylacznie jedna wartoscia JSON - wygodne przy
+!! parsowaniu strumieni/wielu dokumentow pod rzad przez wielokrotne
+!! wywolanie z pozycja poprzedniego `JsonParseState.pos`).
+fun json_parse(s: Str) -> Result<JsonValue, Str> [
+    let p = json_skip_ws(s, 0)
+    let st = json_parse_value(s, p)?
+    end ok(st.value)
+]
+
+!! Pomija biale znaki (spacja/tab/\n/\r) poczawszy od `pos`, zwraca
+!! pozycje pierwszego nie-bialego znaku (albo `s.len()`, jesli same
+!! biale znaki do konca).
+fun json_skip_ws(s: Str, pos: Int) -> Int [
+    let m = s.len()
+    let i = pos
+    while i < m and str_is_space(s.char_at(i)) [
+        i = i + 1
+    ]
+    end i
+]
+
+!! Wartosc cyfry (0-9) jako `Int`, albo `-1` jesli `c` nie jest cyfra.
+fun json_digit_value(c: Str) -> Int [
+    if c == "0" [
+        end 0
+    ]
+    if c == "1" [
+        end 1
+    ]
+    if c == "2" [
+        end 2
+    ]
+    if c == "3" [
+        end 3
+    ]
+    if c == "4" [
+        end 4
+    ]
+    if c == "5" [
+        end 5
+    ]
+    if c == "6" [
+        end 6
+    ]
+    if c == "7" [
+        end 7
+    ]
+    if c == "8" [
+        end 8
+    ]
+    if c == "9" [
+        end 9
+    ]
+    end 0 - 1
+]
+
+!! Czy `c` jest cyfra dziesietna.
+fun json_is_digit(c: Str) -> Bool [
+    end json_digit_value(c) >= 0
+]
+
+!! Parsuje DOWOLNA wartosc JSON (obiekt/tablice/string/liczbe/
+!! true/false/null) zaczynajac od `pos` (moze byc poprzedzone biala
+!! spacja - jest pomijana). Dispatch na podstawie pierwszego
+!! nie-bialego znaku.
+fun json_parse_value(s: Str, pos: Int) -> Result<JsonParseState, Str> [
+    let p = json_skip_ws(s, pos)
+    if p >= s.len() [
+        end err("json: nieoczekiwany koniec danych (oczekiwano wartosci)")
+    ]
+    let c = s.char_at(p)
+    if c == "{" [
+        end json_parse_object(s, p)
+    ]
+    if c == "[" [
+        end json_parse_array(s, p)
+    ]
+    if c == "\"" [
+        let sst = json_parse_string(s, p)?
+        end ok(JsonParseState(JsonString(sst.value), sst.pos))
+    ]
+    if c == "t" or c == "f" [
+        end json_parse_bool(s, p)
+    ]
+    if c == "n" [
+        end json_parse_null(s, p)
+    ]
+    end json_parse_number(s, p)
+]
+
+!! Parsuje literal `true`/`false` zaczynajacy sie DOKLADNIE na `pos`.
+fun json_parse_bool(s: Str, pos: Int) -> Result<JsonParseState, Str> [
+    let m = s.len()
+    if pos + 4 <= m and s.slice(pos, pos + 4) == "true" [
+        end ok(JsonParseState(JsonBool(true), pos + 4))
+    ]
+    if pos + 5 <= m and s.slice(pos, pos + 5) == "false" [
+        end ok(JsonParseState(JsonBool(false), pos + 5))
+    ]
+    end err("json: oczekiwano 'true' albo 'false'")
+]
+
+!! Parsuje literal `null` zaczynajacy sie DOKLADNIE na `pos`.
+fun json_parse_null(s: Str, pos: Int) -> Result<JsonParseState, Str> [
+    let m = s.len()
+    if pos + 4 <= m and s.slice(pos, pos + 4) == "null" [
+        end ok(JsonParseState(JsonNull, pos + 4))
+    ]
+    end err("json: oczekiwano 'null'")
+]
+
+!! Parsuje liczbe JSON (`-`? cyfry (`.` cyfry)? ([eE] [+-]? cyfry)?)
+!! zaczynajaca sie DOKLADNIE na `pos`, budujac wynik jako `Float`
+!! cyfra-po-cyfrze (bez uzycia zadnego wbudowanego parsera liczb).
+fun json_parse_number(s: Str, pos: Int) -> Result<JsonParseState, Str> [
+    let m = s.len()
+    let i = pos
+    let neg = false
+    if i < m and s.char_at(i) == "-" [
+        neg = true
+        i = i + 1
+    ]
+    let int_start = i
+    while i < m and json_is_digit(s.char_at(i)) [
+        i = i + 1
+    ]
+    if i == int_start [
+        end err("json: oczekiwano cyfry w liczbie")
+    ]
+    let value = 0.0
+    let k = int_start
+    while k < i [
+        value = value * 10.0 + (json_digit_value(s.char_at(k)) as Float)
+        k = k + 1
+    ]
+    if i < m and s.char_at(i) == "." [
+        i = i + 1
+        let frac_start = i
+        while i < m and json_is_digit(s.char_at(i)) [
+            i = i + 1
+        ]
+        if i == frac_start [
+            end err("json: oczekiwano cyfry po '.'")
+        ]
+        let frac_value = 0.0
+        let scale = 1.0
+        let k2 = frac_start
+        while k2 < i [
+            frac_value = frac_value * 10.0 + (json_digit_value(s.char_at(k2)) as Float)
+            scale = scale * 10.0
+            k2 = k2 + 1
+        ]
+        value = value + frac_value / scale
+    ]
+    if i < m and (s.char_at(i) == "e" or s.char_at(i) == "E") [
+        i = i + 1
+        let exp_neg = false
+        if i < m and (s.char_at(i) == "+" or s.char_at(i) == "-") [
+            exp_neg = s.char_at(i) == "-"
+            i = i + 1
+        ]
+        let exp_start = i
+        while i < m and json_is_digit(s.char_at(i)) [
+            i = i + 1
+        ]
+        if i == exp_start [
+            end err("json: oczekiwano cyfry w wykladniku")
+        ]
+        let exp_value = 0
+        let k3 = exp_start
+        while k3 < i [
+            exp_value = exp_value * 10 + json_digit_value(s.char_at(k3))
+            k3 = k3 + 1
+        ]
+        if exp_neg [
+            exp_value = 0 - exp_value
+        ]
+        value = value * math_pow_float(10.0, exp_value)
+    ]
+    if neg [
+        value = 0.0 - value
+    ]
+    end ok(JsonParseState(JsonNumber(value), i))
+]
+
+!! Parsuje string JSON (z cudzyslowami i escape'ami) zaczynajacy sie
+!! DOKLADNIE na `pos` (musi wskazywac na otwierajacy `"`).
+fun json_parse_string(s: Str, pos: Int) -> Result<JsonStrState, Str> [
+    let m = s.len()
+    if pos >= m or s.char_at(pos) != "\"" [
+        end err("json: oczekiwano '\"' na poczatku stringa")
+    ]
+    let i = pos + 1
+    let out = ""
+    while i < m and s.char_at(i) != "\"" [
+        let c = s.char_at(i)
+        if c == "\\" [
+            if i + 1 >= m [
+                end err("json: niezakonczona sekwencja escape w stringu")
+            ]
+            let e = s.char_at(i + 1)
+            if e == "\"" [
+                out = out + "\""
+            ] elif e == "\\" [
+                out = out + "\\"
+            ] elif e == "/" [
+                out = out + "/"
+            ] elif e == "n" [
+                out = out + "\n"
+            ] elif e == "t" [
+                out = out + "\t"
+            ] elif e == "r" [
+                out = out + "\r"
+            ] else [
+                end err("json: nieobslugiwana sekwencja escape w stringu (wspierane: \\\" \\\\ \\/ \\n \\t \\r)")
+            ]
+            i = i + 2
+        ] else [
+            out = out + c
+            i = i + 1
+        ]
+    ]
+    if i >= m [
+        end err("json: niezakonczony string")
+    ]
+    end ok(JsonStrState(out, i + 1))
+]
+
+!! Parsuje tablice JSON (`[ ... ]`) zaczynajaca sie DOKLADNIE na `pos`.
+fun json_parse_array(s: Str, pos: Int) -> Result<JsonParseState, Str> [
+    let m = s.len()
+    let i = json_skip_ws(s, pos + 1)
+    let out: List<JsonValue> = []
+    if i < m and s.char_at(i) == "]" [
+        end ok(JsonParseState(JsonArray(out), i + 1))
+    ]
+    while true [
+        let st = json_parse_value(s, i)?
+        out.push(st.value)
+        i = json_skip_ws(s, st.pos)
+        if i >= m [
+            end err("json: niezakonczona tablica")
+        ]
+        let c = s.char_at(i)
+        if c == "," [
+            i = json_skip_ws(s, i + 1)
+        ] elif c == "]" [
+            end ok(JsonParseState(JsonArray(out), i + 1))
+        ] else [
+            end err("json: oczekiwano ',' albo ']' w tablicy")
+        ]
+    ]
+    end err("json: nieosiagalne")
+]
+
+!! Parsuje obiekt JSON (`{ ... }`) zaczynajacy sie DOKLADNIE na `pos`.
+fun json_parse_object(s: Str, pos: Int) -> Result<JsonParseState, Str> [
+    let m = s.len()
+    let i = json_skip_ws(s, pos + 1)
+    let out: List<JsonEntry> = []
+    if i < m and s.char_at(i) == "}" [
+        end ok(JsonParseState(JsonObject(out), i + 1))
+    ]
+    while true [
+        if i >= m or s.char_at(i) != "\"" [
+            end err("json: oczekiwano klucza (string) w obiekcie")
+        ]
+        let kst = json_parse_string(s, i)?
+        i = json_skip_ws(s, kst.pos)
+        if i >= m or s.char_at(i) != ":" [
+            end err("json: oczekiwano ':' w obiekcie")
+        ]
+        i = json_skip_ws(s, i + 1)
+        let vst = json_parse_value(s, i)?
+        out.push(JsonEntry(kst.value, vst.value))
+        i = json_skip_ws(s, vst.pos)
+        if i >= m [
+            end err("json: niezakonczony obiekt")
+        ]
+        let c = s.char_at(i)
+        if c == "," [
+            i = json_skip_ws(s, i + 1)
+        ] elif c == "}" [
+            end ok(JsonParseState(JsonObject(out), i + 1))
+        ] else [
+            end err("json: oczekiwano ',' albo '}' w obiekcie")
+        ]
+    ]
+    end err("json: nieosiagalne")
+]
+
+!! Zamienia `JsonValue` z powrotem na tekst JSON (bez formatowania -
+!! zwarty zapis, bez spacji/nowych linii miedzy tokenami).
+fun json_stringify(v: JsonValue) -> Str [
+    match v [
+        JsonNull -> [
+            end "null"
+        ]
+        JsonBool(b) -> [
+            if b.clone() [
+                end "true"
+            ]
+            end "false"
+        ]
+        JsonNumber(n) -> [
+            end n as Str
+        ]
+        JsonString(inner) -> [
+            end json_escape_string(inner)
+        ]
+        JsonArray(items) -> [
+            let out = "["
+            let i = 0
+            let n = items.len()
+            while i < n [
+                if i > 0 [
+                    out = out + ","
+                ]
+                out = out + json_stringify(items[i].clone())
+                i = i + 1
+            ]
+            out = out + "]"
+            end out
+        ]
+        JsonObject(entries) -> [
+            let out = "{"
+            let i = 0
+            let n = entries.len()
+            while i < n [
+                if i > 0 [
+                    out = out + ","
+                ]
+                let e = entries[i].clone()
+                out = out + json_escape_string(e.key) + ":" + json_stringify(e.value)
+                i = i + 1
+            ]
+            out = out + "}"
+            end out
+        ]
+    ]
+]
+
+!! Escape'uje `s` do postaci literalu stringa JSON (WLACZNIE z
+!! otaczajacymi cudzyslowami).
+fun json_escape_string(s: Str) -> Str [
+    let out = "\""
+    let i = 0
+    let m = s.len()
+    while i < m [
+        let c = s.char_at(i)
+        if c == "\"" [
+            out = out + "\\\""
+        ] elif c == "\\" [
+            out = out + "\\\\"
+        ] elif c == "\n" [
+            out = out + "\\n"
+        ] elif c == "\t" [
+            out = out + "\\t"
+        ] elif c == "\r" [
+            out = out + "\\r"
+        ] else [
+            out = out + c
+        ]
+        i = i + 1
+    ]
+    out = out + "\""
+    end out
+]
