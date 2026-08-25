@@ -6,10 +6,38 @@
 !!   get <std:io>                            - pliki (read_file_or/file_readable/write_file_ok);
 !!                                              read_file()/write_file() sa wbudowane w kompilator
 !!                                              (jak log()), dzialaja WSZEDZIE bez importu
+!!   get <std:fs>                            - katalogi (ensure_dir/create_dir_ok/list_dir_or_empty/
+!!                                              list_dir_full_paths); dir_exists()/create_dir()/
+!!                                              remove_file()/list_dir() sa wbudowane w kompilator
 !!   get <std:result>                        - unwrap_or/unwrap_or_default/is_ok/is_err/is_some
 !!                                              dla Result<T,E>/Option<T> (prawdziwe generyki)
+!!   get <std:string>                        - split/trim/replace/contains/starts_with/ends_with/
+!!                                              index_of/repeat/join na Str (patrz string.hcs)
+!!   get <std:math>                          - abs/min/max/pow/sqrt/floor/ceil/round + PI/E
+!!   get <std:path>                          - join/basename/dirname/extension/is_absolute/segments
+!!                                              (separator uniksowy `/`, zbudowany na std:string)
+!!   get <std:json>                          - json_parse/json_stringify (recursive-descent, patrz
+!!                                              json.hcs; typ JsonValue)
+!!   get <std:toml>                          - toml_parse (minimalny, praktyczny podzbior TOML -
+!!                                              key = value, [sekcje], tablice, string/liczba/bool)
+!!   get <std:hk>                            - hk_parse/hk_resolve_interpolations/hk_serialize
+!!                                              (format .hk uzywany przez Virus.hk - dowolne
+!!                                              zagniezdzenie ->/-->/--->, klucze kropkowe,
+!!                                              interpolacja ${sekcja.klucz}/${env:VAR}); zwraca
+!!                                              JsonValue, zbudowany na std:toml/std:json/std:env
+!!   get <std:env>                           - env_var_or/env_var_present/env_path_entries;
+!!                                              env_var()/args() sa wbudowane w kompilator
+!!   get <std:process>                       - run_command_checked/command_succeeds/run_command_simple;
+!!                                              run_command() (BEZ powloki - bezposredni fork/exec)
+!!                                              jest wbudowane w kompilator
+!!   get <std:http>                          - http_get_checked/http_get_ok (tylko GET, cialo
+!!                                              MUSI byc UTF-8); http_get() jest wbudowane w
+!!                                              kompilator, WYMAGA `get <crates:ureq::2>`
 !!
-!! Reszta jest jeszcze pusta - patrz docs/ROADMAP.md.
+!! Std jest teraz kompletne wg pierwotnego zakresu tej rundy (~20-30
+!! modulow: fs/io/result + string/math/path/json/toml/hk/env/process/
+!! http + cybersecurity/*). Reszta (wiecej formatow/protokolow) - patrz
+!! docs/ROADMAP.md.
 
 fun std_placeholder() [
     log("std: patrz std/lib/cybersecurity/, std/lib/io.hcs, std/lib/result.hcs - reszta jeszcze pusta, patrz docs/ROADMAP.md")
