@@ -1,0 +1,27 @@
+get <crates:ureq::2>
+
+!! Jak `http_get`, ale przy niepowodzeniu opakowuje komunikat bledu
+!! informacja O KTORYM URL-u chodzilo.
+fun http_get_checked(url: Str) -> Result<Str, Str> [
+    match http_get(url.clone()) [
+        Ok(body) -> [
+            end ok(body)
+        ]
+        Err(e) -> [
+            end err("GET " + url + " nie powiodlo sie: " + e)
+        ]
+    ]
+]
+
+!! Czy GET na `url` powiodl sie (kod 2xx i poprawne UTF-8 cialo) -
+!! ignoruje samo cialo, wygodne do prostych health-checkow.
+fun http_get_ok(url: Str) -> Bool [
+    match http_get(url) [
+        Ok(_body) -> [
+            end true
+        ]
+        Err(_e) -> [
+            end false
+        ]
+    ]
+]
