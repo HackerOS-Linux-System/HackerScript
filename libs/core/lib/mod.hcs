@@ -1,12 +1,15 @@
 !! core - punkt wejscia pakietu core.
 !!
-!! UWAGA: HackerScript (bootstrap 0.0.1) nie ma jeszcze prawdziwego systemu
-!! modulow miedzy plikami .hcs (patrz docs/ROADMAP.md - "system modulow").
-!! Do tego czasu kazdy plik w core/lib/**/*.hcs (np. memory/arena.hcs) jest
-!! samodzielny i transpilowany osobno. Ten plik jest tylko deklaratywnym
-!! punktem wejscia wymaganym przez [build] w Virus.hk.
+!! UWAGA: HackerScript nie ma jeszcze prawdziwego systemu modulow
+!! WEWNATRZ jednego pakietu (kazdy plik core/lib/**/*.hcs jest
+!! importowany osobno przez get<core:sciezka::do::pliku> z zewnatrz -
+!! patrz docs/SYNTAX.md). Dostepne moduly:
+!!   get <core:memory::arena>            - bump allocator
+!!   get <core:memory::chained_arena>    - rosnaca arena lancuchowa
+!!   get <core:memory::stack_allocator>  - alokator stosowy (LIFO)
+!!   get <core:memory::pool_allocator>   - alokator pulowy z free-list
 
 fun core_placeholder() [
-    log("core: patrz core/lib/memory/arena.hcs dla przykladu alokatora arenowego")
+    log("core: patrz core/lib/memory/ dla alokatorow (arena, chained_arena, stack_allocator, pool_allocator)")
     end
 ]
