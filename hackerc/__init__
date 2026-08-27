@@ -1,9 +1,0 @@
-__version__ = "0.0.1"
-
-from .transpiler import (  # noqa: F401
-    transpile_source,
-    transpile_source_full,
-    transpile_file,
-    TranspileError,
-    TranspileResult,
-)
