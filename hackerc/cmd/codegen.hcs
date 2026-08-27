@@ -1,0 +1,3735 @@
+include <ast_nodes>
+include <typeinfer>
+include <typecheck>
+
+fun list_contains_str(xs: List<Str>, s: Str) -> Bool [
+    let i = 0
+    let n = xs.len()
+    while i < n [
+        if xs[i] == s [
+            end true
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+!!! Reczne wyszukiwanie podciagu (bez wbudowanej metody "contains" na
+!!! Str w tym bootstrapie) - potrzebne przez `python_raw_string`.
+fun str_contains_substring(haystack: Str, needle: Str) -> Bool [
+    let hn = haystack.len()
+    let nn = needle.len()
+    if nn == 0 [
+        end true
+    ]
+    if nn > hn [
+        end false
+    ]
+    let i = 0
+    while i <= hn - nn [
+        let j = 0
+        let matched = true
+        while j < nn and matched [
+            if haystack.char_at(i + j) != needle.char_at(j) [
+                matched = false
+            ]
+            j = j + 1
+        ]
+        if matched [
+            end true
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+!!! Rust raw string literal `r#"..."#`, ktory bezpiecznie pomiesci
+!!! DOWOLNY kod Pythona (w tym cudzyslowy) - parytet z
+!!! `_python_raw_string()`. Dolicza tyle `#` ile potrzeba, zeby `"#..`
+!!! nie wystapilo WEWNATRZ tresci (co przedwczesnie zamknelo by
+!!! literal).
+fun python_raw_string(s: Str) -> Str [
+    let hashes = "#"
+    while str_contains_substring(s, "\"" + hashes) [
+        hashes = hashes + "#"
+    ]
+    end "r" + hashes + "\"" + s + "\"" + hashes
+]
+
+fun char_to_upper(c: Str) -> Str [
+    let lower = "abcdefghijklmnopqrstuvwxyz"
+    let upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    let i = 0
+    let n = lower.len()
+    while i < n [
+        if lower.char_at(i) == c [
+            end upper.char_at(i)
+        ]
+        i = i + 1
+    ]
+    end c
+]
+
+!!! Parytet z Pythonowym `.upper()` (uzywane przez nazwy stalych
+!!! globalnych `const X = ...` -> `pub const X: ...`) - reczna wersja
+!!! bez wbudowanej metody Str, ASCII-only (parytet ze skladnia
+!!! identyfikatorow HackerScript, ktora i tak jest ASCII-only).
+fun str_to_upper(s: Str) -> Str [
+    let out = ""
+    let i = 0
+    let n = s.len()
+    while i < n [
+        out = out + char_to_upper(s.char_at(i))
+        i = i + 1
+    ]
+    end out
+]
+
+!!! Parytet z `flat_module_name()` w project.py - splaszczona,
+!!! deterministyczna nazwa modulu Rust dla `get <std:...>`/
+!!! `get <core:...>`/`get <selfhost:...>`. Male, samodzielne
+!!! wyprzedzenie project.hcs (jeszcze nieistniejacego) - potrzebne TU,
+!!! bo `gen_get_import` musi wyemitowac `use crate::<modul>::...;` w
+!!! DOKLADNIE ten sam sposob, w jaki project.hcs kiedys nazwie
+!!! faktyczne moduly (patrz "Ograniczenia").
+fun flat_module_name(source: Str, name: Str, version: Option<Str>) -> Str [
+    let out = "_hks_" + str_replace_dash(source) + "_" + str_replace_dash(name)
+    match version [
+        Some(v) -> [
+            out = out + "_" + str_replace_dash(v)
+        ]
+        None -> [
+        ]
+    ]
+    end out
+]
+
+!!! Parytet z `flat_include_module_name` (project.py) - nazwa modulu
+!!! dla `include <sciezka>` (bez zrodla/wersji, w odroznieniu od
+!!! `flat_module_name` wyzej dla `get <...>`). Prefiks `_hks_inc_`
+!!! (zamiast `_hks_`) zeby nigdy nie kolidowac z nazwa z `get <...>`.
+fun flat_include_module_name(path: Str) -> Str [
+    let p = path
+    if p.len() >= 4 and p.slice(p.len() - 4, p.len()) == ".hcs" [
+        p = p.slice(0, p.len() - 4)
+    ]
+    let out = ""
+    let i = 0
+    let n = p.len()
+    while i < n [
+        let c = p.char_at(i)
+        if c == "-" or c == "/" [
+            out = out + "_"
+        ] else [
+            out = out + c
+        ]
+        i = i + 1
+    ]
+    end "_hks_inc_" + out
+]
+
+fun str_replace_dash(s: Str) -> Str [
+    let out = ""
+    let i = 0
+    let n = s.len()
+    while i < n [
+        let c = s.char_at(i)
+        if c == "-" [
+            out = out + "_"
+        ] else [
+            out = out + c
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+!!! -- Renderowanie typow (parytet z `rust_type()`) ----------------------
+
+fun is_scalar_type_name(n: Str) -> Bool [
+    end n == "Int" or n == "Float" or n == "Str" or n == "Bool" or n == "Void"
+]
+
+!!! Parytet z `RUST_TYPE_MAP`.
+fun rust_scalar_name(n: Str) -> Str [
+    if n == "Int" [
+        end "i64"
+    ]
+    if n == "Float" [
+        end "f64"
+    ]
+    if n == "Str" [
+        end "String"
+    ]
+    if n == "Bool" [
+        end "bool"
+    ]
+    end "()"
+]
+
+!!! Czy `t` ma ustawione `.generic` (odpowiednik `t.generic is not
+!!! None` w Pythonie) - patrz uwaga projektowa na gorze pliku: `t` tu
+!!! MOZE byc referencja (parametr funkcji), stad `.clone()` PRZED
+!!! dopasowaniem.
+fun type_ref_has_generic(t: TypeRef) -> Bool [
+    match t.generic.clone() [
+        Some(inner) -> [
+            end true
+        ]
+        None -> [
+            end false
+        ]
+    ]
+]
+
+!!! **BUG ZNALEZIONY I NAPRAWIONY W TEJ SESJI** (patrz docs/ROADMAP.md):
+!!! pierwotna wersja tej funkcji probowala ZWROCIC `inner` (typu
+!!! `Box<TypeRef>`, bo `.generic` to WLASNE, samo-referencyjne pole
+!!! TypeRef - Boxowane) jako `TypeRef` (odpakowane) - Rust NIE MA
+!!! zadnego sposobu automatycznego "odpakowania" `Box<T>` -> `T` przy
+!!! ZWRACANIU wartosci (w przeciwienstwie do `&Box<T> -> &T` przy
+!!! PRZEKAZANIU ARGUMENTU) - i HackerScript nie ma operatora `*`, wiec
+!!! nie da sie tego zrobic jawnie. **Nie istnieje bezpieczny sposob
+!!! napisania funkcji "zwroc mi TypeRef z Option<TypeRef>-owego pola
+!!! innego TypeRef" w tym bootstrapie** - jedyne bezpieczne operacje na
+!!! `inner: Box<TypeRef>` to (a) dostep do POLA (`inner.name`, auto-
+!!! derefuje) i (b) przekazanie go DALEJ jako ARGUMENT innej funkcji
+!!! (koercja `Box<T> -> &T`). Dlatego ta funkcja zostala CALKOWICIE
+!!! USUNIETA - w jej miejsce sa DWIE bezpieczne, wezsze funkcje nizej:
+!!! `type_ref_generic_name` (zwraca tylko `.name`, Str - bezpieczne,
+!!! bo Str NIE jest czescia grafu cykli TypeRef) i
+!!! `rust_type_name_of_generic`/`_of_generic2` (laczy odpakowanie Z
+!!! rekurencyjnym wywolaniem `rust_type_name` W JEDNYM kroku, bez
+!!! nigdy "zwracania" samego TypeRef).
+
+!!! Zwraca TYLKO `.generic.name` (Str) - bezpieczne, bo `Str` nie jest
+!!! czescia grafu samo-referencji `TypeRef` (patrz uwaga wyzej).
+fun type_ref_generic_name(t: TypeRef) -> Str [
+    match t.generic.clone() [
+        Some(inner) -> [
+            end inner.name + ""
+        ]
+        None -> [
+            end ""
+        ]
+    ]
+]
+
+fun type_ref_has_generic2(t: TypeRef) -> Bool [
+    match t.generic2.clone() [
+        Some(inner) -> [
+            end true
+        ]
+        None -> [
+            end false
+        ]
+    ]
+]
+
+!!! Renderuje `TypeRef` na tekst typu Rust - parytet z `rust_type()`.
+!!! `t` jest PARAMETREM (nie `self.pole`), wiec bezposrednie porownania
+!!! `t.name == "..."` sa bezpieczne (borrow, nie ruch) - tylko
+!!! DOPASOWANIE (`match`) `.generic`/`.generic2` wymaga obejscia przez
+!!! `rust_type_name_of_generic`/`_of_generic2` (definicje PONIZEJ tej
+!!! funkcji, ale HackerScript nie wymaga kolejnosci - patrz wczesniejsze
+!!! przyklady wzajemnej rekurencji miedzy plikami tej sesji).
+!!!
+!!! W przeciwienstwie do `rust_type()` w Pythonie, ktora RZUCA
+!!! `CodegenError` na nieprawidlowy typ, ta wersja (bootstrap bez
+!!! wyjatkow, patrz "Ograniczenia") po prostu `log`-uje ostrzezenie i
+!!! zwraca najlepsze przyblizenie - PRAWDZIWE zglaszanie bledow czeka
+!!! na podpiecie `diagnostics.hcs`.
+!!!
+!!! **Bierze `sigs: Signatures` (NIE osobne `structs: Dict<...>`/
+!!! `enums: Dict<...>`)** - `Dict<K,V>` NIE jest "refable" w tym
+!!! codegen (`_is_refable` uznaje za referencyjne tylko `Str`/`List`/
+!!! znane struct/enum - `Dict` pominiety, prawdopodobnie przeoczenie w
+!!! oryginale), wiec parametr typu `Dict<...>` byl by przekazywany
+!!! PRZEZ WARTOSC (przenoszony/moved) - a ta funkcja uzywa
+!!! `structs`/`enums` WIELOKROTNIE w JEDNYM wywolaniu (np. renderujac
+!!! `Dict<K,V>` trzeba dwa razy rekurencyjnie wywolac `rust_type_name`
+!!! z TYMI SAMYMI mapami) - drugie uzycie po pierwszym `move`
+!!! bylo by bledem kompilacji Rust ("value used after move"). `sigs:
+!!! Signatures` OMIJA to, bo `Signatures` to STRUCT (WIEC "refable" -
+!!! przekazywany jako `&Signatures`), a `sigs.structs.contains(...)`
+!!! to tylko POZYCZENIE (`&sigs.structs`), nie przeniesienie - mozna
+!!! go robic dowolnie wiele razy. **Bug znaleziony i naprawiony w TEJ
+!!! sesji** - patrz docs/ROADMAP.md.
+fun rust_type_name(t: TypeRef, sigs: Signatures, type_params: List<Str>) -> Str [
+    if list_contains_str(type_params, t.name) [
+        end t.name
+    ]
+    if t.name == "List" [
+        if not type_ref_has_generic(t) [
+            log("[hackerc-self] codegen: 'List' wymaga typu elementu, np. List<Int>")
+            end "Vec<()>"
+        ]
+        end "Vec<" + rust_type_name_of_generic(t, sigs, type_params) + ">"
+    ]
+    if t.name == "Dict" [
+        if not type_ref_has_generic(t) or not type_ref_has_generic2(t) [
+            log("[hackerc-self] codegen: 'Dict' wymaga dwoch typow, np. Dict<Str, Int>")
+            end "std::collections::HashMap<(), ()>"
+        ]
+        end "std::collections::HashMap<" + rust_type_name_of_generic(t, sigs, type_params) + ", " + rust_type_name_of_generic2(t, sigs, type_params) + ">"
+    ]
+    if t.name == "Option" [
+        if not type_ref_has_generic(t) [
+            log("[hackerc-self] codegen: 'Option' wymaga typu wartosci, np. Option<Int>")
+            end "Option<()>"
+        ]
+        end "Option<" + rust_type_name_of_generic(t, sigs, type_params) + ">"
+    ]
+    if t.name == "Result" [
+        if not type_ref_has_generic(t) or not type_ref_has_generic2(t) [
+            log("[hackerc-self] codegen: 'Result' wymaga dwoch typow, np. Result<Str, Str>")
+            end "Result<(), ()>"
+        ]
+        end "Result<" + rust_type_name_of_generic(t, sigs, type_params) + ", " + rust_type_name_of_generic2(t, sigs, type_params) + ">"
+    ]
+    if is_scalar_type_name(t.name) [
+        end rust_scalar_name(t.name)
+    ]
+    if sigs.structs.contains(t.name) [
+        if type_ref_has_generic(t) [
+            end t.name + "<" + rust_type_name_of_generic(t, sigs, type_params) + ">"
+        ]
+        end t.name
+    ]
+    if sigs.enums.contains(t.name) [
+        if type_ref_has_generic(t) [
+            end t.name + "<" + rust_type_name_of_generic(t, sigs, type_params) + ">"
+        ]
+        end t.name
+    ]
+    log("[hackerc-self] codegen: nieznany typ '" + t.name + "' (dozwolone: Int, Float, Str, Bool, Void, List<T>, Dict<K,V>, Option<T>, Result<T,E>, lub nazwa znanego struct/enum/parametru generycznego)")
+    end t.name
+]
+
+!!! Odpakowuje `.generic`/`.generic2` I OD RAZU rekurencyjnie woa
+!!! `rust_type_name` NA WYNIKU, wszystko w JEDNYM kroku - `inner: Box<
+!!! TypeRef>` nigdy nie "ucieka" z tej funkcji jako zwracana wartosc
+!!! (co bylo pierwotnym bledem - patrz uwaga przy usunietym
+!!! `type_ref_generic` wyzej), tylko od razu jest PRZEKAZANE JAKO
+!!! ARGUMENT do `rust_type_name` (bezpieczna koercja `Box<T> -> &T`).
+fun rust_type_name_of_generic(t: TypeRef, sigs: Signatures, type_params: List<Str>) -> Str [
+    match t.generic.clone() [
+        Some(inner) -> [
+            end rust_type_name(inner, sigs, type_params)
+        ]
+        None -> [
+            end "()"
+        ]
+    ]
+]
+
+fun rust_type_name_of_generic2(t: TypeRef, sigs: Signatures, type_params: List<Str>) -> Str [
+    match t.generic2.clone() [
+        Some(inner) -> [
+            end rust_type_name(inner, sigs, type_params)
+        ]
+        None -> [
+            end "()"
+        ]
+    ]
+]
+
+!!! -- Wykrywanie rekurencji/Box (parytet z `_sizing_edge`/`_build_recursion_info`) --
+
+!!! Jedna krawedz grafu rozmiaru: `owner`'s pole `field_key` wskazuje
+!!! (przez wartosc) na `target`, `kind` to "direct" albo "option".
+!!! `field_key` to nazwa pola dla structow, a `"WariantEnuma#idx"` dla
+!!! pol enumow (Str zamiast Pythonowej krotki `(nazwa, idx)` - ten
+!!! bootstrap nie ma typu krotki).
+struct Edge [
+    owner: Str,
+    field_key: Str,
+    target: Str,
+    kind: Str
+]
+
+!!! Parytet z `_sizing_edge()` - `t` jest PARAMETREM (bezpieczne
+!!! porownania `.name`, jak wyzej).
+fun sizing_edge_target(t: TypeRef) -> Str [
+    if not type_ref_has_generic(t) and not type_ref_has_generic2(t) [
+        end t.name
+    ]
+    if t.name == "Option" and type_ref_has_generic(t) [
+        end type_ref_generic_name(t)
+    ]
+    end ""
+]
+
+fun sizing_edge_kind(t: TypeRef) -> Str [
+    if not type_ref_has_generic(t) and not type_ref_has_generic2(t) [
+        end "direct"
+    ]
+    if t.name == "Option" and type_ref_has_generic(t) [
+        end "option"
+    ]
+    end ""
+]
+
+!!! Analizator grafu rekurencji - odpowiednik lokalnych zmiennych
+!!! `color`/`boxed_edges`/`adjacency` w `_build_recursion_info()`,
+!!! podniesiony do struct+`impl`, bo HackerScript nie ma domkniec
+!!! (closures) - `dfs` musi byc METODA (rekurencyjna przez `self`,
+!!! mutujaca `self.color`/`self.boxed_edges` - oba wzorce juz
+!!! sprawdzone w poprzednich krokach).
+struct RecursionAnalyzer [
+    adjacency: Dict<Str, List<Edge>>,
+    color: Dict<Str, Str>,
+    boxed_edges: Dict<Str, Bool>
+]
+
+impl RecursionAnalyzer [
+    fun color_of(self, node: Str) -> Str [
+        match self.color.fetch(node) [
+            Some(c) -> [
+                end c
+            ]
+            None -> [
+                end "white"
+            ]
+        ]
+    ]
+
+    !!! DFS z kolorowaniem (biale/szare/czarne) - parytet z zagniezdzonym
+    !!! `dfs()` w `_build_recursion_info()`. Krawedz do wezla SZAREGO
+    !!! (na biezacej sciezce DFS) zamyka cykl -> oznaczamy `(owner,
+    !!! field_key)` do zboxowania (klucz w `boxed_edges`:
+    !!! `owner + "::" + field_key`).
+    fun dfs(self, node: Str) [
+        self.color.insert(node.clone(), "gray")
+        match self.adjacency.fetch(node.clone()) [
+            Some(edges) -> [
+                let i = 0
+                let n = edges.len()
+                while i < n [
+                    let e = edges[i].clone()
+                    let tc = self.color_of(e.target.clone())
+                    if tc == "gray" [
+                        self.boxed_edges.insert(e.owner.clone() + "::" + e.field_key.clone(), true)
+                    ] elif tc == "white" [
+                        self.dfs(e.target.clone())
+                    ]
+                    i = i + 1
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        self.color.insert(node, "black")
+    ]
+]
+
+!!! Wynik analizy rekurencji - parytet z `self.boxed_struct_fields`/
+!!! `self.boxed_variant_fields` (splaszczone do JEDNEGO Dict, patrz
+!!! "Ograniczenia" - Python uzywa Dict[str, Dict[str, str]], ten
+!!! bootstrap nie ma latwych zagniezdzonych Dict, wiec klucz laczy oba
+!!! poziomy: `"StructName::pole"` albo `"EnumName::Wariant#idx"`).
+struct RecursionInfo [
+    boxed_fields: Dict<Str, Str>
+]
+
+!!! Buduje pola struct pol JEDNEGO struct do listy krawedzi (parytet z
+!!! petla po `decl.fields` w `_build_recursion_info`).
+fun struct_field_edges(owner: Str, fields: List<Param>, known_structs: List<Str>, known_enums: List<Str>) -> List<Edge> [
+    let out: List<Edge> = []
+    let i = 0
+    let n = fields.len()
+    while i < n [
+        let f = fields[i]
+        match f.type_ref [
+            Some(ft) -> [
+                let target = sizing_edge_target(ft.clone())
+                if list_contains_str(known_structs, target.clone()) or list_contains_str(known_enums, target.clone()) [
+                    out.push(Edge(owner.clone(), f.name, target, sizing_edge_kind(ft)))
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+!!! Jak `struct_field_edges`, ale dla pol WARIANTOW jednego enuma
+!!! (kazde pole kazdego wariantu, `field_key` = `"Wariant#idx"`).
+fun enum_field_edges(owner: Str, variants: List<EnumVariant>, known_structs: List<Str>, known_enums: List<Str>) -> List<Edge> [
+    let out: List<Edge> = []
+    let i = 0
+    let n = variants.len()
+    while i < n [
+        let v = variants[i]
+        let j = 0
+        let fn_ = v.fields.len()
+        while j < fn_ [
+            let ft = v.fields[j]
+            let target = sizing_edge_target(ft.clone())
+            if list_contains_str(known_structs, target.clone()) or list_contains_str(known_enums, target.clone()) [
+                out.push(Edge(owner.clone(), v.name.clone() + "#" + (j as Str), target, sizing_edge_kind(ft)))
+            ]
+            j = j + 1
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+!!! Parytet z `struct_decl_fields`/`enum_decl_variants` gdyby istnialy
+!!! w typeinfer.hcs pod tymi nazwami dla EnumDecl - potrzebne tutaj, bo
+!!! typeinfer.hcs eksportuje tylko `struct_decl_fields` (uzywane tam
+!!! do wnioskowania `.pole`), nie akcesor dla wariantow enuma.
+fun enum_decl_variants(e: Stmt) -> List<EnumVariant> [
+    match e [
+        EnumDecl(name, variants, type_params) -> [
+            end variants.clone()
+        ]
+        _ -> [
+            end []
+        ]
+    ]
+]
+
+fun struct_decl_fields_local(s: Stmt) -> List<Param> [
+    match s [
+        StructDecl(name, fields, type_params) -> [
+            end fields.clone()
+        ]
+        _ -> [
+            end []
+        ]
+    ]
+]
+
+!!! Zwraca nazwy parametrow typu Str, na ktorych `.char_at`/`.slice`
+!!! jest wywolywane WIELOKROTNIE (>=2 razy) gdziekolwiek w ciele -
+!!! uzywane przez `gen_fun` do zdecydowania, ktore parametry oplaca sie
+!!! zmaterializowac raz jako `Vec<char>` na poczatku funkcji, zamiast
+!!! re-skanowac string od poczatku przy KAZDYM wywolaniu `.char_at(i)`
+!!! (`.chars().nth(i)` w Rust jest O(i) - w petli to O(n^2) razem).
+!!! `str_param_names` jako `List<Str>` (nie `Dict`) - ten bootstrap nie
+!!! ma iteracji po Dict (patrz "Ograniczenia" w typeinfer.hcs), a
+!!! potrzebujemy przejsc PO nazwach, nie tylko sprawdzac przynaleznosc.
+!!! Parytet z `_char_indexed_str_params` (codegen.py). Bug wydajnosciowy
+!!! znaleziony przy uzyciu skompilowanego stage1 (samo-hostowanego
+!!! hackerc) do zbudowania duzych plikow w tej sesji.
+!!!
+!!! Wewnetrzne `walk_*_for_char_indexing` ZWRACAJA listy trafien
+!!! (`List<Str>`, jedna pozycja na wystapienie, duplikaty dozwolone)
+!!! zamiast MUTOWAC wspolny Dict przekazywany przez wiele poziomow
+!!! wywolan - auto-`&mut` w tym bootstrapie (patrz `compute_mut_params`)
+!!! wykrywa TYLKO BEZPOSREDNIE `.insert()`/`.push()` na parametrze W
+!!! TEJ SAMEJ funkcji, nie propaguje tranzytywnie przez wywolania innych
+!!! funkcji - Dict mutowany przez funkcje WYWOLYWANA nie kompilowalby
+!!! sie (E0596 "cannot borrow as mutable"). Zwracanie List<Str> i
+!!! zliczanie na samej gorze (w tej funkcji) unika tego calkowicie -
+!!! `counts` jest wtedy mutowany TYLKO lokalnie, w JEDNEJ funkcji.
+!!! Zwraca zadeklarowany typ `let X = f(...)` gdy `X` NIE MA jawnej
+!!! adnotacji typu, ale `f` jest ZNANA funkcja (w `sigs.functions`) -
+!!! wtedy typem `let`-a jest typ zwracany `f`. Uzywane WYLACZNIE przez
+!!! `char_indexed_str_params` do wykrycia lokalnych zmiennych Str typu
+!!! `let src = strip_multiline_comments(source)` (BEZ adnotacji) -
+!!! prostsze niz pelna inferencja typow (`infer_expr_type` + `TypeEnv`),
+!!! ale wystarczajace dla TEGO konkretnego, najczesciej wystepujacego
+!!! wzorca w calym bootstrapie. Bug znaleziony przy uzyciu
+!!! skompilowanego stage1 na duzych plikach - `lexer.hcs::tokenize`
+!!! (najgorszy przypadek) robi DOKLADNIE to na samym poczatku ciala.
+fun char_str_type_of_let_call(s: Stmt, sigs: Signatures) -> Option<TypeRef> [
+    let sc = s.clone()
+    match sc [
+        LetStmt(lname, ltype, lvalue, lconst) -> [
+            match ltype [
+                Some(t) -> [
+                    end some(t)
+                ]
+                None -> [
+                    match lvalue [
+                        Some(v) -> [
+                            match v [
+                                Call(callee, args) -> [
+                                    let fname = expr_as_ident_name(callee)
+                                    if fname != "" [
+                                        match sigs.functions.fetch(fname) [
+                                            Some(fn_stmt) -> [
+                                                match fn_stmt [
+                                                    FunDecl(n2, p2, ret2, b2, pub2, tp2) -> [
+                                                        end ret2
+                                                    ]
+                                                    _ -> [
+                                                    ]
+                                                ]
+                                            ]
+                                            None -> [
+                                            ]
+                                        ]
+                                    ]
+                                ]
+                                _ -> [
+                                ]
+                            ]
+                        ]
+                        None -> [
+                        ]
+                    ]
+                ]
+            ]
+        ]
+        _ -> [
+        ]
+    ]
+    end none()
+]
+
+fun char_indexed_str_params(body: List<Stmt>, str_param_names: List<Str>, sigs: Signatures) -> Dict<Str, Bool> [
+    let str_names = str_param_names.clone()
+    let li = 0
+    let ln = body.len()
+    while li < ln [
+        match body[li].clone() [
+            LetStmt(lname2, ltype2, lvalue2, lconst2) -> [
+                match char_str_type_of_let_call(body[li].clone(), sigs) [
+                    Some(t2) -> [
+                        if t2.name == "Str" [
+                            str_names.push(lname2)
+                        ]
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+        li = li + 1
+    ]
+    let hits = walk_stmts_for_char_indexing(body)
+    let counts: Dict<Str, Int> = dict()
+    let hi = 0
+    let hn = hits.len()
+    while hi < hn [
+        let name = hits[hi].clone()
+        match counts.fetch(name.clone()) [
+            Some(c) -> [
+                counts.insert(name, c + 1)
+            ]
+            None -> [
+                counts.insert(name, 1)
+            ]
+        ]
+        hi = hi + 1
+    ]
+    let out: Dict<Str, Bool> = dict()
+    let j = 0
+    let n = str_names.len()
+    while j < n [
+        let pname = str_names[j].clone()
+        match counts.fetch(pname.clone()) [
+            Some(c2) -> [
+                if c2 >= 2 [
+                    out.insert(pname, true)
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        j = j + 1
+    ]
+    end out
+]
+
+!!! Zwraca nazwe identyfikatora, na ktorym wywolano `.char_at`/`.slice`
+!!! (np. `"source"` dla `source.char_at(i)`), albo `""` jesli `e` nie
+!!! jest takim wywolaniem - pomocnicze dla `walk_expr_for_char_indexing`.
+!!! Osobna funkcja (przyjmujaca zwykly, auto-zreferencjonowany `Expr`)
+!!! zamiast dopasowania WPROST na `callee`/`target` w miejscu uzycia -
+!!! `callee`/`target` sa `Box<Expr>` w wygenerowanym Ruscie (Expr jest
+!!! posrednio samo-rekurencyjny), a dopasowanie wzorca WPROST na
+!!! `Box<T>` nie kompiluje sie bez `.as_ref()`/funkcji posredniej - ten
+!!! sam problem rozwiazany identycznie w transpiler.hcs (`direct_call_index`).
+fun expr_as_char_slice_target_name(e: Expr) -> Str [
+    let c = e.clone()
+    match c [
+        Attr(target, name) -> [
+            if name == "char_at" or name == "slice" [
+                end expr_as_ident_name(target)
+            ]
+        ]
+        _ -> [
+        ]
+    ]
+    end ""
+]
+
+fun walk_expr_for_char_indexing(e: Expr) -> List<Str> [
+    let out: List<Str> = []
+    let c = e.clone()
+    match c [
+        Call(callee, args) -> [
+            let slice_target = expr_as_char_slice_target_name(callee)
+            if slice_target != "" [
+                out.push(slice_target)
+            ]
+            out.extend(walk_expr_for_char_indexing(callee))
+            let i = 0
+            let n = args.len()
+            while i < n [
+                out.extend(walk_expr_for_char_indexing(args[i].clone()))
+                i = i + 1
+            ]
+        ]
+        BinOp(op, left, right) -> [
+            out.extend(walk_expr_for_char_indexing(left))
+            out.extend(walk_expr_for_char_indexing(right))
+        ]
+        UnaryOp(op, operand) -> [
+            out.extend(walk_expr_for_char_indexing(operand))
+        ]
+        Attr(target, name) -> [
+            out.extend(walk_expr_for_char_indexing(target))
+        ]
+        Index(target, index) -> [
+            out.extend(walk_expr_for_char_indexing(target))
+            out.extend(walk_expr_for_char_indexing(index))
+        ]
+        ListLit(items) -> [
+            let i = 0
+            let n = items.len()
+            while i < n [
+                out.extend(walk_expr_for_char_indexing(items[i].clone()))
+                i = i + 1
+            ]
+        ]
+        Cast(target, type_ref) -> [
+            out.extend(walk_expr_for_char_indexing(target))
+        ]
+        TryOp(target) -> [
+            out.extend(walk_expr_for_char_indexing(target))
+        ]
+        _ -> [
+        ]
+    ]
+    end out
+]
+
+fun walk_stmts_for_char_indexing(body: List<Stmt>) -> List<Str> [
+    let out: List<Str> = []
+    let i = 0
+    let n = body.len()
+    while i < n [
+        out.extend(walk_stmt_for_char_indexing(body[i].clone()))
+        i = i + 1
+    ]
+    end out
+]
+
+fun walk_stmt_for_char_indexing(node: Stmt) -> List<Str> [
+    let out: List<Str> = []
+    let s = node.clone()
+    match s [
+        AssignStmt(target, op, value) -> [
+            out.extend(walk_expr_for_char_indexing(target))
+            out.extend(walk_expr_for_char_indexing(value))
+        ]
+        ExprStmt(e) -> [
+            out.extend(walk_expr_for_char_indexing(e))
+        ]
+        LetStmt(name, type_ref, value, is_const) -> [
+            match value [
+                Some(v) -> [
+                    out.extend(walk_expr_for_char_indexing(v))
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        ReturnStmt(value) -> [
+            match value [
+                Some(v) -> [
+                    out.extend(walk_expr_for_char_indexing(v))
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        IfStmt(cond, body, elifs, else_body) -> [
+            out.extend(walk_expr_for_char_indexing(cond))
+            out.extend(walk_stmts_for_char_indexing(body))
+            let i = 0
+            let n = elifs.len()
+            while i < n [
+                let arm = elifs[i].clone()
+                out.extend(walk_expr_for_char_indexing(arm.cond))
+                out.extend(walk_stmts_for_char_indexing(arm.body))
+                i = i + 1
+            ]
+            match else_body [
+                Some(eb) -> [
+                    out.extend(walk_stmts_for_char_indexing(eb))
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        WhileStmt(cond, body) -> [
+            out.extend(walk_expr_for_char_indexing(cond))
+            out.extend(walk_stmts_for_char_indexing(body))
+        ]
+        ForStmt(var, iterable, body) -> [
+            out.extend(walk_stmts_for_char_indexing(body))
+        ]
+        ManualBlock(body) -> [
+            out.extend(walk_stmts_for_char_indexing(body))
+        ]
+        MatchStmt(subject, arms) -> [
+            out.extend(walk_expr_for_char_indexing(subject))
+            let i = 0
+            let n = arms.len()
+            while i < n [
+                let arm = arms[i].clone()
+                out.extend(walk_stmts_for_char_indexing(arm.body))
+                i = i + 1
+            ]
+        ]
+        _ -> [
+        ]
+    ]
+    end out
+]
+
+!!! Buduje CALY graf (WSZYSTKIE structy + WSZYSTKIE enumy) i odpala DFS
+!!! z kazdego jeszcze-nieodwiedzonego wezla - parytet z glowna petla
+!!! `_build_recursion_info()`.
+fun build_recursion_info(sigs: Signatures) -> RecursionInfo [
+    let known_structs = sigs.struct_names.clone()
+    let known_enums = sigs.enum_names.clone()
+
+    let adjacency: Dict<Str, List<Edge>> = dict()
+
+    let i = 0
+    let sn = known_structs.len()
+    while i < sn [
+        let name = known_structs[i].clone()
+        match sigs.structs.fetch(name.clone()) [
+            Some(decl) -> [
+                let fields = struct_decl_fields_local(decl)
+                let edges = struct_field_edges(name.clone(), fields, known_structs.clone(), known_enums.clone())
+                if edges.len() > 0 [
+                    adjacency.insert(name, edges)
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        i = i + 1
+    ]
+
+    let j = 0
+    let en = known_enums.len()
+    while j < en [
+        let ename = known_enums[j].clone()
+        match sigs.enums.fetch(ename.clone()) [
+            Some(decl) -> [
+                let variants = enum_decl_variants(decl)
+                let edges = enum_field_edges(ename.clone(), variants, known_structs.clone(), known_enums.clone())
+                if edges.len() > 0 [
+                    adjacency.insert(ename, edges)
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        j = j + 1
+    ]
+
+    let analyzer = RecursionAnalyzer(adjacency, dict(), dict())
+
+    let k = 0
+    let all_nodes: List<Str> = []
+    let kk = 0
+    while kk < known_structs.len() [
+        all_nodes.push(known_structs[kk].clone())
+        kk = kk + 1
+    ]
+    let ll = 0
+    while ll < known_enums.len() [
+        all_nodes.push(known_enums[ll].clone())
+        ll = ll + 1
+    ]
+    while k < all_nodes.len() [
+        let node = all_nodes[k].clone()
+        if analyzer.color_of(node.clone()) == "white" [
+            analyzer.dfs(node)
+        ]
+        k = k + 1
+    ]
+
+    let boxed_fields: Dict<Str, Str> = dict()
+    let m = 0
+    let sn2 = known_structs.len()
+    while m < sn2 [
+        let sname = known_structs[m].clone()
+        match sigs.structs.fetch(sname.clone()) [
+            Some(decl) -> [
+                let fields2 = struct_decl_fields_local(decl)
+                let p = 0
+                let fn2 = fields2.len()
+                while p < fn2 [
+                    let f2 = fields2[p]
+                    match f2.type_ref [
+                        Some(ft2) -> [
+                            let edge_key = sname.clone() + "::" + f2.name.clone()
+                            if analyzer.boxed_edges.contains(edge_key.clone()) [
+                                boxed_fields.insert(edge_key, sizing_edge_kind(ft2))
+                            ]
+                        ]
+                        None -> [
+                        ]
+                    ]
+                    p = p + 1
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        m = m + 1
+    ]
+
+    let q = 0
+    let en2 = known_enums.len()
+    while q < en2 [
+        let ename2 = known_enums[q].clone()
+        match sigs.enums.fetch(ename2.clone()) [
+            Some(decl2) -> [
+                let variants2 = enum_decl_variants(decl2)
+                let r = 0
+                let vn2 = variants2.len()
+                while r < vn2 [
+                    let v2 = variants2[r]
+                    let s2 = 0
+                    let vfn2 = v2.fields.len()
+                    while s2 < vfn2 [
+                        let ft3 = v2.fields[s2]
+                        let field_key2 = v2.name.clone() + "#" + (s2 as Str)
+                        let edge_key2 = ename2.clone() + "::" + field_key2
+                        if analyzer.boxed_edges.contains(edge_key2.clone()) [
+                            boxed_fields.insert(edge_key2, sizing_edge_kind(ft3))
+                        ]
+                        s2 = s2 + 1
+                    ]
+                    r = r + 1
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        q = q + 1
+    ]
+
+    end RecursionInfo(boxed_fields)
+]
+
+!!! -- Auto-`&mut self`/auto-`&mut param` (parytet z `_mutated_names_in_body`/
+!!! `_compute_mut_params`/`_find_self_method_calls`/
+!!! `_compute_method_mut_params`) -------------------------------------
+
+!!! Parytet z `_MUTATING_METHODS`.
+fun is_mutating_method(name: Str) -> Bool [
+    end name == "push" or name == "pop" or name == "remove" or name == "insert" or name == "clear" or name == "sort" or name == "extend" or name == "truncate"
+]
+
+!!! Zbiera nazwy zmiennych/parametrow, ktorych POLA sa gdzies w ciele
+!!! przypisywane LUB mutowane metoda typu `.push`/`.pop` - parytet z
+!!! lokalnym `mutated: set[str]` w `_mutated_names_in_body()`. `order`
+!!! (List<Str>, bez duplikatow) istnieje TYLKO dlatego, ze ten bootstrap
+!!! nie ma iteracji po Dict - wywolujacy (`compute_mut_params`) musi
+!!! jakos "przejrzec" znalezione nazwy.
+struct MutTracker [
+    mutated: Dict<Str, Bool>,
+    order: List<Str>
+]
+
+impl MutTracker [
+    fun mark_mutated(self, name: Str) [
+        if not self.mutated.contains(name.clone()) [
+            self.order.push(name.clone())
+        ]
+        self.mutated.insert(name, true)
+    ]
+
+    !!! Parytet z `mark_base()` - obiera warstwy `Index` (`xs[i].pole =
+    !!! ...` mutuje `xs`, nie samo `i`), potem oznacza `Attr(Ident)`/
+    !!! `Ident` jako zmutowane. Rekurencja zamiast Pythonowej petli
+    !!! `while isinstance(base, A.Index): base = base.target` - ten sam
+    !!! efekt (dowolna glebokosc `[i][j][k]...`), ale HackerScript nie
+    !!! ma przypisywalnej zmiennej-akumulatora dla WZORCA (tylko dla
+    !!! wartosci).
+    fun mark_base(self, base: Expr) [
+        let b = base.clone()
+        match b [
+            Index(target, index) -> [
+                self.mark_base(target)
+            ]
+            Attr(target, name) -> [
+                let target_name = expr_as_ident_name(target)
+                if target_name != "" [
+                    self.mark_mutated(target_name)
+                ]
+            ]
+            IdentExpr(name) -> [
+                self.mark_mutated(name)
+            ]
+            _ -> [
+            ]
+        ]
+    ]
+
+    !!! Sprawdza, czy `callee` (cel wywolania) to `Attr` o mutujacej
+    !!! nazwie metody (`.push`/itd.) - jesli tak, oznacza JEJ CEL jako
+    !!! zmutowany. Osobna metoda (nie zagniezdzony `match` w
+    !!! `walk_expr`) z tego samego powodu co `expr_as_ident_name` w
+    !!! typeinfer.hcs - `callee` jest polem Boxowanym (`Call(Expr,
+    !!! ...)`), wiec bezposrednie dopasowanie wymagaloby dereferencji,
+    !!! ktorej HackerScript nie ma - trzeba przejsc przez GRANICE
+    !!! WYWOLANIA (bezpieczna koercja `Box<Expr> -> &Expr`).
+    fun handle_mutating_call(self, callee: Expr) [
+        let c = callee.clone()
+        match c [
+            Attr(target, name) -> [
+                if is_mutating_method(name) [
+                    self.mark_base(target)
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+    ]
+
+    !!! Parytet z zagniezdzonym `walk_expr()` w `_mutated_names_in_body`
+    !!! - BEZ `Cast`/`TryOp` (w przeciwienstwie do `SelfCallTracker`
+    !!! nizej - tak samo jak w oryginale, gdzie te dwie funkcje maja
+    !!! LEKKO rozne pokrycie drzewa, nie jest to bledem/niedopatrzeniem
+    !!! z mojej strony, tylko wiernym odtworzeniem).
+    fun walk_expr(self, e: Expr) [
+        let e2 = e.clone()
+        match e2 [
+            Call(callee, args) -> [
+                self.handle_mutating_call(callee)
+                self.walk_expr(callee)
+                let i = 0
+                let n = args.len()
+                while i < n [
+                    self.walk_expr(args[i])
+                    i = i + 1
+                ]
+            ]
+            BinOp(op, left, right) -> [
+                self.walk_expr(left)
+                self.walk_expr(right)
+            ]
+            UnaryOp(op, operand) -> [
+                self.walk_expr(operand)
+            ]
+            Attr(target, name) -> [
+                self.walk_expr(target)
+            ]
+            Index(target, index) -> [
+                self.walk_expr(target)
+                self.walk_expr(index)
+            ]
+            ListLit(items) -> [
+                let j = 0
+                let m = items.len()
+                while j < m [
+                    self.walk_expr(items[j])
+                    j = j + 1
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+    ]
+
+    fun walk_stmts(self, stmts: List<Stmt>) [
+        let i = 0
+        let n = stmts.len()
+        while i < n [
+            self.walk_stmt(stmts[i])
+            i = i + 1
+        ]
+    ]
+
+    !!! Parytet z zagniezdzonym `walk(node)` w `_mutated_names_in_body`.
+    fun walk_stmt(self, s: Stmt) [
+        let s2 = s.clone()
+        match s2 [
+            AssignStmt(target, op, value) -> [
+                self.mark_base(target)
+                self.walk_expr(value)
+            ]
+            ExprStmt(expr) -> [
+                self.walk_expr(expr)
+            ]
+            LetStmt(name, type_ref, value, is_const) -> [
+                match value [
+                    Some(v) -> [
+                        self.walk_expr(v)
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            ReturnStmt(value) -> [
+                match value [
+                    Some(v) -> [
+                        self.walk_expr(v)
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            IfStmt(cond, body, elifs, else_body) -> [
+                self.walk_expr(cond)
+                self.walk_stmts(body)
+                let i = 0
+                let n = elifs.len()
+                while i < n [
+                    let arm = elifs[i].clone()
+                    self.walk_expr(arm.cond)
+                    self.walk_stmts(arm.body)
+                    i = i + 1
+                ]
+                match else_body [
+                    Some(eb) -> [
+                        self.walk_stmts(eb)
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            WhileStmt(cond, body) -> [
+                self.walk_expr(cond)
+                self.walk_stmts(body)
+            ]
+            ForStmt(var, iterable, body) -> [
+                self.walk_stmts(body)
+            ]
+            ManualBlock(body) -> [
+                self.walk_stmts(body)
+            ]
+            MatchStmt(subject, arms) -> [
+                self.walk_expr(subject)
+                let j = 0
+                let m = arms.len()
+                while j < m [
+                    let arm2 = arms[j].clone()
+                    self.walk_stmts(arm2.body)
+                    j = j + 1
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+    ]
+]
+
+!!! Parytet z wolnej funkcji `_mutated_names_in_body()`.
+fun mutated_names_in_body(body: List<Stmt>) -> MutTracker [
+    let tracker = MutTracker(dict(), [])
+    tracker.walk_stmts(body)
+    end tracker
+]
+
+!!! Jak `MutTracker`, ale zbiera nazwy metod wywolanych jako
+!!! `self.metoda(...)` (parytet z `_find_self_method_calls()`) - UZYWA
+!!! `Cast`/`TryOp` w `walk_expr` (w przeciwienstwie do `MutTracker` -
+!!! patrz komentarz tam), bo Pythonowy oryginal tak ma.
+struct SelfCallTracker [
+    calls: Dict<Str, Bool>,
+    order: List<Str>
+]
+
+impl SelfCallTracker [
+    fun mark_call(self, name: Str) [
+        if not self.calls.contains(name.clone()) [
+            self.order.push(name.clone())
+        ]
+        self.calls.insert(name, true)
+    ]
+
+    !!! Jak `MutTracker::handle_mutating_call`, ale sprawdza czy CEL
+    !!! wywolania to `self` (nie czy NAZWA metody jest mutujaca).
+    fun handle_call(self, callee: Expr) [
+        let c = callee.clone()
+        match c [
+            Attr(target, name) -> [
+                let target_name = expr_as_ident_name(target)
+                if target_name == "self" [
+                    self.mark_call(name)
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+    ]
+
+    fun walk_expr(self, e: Expr) [
+        let e2 = e.clone()
+        match e2 [
+            Call(callee, args) -> [
+                self.handle_call(callee)
+                self.walk_expr(callee)
+                let i = 0
+                let n = args.len()
+                while i < n [
+                    self.walk_expr(args[i])
+                    i = i + 1
+                ]
+            ]
+            BinOp(op, left, right) -> [
+                self.walk_expr(left)
+                self.walk_expr(right)
+            ]
+            UnaryOp(op, operand) -> [
+                self.walk_expr(operand)
+            ]
+            Attr(target, name) -> [
+                self.walk_expr(target)
+            ]
+            Index(target, index) -> [
+                self.walk_expr(target)
+                self.walk_expr(index)
+            ]
+            ListLit(items) -> [
+                let j = 0
+                let m = items.len()
+                while j < m [
+                    self.walk_expr(items[j])
+                    j = j + 1
+                ]
+            ]
+            Cast(target, type_ref) -> [
+                self.walk_expr(target)
+            ]
+            TryOp(target) -> [
+                self.walk_expr(target)
+            ]
+            _ -> [
+            ]
+        ]
+    ]
+
+    fun walk_stmts(self, stmts: List<Stmt>) [
+        let i = 0
+        let n = stmts.len()
+        while i < n [
+            self.walk_stmt(stmts[i])
+            i = i + 1
+        ]
+    ]
+
+    !!! Rozni sie od `MutTracker::walk_stmt` w JEDNYM miejscu:
+    !!! `AssignStmt` woa `walk_expr(target)` (zwykly przeglad), NIE
+    !!! `mark_base(target)` - tu nie interesuje nas KTORA zmienna jest
+    !!! mutowana, tylko KTORE `self.metoda()` sa wywolane, wiec cel
+    !!! przypisania jest po prostu kolejnym wyrazeniem do przejrzenia.
+    fun walk_stmt(self, s: Stmt) [
+        let s2 = s.clone()
+        match s2 [
+            AssignStmt(target, op, value) -> [
+                self.walk_expr(target)
+                self.walk_expr(value)
+            ]
+            ExprStmt(expr) -> [
+                self.walk_expr(expr)
+            ]
+            LetStmt(name, type_ref, value, is_const) -> [
+                match value [
+                    Some(v) -> [
+                        self.walk_expr(v)
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            ReturnStmt(value) -> [
+                match value [
+                    Some(v) -> [
+                        self.walk_expr(v)
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            IfStmt(cond, body, elifs, else_body) -> [
+                self.walk_expr(cond)
+                self.walk_stmts(body)
+                let i = 0
+                let n = elifs.len()
+                while i < n [
+                    let arm = elifs[i].clone()
+                    self.walk_expr(arm.cond)
+                    self.walk_stmts(arm.body)
+                    i = i + 1
+                ]
+                match else_body [
+                    Some(eb) -> [
+                        self.walk_stmts(eb)
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            WhileStmt(cond, body) -> [
+                self.walk_expr(cond)
+                self.walk_stmts(body)
+            ]
+            ForStmt(var, iterable, body) -> [
+                self.walk_stmts(body)
+            ]
+            ManualBlock(body) -> [
+                self.walk_stmts(body)
+            ]
+            MatchStmt(subject, arms) -> [
+                self.walk_expr(subject)
+                let j = 0
+                let m = arms.len()
+                while j < m [
+                    let arm2 = arms[j].clone()
+                    self.walk_stmts(arm2.body)
+                    j = j + 1
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+    ]
+]
+
+fun find_self_method_calls(body: List<Stmt>) -> SelfCallTracker [
+    let tracker = SelfCallTracker(dict(), [])
+    tracker.walk_stmts(body)
+    end tracker
+]
+
+!!! Parytet z `_compute_mut_params()` - dla KAZDEJ wolnej funkcji w
+!!! programie, ktore z jej parametrow sa mutowane. Splaszczone do
+!!! `Dict<Str, Bool>` z kluczem `"NazwaFunkcji::NazwaParametru"`
+!!! (Pythonowe `dict[str, set[str]]` - dwupoziomowa struktura - ten
+!!! bootstrap nie ma wygodnych zagniezdzonych Dict, patrz podobne
+!!! decyzje w `RecursionInfo`/`Signatures.methods` wczesniej).
+fun compute_mut_params(prog: Program) -> Dict<Str, Bool> [
+    let result: Dict<Str, Bool> = dict()
+    let i = 0
+    let n = prog.body.len()
+    while i < n [
+        let stmt = prog.body[i]
+        match stmt [
+            FunDecl(name, params, ret_type, body, is_pub, type_params) -> [
+                let tracker = mutated_names_in_body(body)
+                let j = 0
+                let on = tracker.order.len()
+                while j < on [
+                    let vname = tracker.order[j]
+                    result.insert(name.clone() + "::" + vname, true)
+                    j = j + 1
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+        i = i + 1
+    ]
+    end result
+]
+
+!!! Parytet z `_compute_method_mut_params()` - jak wyzej, ale dla metod
+!!! w `impl` (klucz `"Struct::metoda::zmienna"`) - Z PUNKTEM STALYM dla
+!!! posredniej mutacji (`self.metoda()` gdzie `metoda` sama potrzebuje
+!!! `&mut self` -> wywolujacy TEZ potrzebuje). `extra_method_mut_params`
+!!! to znane Z GORY wyniki z INNYCH plikow (cross-file `impl`, patrz
+!!! "Ograniczenia") - scalane na starcie, tak jak w Pythonie.
+fun compute_method_mut_params(prog: Program, extra_method_mut_params: Dict<Str, Bool>) -> Dict<Str, Bool> [
+    let result: Dict<Str, Bool> = extra_method_mut_params.clone()
+    let method_bodies: Dict<Str, List<Stmt>> = dict()
+    let method_struct_names: Dict<Str, Str> = dict()
+    let method_keys: List<Str> = []
+
+    let i = 0
+    let n = prog.body.len()
+    while i < n [
+        let stmt = prog.body[i]
+        match stmt [
+            ImplDecl(struct_name, methods, type_params) -> [
+                let j = 0
+                let mn = methods.len()
+                while j < mn [
+                    let m = methods[j].clone()
+                    match m [
+                        FunDecl(mname, mparams, mret, mbody, mis_pub, mtype_params) -> [
+                            let key = struct_name.clone() + "::" + mname.clone()
+                            let tracker = mutated_names_in_body(mbody.clone())
+                            let k = 0
+                            let on = tracker.order.len()
+                            while k < on [
+                                let vname = tracker.order[k]
+                                result.insert(key.clone() + "::" + vname, true)
+                                k = k + 1
+                            ]
+                            method_bodies.insert(key.clone(), mbody)
+                            method_struct_names.insert(key.clone(), struct_name.clone())
+                            method_keys.push(key)
+                        ]
+                        _ -> [
+                        ]
+                    ]
+                    j = j + 1
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+        i = i + 1
+    ]
+
+    let changed = true
+    while changed [
+        changed = false
+        let p = 0
+        let kn = method_keys.len()
+        while p < kn [
+            let key2 = method_keys[p]
+            if not result.contains(key2.clone() + "::self") [
+                match method_struct_names.fetch(key2.clone()) [
+                    Some(struct_name2) -> [
+                        match method_bodies.fetch(key2.clone()) [
+                            Some(body2) -> [
+                                let self_calls = find_self_method_calls(body2)
+                                let c = 0
+                                let cn = self_calls.order.len()
+                                let found = false
+                                while c < cn and not found [
+                                    let called_name = self_calls.order[c]
+                                    let other_key = struct_name2.clone() + "::" + called_name
+                                    if result.contains(other_key + "::self") [
+                                        result.insert(key2.clone() + "::self", true)
+                                        changed = true
+                                        found = true
+                                    ]
+                                    c = c + 1
+                                ]
+                            ]
+                            None -> [
+                            ]
+                        ]
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            p = p + 1
+        ]
+    ]
+
+    end result
+]
+
+!!! -- Emisja wyrazen: `gen_expr` (parytet z `CodeGen.gen_expr()`) ------
+
+!!! Ucieka string na literal Rust (`"..."`) - parytet z
+!!! `_rust_string_literal()`.
+fun rust_string_literal(s: Str) -> Str [
+    let out = "\""
+    let i = 0
+    let n = s.len()
+    while i < n [
+        let c = s.char_at(i)
+        if c == "\\" [
+            out = out + "\\\\"
+        ] elif c == "\"" [
+            out = out + "\\\""
+        ] elif c == "\n" [
+            out = out + "\\n"
+        ] elif c == "\t" [
+            out = out + "\\t"
+        ] elif c == "\r" [
+            out = out + "\\r"
+        ] else [
+            out = out + c
+        ]
+        i = i + 1
+    ]
+    out = out + "\""
+    end out
+]
+
+!!! Zlicza pola KAZDEGO wariantu w CALYM programie (klucz: NAZWA
+!!! WARIANTU, nie "Enum::Wariant" - parytet z `self.variant_arity` w
+!!! Pythonie, ktore TEZ jest plaskie po samej nazwie wariantu, bo
+!!! nazwy wariantow sa unikalne w calym programie w tym bootstrapie -
+!!! patrz E0010 w decl_parser.hcs/parser.hcs z wczesniejszych sesji).
+fun build_variant_arity(sigs: Signatures) -> Dict<Str, Int> [
+    let out: Dict<Str, Int> = dict()
+    let i = 0
+    let n = sigs.enum_names.len()
+    while i < n [
+        let ename = sigs.enum_names[i].clone()
+        match sigs.enums.fetch(ename) [
+            Some(decl) -> [
+                let variants = enum_decl_variants(decl)
+                let j = 0
+                let vn = variants.len()
+                while j < vn [
+                    let v = variants[j]
+                    out.insert(v.name, v.fields.len())
+                    j = j + 1
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+!!! Ksztalt `wyrazenie.metoda(...)` - jak `AttrCallShape` w
+!!! typeinfer.hcs, ale dla CODEGEN: dodatkowo trzyma JUZ
+!!! WYRENDEROWANY tekst celu (`target_rendered`), zeby nie renderowac
+!!! go dwa razy. Tak jak tam - CELOWO bez surowego pola `Expr` (patrz
+!!! uwaga projektowa w typeinfer.hcs, ten sam powod).
+struct MethodCallShape [
+    is_method_call: Bool,
+    method_name: Str,
+    target_rendered: Str,
+    target_type: Option<TypeRef>
+]
+
+!!! `seen_real_toplevel_item`: czy juz wyemitowano jakikolwiek prawdziwy
+!!! element najwyzszego poziomu (struct/enum/impl/extern fun/fun/const/
+!!! use) - potrzebne, zeby wiedziec kiedy kolejny `!!` moze byc jeszcze
+!!! `//!` (inner doc, dozwolony TYLKO przed wszystkimi innymi elementami
+!!! pliku), a kiedy musi spasc do zwyklego `//` (E0753 w Ruscie w
+!!! przeciwnym razie) - patrz `emit_module_doc_comment`. Bug znaleziony
+!!! przy pierwszej realnej kompilacji `cargo build` wygenerowanego kodu
+!!! w tej sesji (poprzednio niemozliwe w tym srodowisku bez rustc).
+!!! `char_cache_params`: nazwy parametrow Str biezacej funkcji
+!!! zmaterializowane jako `Vec<char>` w prologu (patrz `gen_fun`/
+!!! `char_indexed_str_params`) - Dict jako surogat Set (`.contains`).
+struct CodeGen [
+    sigs: Signatures,
+    env_vars: Dict<Str, Option<TypeRef>>,
+    variant_arity: Dict<Str, Int>,
+    boxed_fields: Dict<Str, Str>,
+    method_mut_params: Dict<Str, Bool>,
+    mut_params: Dict<Str, Bool>,
+    current_type_params: List<Str>,
+    current_ret_type: Option<TypeRef>,
+    output: List<Str>,
+    indent: Int,
+    no_default_structs: Dict<Str, Bool>,
+    needs_pyo3: Bool,
+    direct_blocks: Dict<Str, Str>,
+    seen_real_toplevel_item: Bool,
+    char_cache_params: Dict<Str, Bool>
+]
+
+impl CodeGen [
+    !!! Parytet z `self.env: TypeEnv | None` w Pythonie - **UPROSZCZONE**:
+    !!! zamiast trzymac `Option<TypeEnv>` jako pole (co, jak `FnChecker`
+    !!! w typecheck.hcs juz odkryl, uniemozliwialoby BEZPIECZNA mutacje -
+    !!! `self.env.declare(...)` NIE jest wykrywane przez mechanizm
+    !!! auto-`&mut self`, patrz uwaga projektowa w typecheck.hcs), `env`
+    !!! trzyma TYLKO `env_vars: Dict<Str, Option<TypeRef>>` BEZPOSREDNIO
+    !!! jako pole `CodeGen` - `self.env_vars.insert(...)` (w
+    !!! `declare_env` nizej) JEST wykrywalne (pojedynczy poziom
+    !!! `self.pole.WBUDOWANA_METODA()`). "Brak aktywnego srodowiska"
+    !!! (Pythonowe `None`) jest reprezentowane jako PUSTY Dict zamiast
+    !!! `Option` - w PRAKTYCE `gen_stmt`/`gen_expr` sa wywolywane TYLKO
+    !!! wewnatrz cial funkcji (gdzie `env` w oryginale ZAWSZE jest
+    !!! ustawiony przez `gen_fun`/`gen_impl` przed wejsciem), wiec ta
+    !!! roznica nie ma znaczenia w praktyce - udokumentowane uproszczenie.
+    fun infer_type(self, e: Expr) -> Option<TypeRef> [
+        let env = TypeEnv(self.sigs.clone(), self.env_vars.clone())
+        end infer_expr_type(e, env)
+    ]
+
+    !!! Deklaruje zmienna w biezacym srodowisku typow - parytet z
+    !!! `self.env.declare(...)` wywolanym Z ZEWNATRZ `TypeEnv` (nie
+    !!! Z jego wlasnej metody) - stad bezposrednio na `self.env_vars`.
+    fun declare_env(self, name: Str, t: Option<TypeRef>) [
+        self.env_vars.insert(name, t)
+    ]
+
+    !!! Parytet z `_is_refable()` - patrz uwaga w rust_type_name/
+    !!! docs/ROADMAP.md co do tego, ze `Dict` NIE jest tu wliczony
+    !!! (prawdopodobne przeoczenie w oryginale, odtworzone WIERNIE -
+    !!! nie "naprawiane" tutaj, bo cala reszta codegen.py polega na
+    !!! DOKLADNIE tym zachowaniu).
+    fun is_refable_type(self, t: TypeRef) -> Bool [
+        if t.name == "Str" or t.name == "List" or t.name == "Dict" [
+            end true
+        ]
+        if self.sigs.structs.contains(t.name.clone()) [
+            end true
+        ]
+        if self.sigs.enums.contains(t.name.clone()) [
+            end true
+        ]
+        end false
+    ]
+
+    fun expr_is_string_lit(self, e: Expr) -> Bool [
+        let c = e.clone()
+        match c [
+            StringLit(value, is_doc) -> [
+                end true
+            ]
+            _ -> [
+                end false
+            ]
+        ]
+    ]
+
+    fun expr_is_list_lit(self, e: Expr) -> Bool [
+        let c = e.clone()
+        match c [
+            ListLit(items) -> [
+                end true
+            ]
+            _ -> [
+                end false
+            ]
+        ]
+    ]
+
+    !!! `+` na Str MUSI stac sie `format!(...)` (nie Rustowe `+` na
+    !!! `String`, ktore konsumuje LHS) - decyzja "czy to Str" bierze
+    !!! pod uwage ZARWNO wywnioskowany typ JAK I to, czy operand jest
+    !!! DOSLOWNIE literalem stringowym (dla przypadkow gdy inferencja
+    !!! nie wie jeszcze nic, np. `"a" + zmienna_bez_adnotacji`) -
+    !!! parytet z odpowiednia czescia `gen_expr()` dla `BinOp("+", ...)`.
+    !!! Rekurencyjnie po lancuchach `a + b + c` (lewostronnie laczne w
+    !!! gramatyce) - `infer_type` na WEWNETRZNYM `BinOp("+")` czesto nie
+    !!! zwraca Str nawet gdy oba operandy sa Str, co psulo zewnetrzny
+    !!! `+` w lancuchu (np. `a + "::" + b` -> `format!(...) + b`, gdzie
+    !!! `String + &String` sie nie kompiluje - brak impl Add). Parytet z
+    !!! `_expr_is_strish()` w codegen.py (bug znaleziony przy pierwszej
+    !!! realnej kompilacji `cargo build` w tej sesji).
+    fun expr_is_strish(self, e: Expr) -> Bool [
+        if self.expr_is_string_lit(e.clone()) [
+            end true
+        ]
+        let c = e.clone()
+        match c [
+            BinOp(op, left, right) -> [
+                if op == "+" [
+                    if self.expr_is_strish(left) or self.expr_is_strish(right) [
+                        end true
+                    ]
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+        let t = self.infer_type(e)
+        match t [
+            Some(tv) -> [
+                if tv.name == "Str" [
+                    end true
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        end false
+    ]
+
+    fun type_or_lit_is_str(self, t: Option<TypeRef>, e: Expr) -> Bool [
+        match t [
+            Some(tv) -> [
+                if tv.name == "Str" [
+                    end true
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        end self.expr_is_string_lit(e)
+    ]
+
+    fun type_or_lit_is_list(self, t: Option<TypeRef>, e: Expr) -> Bool [
+        match t [
+            Some(tv2) -> [
+                if tv2.name == "List" [
+                    end true
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        end self.expr_is_list_lit(e)
+    ]
+
+    !!! Parytet z `_gen_log()`. `macro_name` domyslnie "println" -
+    !!! `gen_eprint`/`eprint` (get <std:...> nie wymagany, builtin
+    !!! kompilatora - patrz gen_call/gen_expr_stmt) uzywaja "eprintln".
+    fun gen_log_with_macro(self, args: List<Expr>, macro_name: Str) -> Str [
+        let fmt = ""
+        let i = 0
+        let n = args.len()
+        while i < n [
+            if i > 0 [
+                fmt = fmt + " "
+            ]
+            fmt = fmt + "{}"
+            i = i + 1
+        ]
+        let rendered = self.gen_args_list(args)
+        let sep = ""
+        if args.len() > 0 [
+            sep = ", "
+        ]
+        end macro_name + "!(\"" + fmt + "\"" + sep + rendered + ")"
+    ]
+
+    !!! Parytet z `_gen_log()`.
+    fun gen_log(self, args: List<Expr>) -> Str [
+        end self.gen_log_with_macro(args, "println")
+    ]
+
+    !!! Argument, ktory MUSI byc WLASNOSCIA (nie referencja) - np. pole
+    !!! konstruktora struct/`Some(...)`/wariant enuma. Identyfikator
+    !!! odnoszacy sie do auto-zreferencjonowanego parametru (`&String`/
+    !!! `&SomeStruct`) przekazany wprost w takie miejsce nie kompiluje sie
+    !!! (E0308). `.to_string()`/`.clone()` dziala jednakowo na referencje
+    !!! i wlasnosc - bezpieczna heurystyka "zawsze konwertuj", parytet z
+    !!! `_gen_owned_arg()` w codegen.py (bug znaleziony przy pierwszej
+    !!! realnej kompilacji `cargo build` w tej sesji).
+    !!! OGRANICZONE do `IdentExpr`/`Attr` - jedyne ksztalty, ktore MOGA
+    !!! byc referencja (auto-`&` parametru/pola). `Call`/lista/literaly
+    !!! ZAWSZE produkuja swieza wlasnosc - klonowanie ich jest
+    !!! bezuzyteczne (i psulo dokladne dopasowania w testach). `Index`
+    !!! celowo pominiety - `gen_expr` dla `Index` juz sam dokleja
+    !!! `.clone()` gdy trzeba, wiec ponowne klonowanie tu byloby
+    !!! podwojne. Parytet z ograniczeniem w `_gen_owned_arg` (codegen.py).
+    fun expr_is_ident_or_attr(self, e: Expr) -> Bool [
+        let c = e.clone()
+        match c [
+            IdentExpr(name) -> [
+                end true
+            ]
+            Attr(target, name) -> [
+                end true
+            ]
+            _ -> [
+                end false
+            ]
+        ]
+    ]
+
+    !!! Czy `e` to `cos.generic` albo `cos.generic2` - pola ZAWSZE
+    !!! `Option<Box<TypeRef>>` w wygenerowanym Ruscie (TypeRef jest
+    !!! bezposrednio rekurencyjny) - patrz `gen_owned_arg` ponizej.
+    fun expr_is_generic_field_attr(self, e: Expr) -> Bool [
+        let c = e.clone()
+        match c [
+            Attr(target, name) -> [
+                end name == "generic" or name == "generic2"
+            ]
+            _ -> [
+                end false
+            ]
+        ]
+    ]
+
+    fun gen_owned_arg(self, a: Expr) -> Str [
+        let rendered = self.gen_expr(a.clone())
+        if not self.expr_is_ident_or_attr(a.clone()) [
+            end rendered
+        ]
+        if self.expr_is_generic_field_attr(a.clone()) [
+            !!! `.map(|b| *b)` odpakowuje `Box` przy zachowaniu `Option` -
+            !!! parytet z identyczna poprawka w `_gen_owned_arg` (codegen.py),
+            !!! ktora sama jest uogolnieniem `_gen_return_expr`'owej
+            !!! poprawki (dla `return`) na KAZDA pozycje wymagajaca
+            !!! wlasnosci (argument/`let`). Bug znaleziony przy uzyciu
+            !!! skompilowanego stage1 do zbudowania cli.hcs w tej sesji.
+            end "(" + rendered + ").map(|b| *b)"
+        ]
+        let t = self.infer_type(a)
+        match t [
+            Some(tt) -> [
+                if tt.name == "Str" [
+                    end "(" + rendered + ").to_string()"
+                ]
+                if tt.name == "Dict" or tt.name == "List" or self.sigs.structs.contains(tt.name.clone()) or self.sigs.enums.contains(tt.name.clone()) [
+                    end "(" + rendered + ").clone()"
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        end rendered
+    ]
+
+    fun gen_args_list(self, args: List<Expr>) -> Str [
+        let out = ""
+        let i = 0
+        let n = args.len()
+        while i < n [
+            if i > 0 [
+                out = out + ", "
+            ]
+            out = out + self.gen_owned_arg(args[i])
+            i = i + 1
+        ]
+        end out
+    ]
+
+    !!! Konstruktor wariantu enuma: `Wariant(a, b)` -> `Enum::Wariant(a,
+    !!! b)`, doklejajac `Box::new(...)`/`.map(Box::new)` na kazdym
+    !!! argumencie, ktory `boxed_fields` (z `build_recursion_info`)
+    !!! oznaczyl jako "direct"/"option" - parytet z odpowiednim
+    !!! fragmentem `gen_expr()` dla `A.Call` na konstruktorze wariantu.
+    fun gen_variant_call(self, enum_name: Str, variant_name: Str, args: List<Expr>) -> Str [
+        let out = ""
+        let i = 0
+        let n = args.len()
+        while i < n [
+            if i > 0 [
+                out = out + ", "
+            ]
+            let rendered = self.gen_owned_arg(args[i])
+            let key = enum_name.clone() + "::" + variant_name.clone() + "#" + (i as Str)
+            match self.boxed_fields.fetch(key) [
+                Some(kind) -> [
+                    if kind == "option" [
+                        rendered = rendered + ".map(Box::new)"
+                    ] elif kind == "direct" [
+                        rendered = "Box::new(" + rendered + ")"
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+            out = out + rendered
+            i = i + 1
+        ]
+        end enum_name + "::" + variant_name + "(" + out + ")"
+    ]
+
+    !!! `idx`-ty parametr POMIJAJAC `self` (jesli jest pierwszy) -
+    !!! potrzebne, bo `args` (argumenty WYWOLANIA) nie zawieraja
+    !!! odpowiednika `self`, ale `params` (parametry DEKLARACJI) go
+    !!! MOGA zawierac.
+    fun nth_non_self_param(self, params: List<Param>, idx: Int) -> Option<Param> [
+        let filtered: List<Param> = []
+        let i = 0
+        let n = params.len()
+        while i < n [
+            let p = params[i]
+            if p.name != "self" [
+                filtered.push(p)
+            ]
+            i = i + 1
+        ]
+        if idx < filtered.len() [
+            end some(filtered[idx])
+        ]
+        end none()
+    ]
+
+    !!! Wywolanie metody uzytkownika `cel.metoda(args)` - auto-`&`/
+    !!! `&mut` na KAZDYM argumencie wedlug `is_refable_type` +
+    !!! `method_mut_params` (parytet z `_call_arg_str()` zastosowanym
+    !!! do wywolan metod).
+    fun gen_user_method_call(self, shape: MethodCallShape, target_type: TypeRef, m: Stmt, args: List<Expr>) -> Str [
+        let params = fun_decl_params(m.clone())
+        let method_name_local = fun_decl_name(m)
+        let out = ""
+        let i = 0
+        let n = args.len()
+        while i < n [
+            if i > 0 [
+                out = out + ", "
+            ]
+            let rendered = self.gen_expr(args[i].clone())
+            match self.nth_non_self_param(params.clone(), i) [
+                Some(p) -> [
+                    match p.type_ref.clone() [
+                        Some(pt) -> [
+                            if self.is_refable_type(pt) [
+                                let mut_key = target_type.name.clone() + "::" + method_name_local.clone() + "::" + p.name.clone()
+                                if self.method_mut_params.contains(mut_key) [
+                                    rendered = "&mut " + rendered
+                                ] else [
+                                    rendered = "&" + rendered
+                                ]
+                            ] else [
+                                rendered = self.gen_owned_arg(args[i].clone())
+                            ]
+                        ]
+                        None -> [
+                        ]
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+            out = out + rendered
+            i = i + 1
+        ]
+        end shape.target_rendered + "." + shape.method_name + "(" + out + ")"
+    ]
+
+    !!! Wywolanie wolnej funkcji `f(args)` - jak wyzej, ale klucz mutacji
+    !!! to `"NazwaFunkcji::param"` (`self.mut_params`, nie
+    !!! `method_mut_params`).
+    fun gen_call_args_for_fun(self, fn_name: Str, f: Stmt, args: List<Expr>) -> Str [
+        let params = fun_decl_params(f)
+        let out = ""
+        let i = 0
+        let n = args.len()
+        while i < n [
+            if i > 0 [
+                out = out + ", "
+            ]
+            let rendered = self.gen_expr(args[i].clone())
+            if i < params.len() [
+                let p = params[i]
+                match p.type_ref.clone() [
+                    Some(pt) -> [
+                        if self.is_refable_type(pt) [
+                            let mut_key = fn_name.clone() + "::" + p.name.clone()
+                            if self.mut_params.contains(mut_key) [
+                                rendered = "&mut " + rendered
+                            ] else [
+                                rendered = "&" + rendered
+                            ]
+                        ] else [
+                            rendered = self.gen_owned_arg(args[i].clone())
+                        ]
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            out = out + rendered
+            i = i + 1
+        ]
+        end out
+    ]
+
+    !!! Rozpoznaje `cel.metoda` - patrz uwaga projektowa na gorze pliku
+    !!! (typeinfer.hcs) co do `Box<Expr>`/granicy wywolania - `target`
+    !!! (Boxowane pole `Attr`) jest tu uzyte DWA RAZY jako ARGUMENT
+    !!! (`self.gen_expr(target)`/`self.infer_type(target)`) - to
+    !!! POZYCZENIE (typ `Expr` jest "refable"), nie przeniesienie, wiec
+    !!! wielokrotne uzycie jest bezpieczne (patrz codegen.hcs, sekcja
+    !!! auto-`&mut self` - to ta sama zasada co pozwolila `edges[i]`
+    !!! itd. dzialac PO DODANIU `.clone()`, tu dziala BEZ potrzeby
+    !!! `.clone()`, bo `target` NIE jest indeksowaniem kolekcji, tylko
+    !!! zwyklym bindingiem z dopasowania).
+    fun gen_method_call_shape(self, e: Expr) -> MethodCallShape [
+        let c = e.clone()
+        match c [
+            Attr(target, name) -> [
+                let rendered = self.gen_expr(target)
+                let tt = self.infer_type(target)
+                end MethodCallShape(true, name, rendered, tt)
+            ]
+            _ -> [
+                end MethodCallShape(false, "", "", none())
+            ]
+        ]
+    ]
+
+    !!! Identyfikator - jesli NIE jest zadeklarowana lokalna zmienna o
+    !!! tej nazwie, a nazwa odpowiada WARIANTOWI ENUMA bez pol
+    !!! (`arity == 0`), renderuje `Enum::Wariant` zamiast golej nazwy -
+    !!! parytet z odpowiednim fragmentem `gen_expr()` dla `A.Ident`.
+    fun gen_ident(self, name: Str) -> Str [
+        if not self.env_vars.contains(name.clone()) [
+            match self.variant_arity.fetch(name.clone()) [
+                Some(arity) -> [
+                    if arity == 0 [
+                        match self.sigs.variant_owner.fetch(name.clone()) [
+                            Some(enum_name) -> [
+                                end enum_name + "::" + name
+                            ]
+                            None -> [
+                            ]
+                        ]
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        end name + ""
+    ]
+
+    fun gen_binop(self, op: Str, left: Expr, right: Expr) -> Str [
+        let rust_op = op
+        if op == "and" [
+            rust_op = "&&"
+        ]
+        if op == "or" [
+            rust_op = "||"
+        ]
+        if op == "+" [
+            let lt = self.infer_type(left)
+            let rt = self.infer_type(right)
+            if self.type_or_lit_is_list(lt.clone(), left) or self.type_or_lit_is_list(rt.clone(), right) [
+                let l = self.gen_expr(left)
+                let r = self.gen_expr(right)
+                end l + ".iter().cloned().chain(" + r + ".iter().cloned()).collect::<Vec<_>>()"
+            ]
+            if self.type_or_lit_is_str(lt, left) or self.type_or_lit_is_str(rt, right) or self.expr_is_strish(left) or self.expr_is_strish(right) [
+                end "format!(\"{}{}\", " + self.gen_expr(left) + ", " + self.gen_expr(right) + ")"
+            ]
+        ]
+        if op == "==" or op == "!=" or op == "<" or op == ">" or op == "<=" or op == ">=" [
+            let lt2 = self.infer_type(left.clone())
+            let rt2 = self.infer_type(right.clone())
+            if self.type_or_lit_is_str(lt2, left.clone()) or self.type_or_lit_is_str(rt2, right.clone()) [
+                end "(" + self.gen_expr(left) + ".to_string() " + rust_op + " " + self.gen_expr(right) + ".to_string())"
+            ]
+        ]
+        end "(" + self.gen_expr(left) + " " + rust_op + " " + self.gen_expr(right) + ")"
+    ]
+
+    !!! `xs[i]` - `.clone()` doklejane TYLKO gdy element jest "refable"
+    !!! (struct/enum/Str/List) - parytet z heurystyka "klonuj zawsze dla
+    !!! non-Copy elementow" opisana w komentarzu przy `A.Index` w
+    !!! codegen.py (i juz uzyta RECZNIE wielokrotnie w tym bootstrapie,
+    !!! patrz sekcje wyzej o `.clone()`-utracie-typu).
+    fun gen_index(self, target: Expr, index: Expr) -> Str [
+        let base = self.gen_expr(target.clone()) + "[" + self.gen_expr(index) + " as usize]"
+        let tt = self.infer_type(target)
+        match tt [
+            Some(t) -> [
+                if t.name == "List" [
+                    match t.generic.clone() [
+                        Some(elem) -> [
+                            if self.is_refable_type(elem) [
+                                end base + ".clone()"
+                            ]
+                        ]
+                        None -> [
+                        ]
+                    ]
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        end base
+    ]
+
+    !!! `wyrazenie as Typ` - `as Str` jest specjalne (`.to_string()`,
+    !!! dziala dla KAZDEGO typu z `Display`/numerycznego), inne rzutuja
+    !!! przez Rustowe `as`.
+    fun gen_cast(self, target: Expr, type_ref: TypeRef) -> Str [
+        if type_ref.name == "Str" [
+            end "(" + self.gen_expr(target) + ").to_string()"
+        ]
+        let rendered_type = rust_type_name(type_ref, self.sigs, self.current_type_params)
+        end "(" + self.gen_expr(target) + " as " + rendered_type + ")"
+    ]
+
+    !!! Dysponent wywolan - parytet z DLUGA seria `if`/`elif` w
+    !!! `gen_expr()` dla `A.Call` (wbudowane `log`/`read_file`/
+    !!! `write_file`/`some`/`ok`/`err`/`none`/`dict`, konstruktor
+    !!! wariantu enuma, `.len()`/`.char_at`/`.slice` (Str), `.fetch`/
+    !!! `.contains`/`.remove` (Dict), metoda uzytkownika, konstruktor
+    !!! struct, wolna funkcja, i na koncu przypadek ogolny).
+    fun gen_call(self, callee: Expr, args: List<Expr>) -> Str [
+        let ident_name = expr_as_ident_name(callee.clone())
+
+        if ident_name == "log" [
+            end self.gen_log(args)
+        ]
+        if ident_name == "elog" [
+            end self.gen_log_with_macro(args, "eprintln")
+        ]
+        if ident_name == "read_file" and args.len() == 1 [
+            end "std::fs::read_to_string(&" + self.gen_expr(args[0]) + ").map_err(|e| e.to_string())"
+        ]
+        if ident_name == "args" and args.len() == 0 [
+            end "std::env::args().skip(1).collect::<Vec<String>>()"
+        ]
+        if ident_name == "current_dir" and args.len() == 0 [
+            !!! current_dir() -> Result<Str, Str> - get <std:env>. Parytet
+            !!! z hackerc/hackerc/codegen.py (Python).
+            end "std::env::current_dir().map(|p| p.to_string_lossy().to_string()).map_err(|e| e.to_string())"
+        ]
+        if ident_name == "exit" and args.len() == 1 [
+            end "std::process::exit((" + self.gen_expr(args[0]) + ") as i32)"
+        ]
+        if ident_name == "write_file" and args.len() == 2 [
+            end "std::fs::write(&" + self.gen_expr(args[0]) + ", " + self.gen_expr(args[1]) + ").map_err(|e| e.to_string())"
+        ]
+        if ident_name == "dir_exists" and args.len() == 1 [
+            end "std::path::Path::new(&" + self.gen_expr(args[0]) + ").is_dir()"
+        ]
+        if ident_name == "path_exists" and args.len() == 1 [
+            !!! path_exists(sciezka) -> Bool - get <std:fs>. Parytet z
+            !!! hackerc/hackerc/codegen.py (Python).
+            end "std::path::Path::new(&" + self.gen_expr(args[0]) + ").exists()"
+        ]
+        if ident_name == "create_dir" and args.len() == 1 [
+            end "std::fs::create_dir_all(&" + self.gen_expr(args[0]) + ").map_err(|e| e.to_string())"
+        ]
+        if ident_name == "remove_file" and args.len() == 1 [
+            end "std::fs::remove_file(&" + self.gen_expr(args[0]) + ").map_err(|e| e.to_string())"
+        ]
+        if ident_name == "remove_dir_all" and args.len() == 1 [
+            !!! remove_dir_all(sciezka) -> Result<Void, Str> - get
+            !!! <std:fs>. Usuwa caly katalog rekurencyjnie (jak `rm -rf`)
+            !!! - parytet z hackerc/hackerc/codegen.py (Python).
+            end "std::fs::remove_dir_all(&" + self.gen_expr(args[0]) + ").map_err(|e| e.to_string())"
+        ]
+        if ident_name == "copy_file" and args.len() == 2 [
+            !!! copy_file(src, dest) -> Result<Void, Str> - get <std:fs>.
+            !!! Parytet z hackerc/hackerc/codegen.py (Python).
+            end "std::fs::copy(&" + self.gen_expr(args[0]) + ", &" + self.gen_expr(args[1]) + ").map(|_| ()).map_err(|e| e.to_string())"
+        ]
+        if ident_name == "list_dir" and args.len() == 1 [
+            end "(|| -> Result<Vec<String>, String> { let mut out = Vec::new(); for entry in std::fs::read_dir(&" + self.gen_expr(args[0]) + ").map_err(|e| e.to_string())? { let entry = entry.map_err(|e| e.to_string())?; out.push(entry.file_name().to_string_lossy().to_string()); } Ok(out) })()"
+        ]
+        if ident_name == "env_var" and args.len() == 1 [
+            !!! env_var(nazwa) -> Option<Str> - get <std:env>. `.ok()`
+            !!! zamienia Result<String, VarError> na Option<String> -
+            !!! parytet z hackerc/hackerc/codegen.py (Python).
+            end "std::env::var(&" + self.gen_expr(args[0]) + ").ok()"
+        ]
+        if ident_name == "run_command" and args.len() == 2 [
+            !!! run_command(program, argumenty) -> Result<Str, Str> -
+            !!! get <std:process>. Uruchamia proces potomny BEZ powloki
+            !!! (fork/exec bezposrednio), czeka na zakonczenie, zwraca
+            !!! caly stdout (kod 0) albo caly stderr (kod != 0 / nie
+            !!! da sie uruchomic) - parytet z hackerc/hackerc/codegen.py.
+            let program_expr = self.gen_expr(args[0])
+            let args_expr = self.gen_expr(args[1])
+            end "(|| -> Result<String, String> {\n        let __hks_cmd_out = std::process::Command::new(&" + program_expr + ")\n            .args(" + args_expr + ")\n            .output()\n            .map_err(|e| e.to_string())?;\n        if __hks_cmd_out.status.success() {\n            Ok(String::from_utf8_lossy(&__hks_cmd_out.stdout).to_string())\n        } else {\n            Err(String::from_utf8_lossy(&__hks_cmd_out.stderr).to_string())\n        }\n    })()"
+        ]
+        if ident_name == "run_command_combined" and args.len() == 2 [
+            !!! run_command_combined(program, argumenty) -> Str - get
+            !!! <std:process>. Jak `run_command`, ale ZAWSZE zwraca
+            !!! polaczony stdout+stderr, bez wzgledu na kod wyjscia -
+            !!! parytet z hackerc/hackerc/codegen.py (Python).
+            let program_expr2 = self.gen_expr(args[0])
+            let args_expr2 = self.gen_expr(args[1])
+            end "(|| -> String {\n        let __hks_cmd_out2 = match std::process::Command::new(&" + program_expr2 + ")\n            .args(" + args_expr2 + ")\n            .output() {\n            Ok(o) => o,\n            Err(e) => return e.to_string(),\n        };\n        let mut __hks_combined = String::from_utf8_lossy(&__hks_cmd_out2.stdout).to_string();\n        __hks_combined.push_str(&String::from_utf8_lossy(&__hks_cmd_out2.stderr));\n        __hks_combined\n    })()"
+        ]
+        if ident_name == "http_get" and args.len() == 1 [
+            !!! http_get(url) -> Result<Str, Str> - get <std:http>.
+            !!! WYMAGA `get <crates:ureq::2>` w pliku uzywajacym (patrz
+            !!! libs/std/lib/http.hcs) - parytet z codegen.py (Python).
+            let url_expr = self.gen_expr(args[0])
+            end "(|| -> Result<String, String> {\n        let __hks_http_resp = ureq::get(&" + url_expr + ")\n            .call()\n            .map_err(|e| e.to_string())?;\n        __hks_http_resp.into_string().map_err(|e| e.to_string())\n    })()"
+        ]
+        if ident_name == "some" [
+            end "Some(" + self.gen_args_list(args) + ")"
+        ]
+        if ident_name == "ok" [
+            end "Ok(" + self.gen_args_list(args) + ")"
+        ]
+        if ident_name == "err" [
+            end "Err(" + self.gen_args_list(args) + ")"
+        ]
+        if ident_name == "none" and args.len() == 0 [
+            end "None"
+        ]
+        if ident_name == "dict" and args.len() == 0 [
+            end "std::collections::HashMap::new()"
+        ]
+        if ident_name != "" [
+            match self.sigs.variant_owner.fetch(ident_name.clone()) [
+                Some(enum_name) -> [
+                    end self.gen_variant_call(enum_name, ident_name, args)
+                ]
+                None -> [
+                ]
+            ]
+        ]
+
+        let shape = self.gen_method_call_shape(callee.clone())
+        if shape.is_method_call and shape.method_name == "len" and args.len() == 0 [
+            end "(" + shape.target_rendered + ".len() as i64)"
+        ]
+        if shape.is_method_call and (shape.method_name == "char_at" or shape.method_name == "slice") [
+            match shape.target_type.clone() [
+                Some(tt) -> [
+                    !!! Cel jest zmaterializowany jako `Vec<char>` w prologu
+                    !!! biezacej funkcji (patrz `gen_fun`/
+                    !!! `char_indexed_str_params`) -> O(1) indeksowanie
+                    !!! zamiast O(i) `.chars().nth(i)`. `target_rendered`
+                    !!! to juz gotowy tekst Rusta - dla golego identyfikatora
+                    !!! (typowy przypadek parametru w petli) jest to po prostu
+                    !!! jego nazwa, ktora mozna sprawdzic w `char_cache_params`.
+                    let is_cached = self.char_cache_params.contains(shape.target_rendered.clone())
+                    if tt.name == "Str" and shape.method_name == "char_at" and args.len() == 1 [
+                        if is_cached [
+                            end "(__hks_chars_" + shape.target_rendered.clone() + ".get(" + self.gen_expr(args[0]) + " as usize).map(|c| c.to_string()).unwrap_or_default())"
+                        ]
+                        end "(" + shape.target_rendered + ".chars().nth(" + self.gen_expr(args[0]) + " as usize).map(|c| c.to_string()).unwrap_or_default())"
+                    ]
+                    if tt.name == "Str" and shape.method_name == "slice" and args.len() == 2 [
+                        let start_e = self.gen_expr(args[0])
+                        let end_e = self.gen_expr(args[1])
+                        if is_cached [
+                            let cache_var2 = "__hks_chars_" + shape.target_rendered.clone()
+                            end "({ let __v = &" + cache_var2 + "; let __s = ((" + start_e + ") as usize).min(__v.len()); let __e = ((" + end_e + ") as usize).min(__v.len()).max(__s); __v[__s..__e].iter().collect::<String>() })"
+                        ]
+                        end "(" + shape.target_rendered + ".chars().skip(" + start_e + " as usize).take(((" + end_e + ") - (" + start_e + ")) as usize).collect::<String>())"
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        if shape.is_method_call and (shape.method_name == "fetch" or shape.method_name == "contains" or shape.method_name == "remove") and args.len() == 1 [
+            match shape.target_type.clone() [
+                Some(tt2) -> [
+                    if tt2.name == "Dict" [
+                        let key_e = self.gen_expr(args[0])
+                        if shape.method_name == "fetch" [
+                            end shape.target_rendered + ".get(" + key_e + ".as_str()).cloned()"
+                        ]
+                        if shape.method_name == "contains" [
+                            end shape.target_rendered + ".contains_key(" + key_e + ".as_str())"
+                        ]
+                        end shape.target_rendered + ".remove(" + key_e + ".as_str())"
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        if shape.is_method_call [
+            match shape.target_type.clone() [
+                Some(tt3) -> [
+                    match self.sigs.methods.fetch(tt3.name.clone() + "::" + shape.method_name.clone()) [
+                        Some(m) -> [
+                            end self.gen_user_method_call(shape, tt3, m, args)
+                        ]
+                        None -> [
+                        ]
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
+
+        if ident_name != "" and self.sigs.structs.contains(ident_name.clone()) [
+            end ident_name + "::new(" + self.gen_args_list(args) + ")"
+        ]
+        if ident_name != "" [
+            match self.sigs.functions.fetch(ident_name.clone()) [
+                Some(f) -> [
+                    end ident_name + "(" + self.gen_call_args_for_fun(ident_name, f, args) + ")"
+                ]
+                None -> [
+                ]
+            ]
+        ]
+
+        if shape.is_method_call [
+            end shape.target_rendered + "." + shape.method_name + "(" + self.gen_args_list(args) + ")"
+        ]
+        end self.gen_expr(callee) + "(" + self.gen_args_list(args) + ")"
+    ]
+
+    !!! Glowny dysponent - parytet z `gen_expr()`. Klonuje `node` na
+    !!! WLASNA, owned lokalna zmienna NA STARCIE (ta sama zasada co w
+    !!! `infer_expr_type`, `typeinfer.hcs` - patrz uwaga projektowa
+    !!! tam) - dzieki temu KAZDE Boxowane pole wyciagniete tu przez
+    !!! `match` jest bezpiecznie przekazywane DALEJ tylko jako ARGUMENT
+    !!! (nigdy dopasowywane bezposrednio poza ta funkcja).
+    fun gen_expr(self, node: Expr) -> Str [
+        let e = node.clone()
+        match e [
+            NumberLit(value) -> [
+                end value
+            ]
+            StringLit(value, is_doc) -> [
+                end rust_string_literal(value) + ".to_string()"
+            ]
+            BoolLit(value) -> [
+                if value [
+                    end "true"
+                ]
+                end "false"
+            ]
+            NullLit -> [
+                end "None"
+            ]
+            IdentExpr(name) -> [
+                end self.gen_ident(name)
+            ]
+            ListLit(items) -> [
+                end "vec![" + self.gen_args_list(items) + "]"
+            ]
+            UnaryOp(op, operand) -> [
+                if op == "not" [
+                    end "!(" + self.gen_expr(operand) + ")"
+                ]
+                end op + "(" + self.gen_expr(operand) + ")"
+            ]
+            BinOp(op, left, right) -> [
+                end self.gen_binop(op, left, right)
+            ]
+            Attr(target, name) -> [
+                end self.gen_expr(target) + "." + name
+            ]
+            Index(target, index) -> [
+                end self.gen_index(target, index)
+            ]
+            Cast(target, type_ref) -> [
+                end self.gen_cast(target, type_ref)
+            ]
+            TryOp(target) -> [
+                end "(" + self.gen_expr(target) + ")?"
+            ]
+            Call(callee, args) -> [
+                end self.gen_call(callee, args)
+            ]
+        ]
+    ]
+]
+
+!!! -- Emisja instrukcji: `gen_stmt` (parytet z `CodeGen.gen_stmt()`) ---
+
+!!! Parytet z `_contains_any()` - czy `t` LUB ktorykolwiek z jego
+!!! `.generic`-ow (dowolnej glebokosci) to `Any` (typ elementu pustej
+!!! listy `[]`, patrz `infer_expr_type`'s `ListLit` w typeinfer.hcs) -
+!!! taki typ NIE moze byc uzyty jako jawna adnotacja Rusta.
+fun type_contains_any(t: TypeRef) -> Bool [
+    if t.name == "Any" [
+        end true
+    ]
+    match t.generic.clone() [
+        Some(inner) -> [
+            end type_contains_any(inner)
+        ]
+        None -> [
+            end false
+        ]
+    ]
+]
+
+fun is_builtin_variant(name: Str) -> Bool [
+    end name == "Some" or name == "None" or name == "Ok" or name == "Err"
+]
+
+!!! Ksztalt `wyrazenie(...)` uzywany TYLKO do rozpoznania specjalnych
+!!! wywolan na poziomie INSTRUKCJI (`log(...)`, `__direct__(...)`) -
+!!! przechowuje `args: List<Expr>` BEZPOSREDNIO (bezpieczne - `List<Expr>`
+!!! jest polem WPROST na `Call`, NIE Boxowanym, w przeciwienstwie do
+!!! `callee: Expr`, patrz ast_nodes.hcs "Wyrazenia" - `Call(Expr,
+!!! List<Expr>)` box'uje TYLKO `callee`).
+struct CallShape [
+    is_call: Bool,
+    ident_name: Str,
+    args: List<Expr>
+]
+
+impl CodeGen [
+    fun emit(self, text: Str) [
+        if text == "" [
+            self.output.push("")
+        ] else [
+            self.output.push(self.indent_str() + text)
+        ]
+    ]
+
+    fun indent_str(self) -> Str [
+        let out = ""
+        let i = 0
+        while i < self.indent [
+            out = out + "    "
+            i = i + 1
+        ]
+        end out
+    ]
+
+    fun call_shape(self, e: Expr) -> CallShape [
+        let c = e.clone()
+        match c [
+            Call(callee, args) -> [
+                end CallShape(true, expr_as_ident_name(callee), args)
+            ]
+            _ -> [
+                end CallShape(false, "", [])
+            ]
+        ]
+    ]
+
+    fun expr_is_doc_string(self, e: Expr) -> Bool [
+        let c = e.clone()
+        match c [
+            StringLit(value, is_doc) -> [
+                end is_doc
+            ]
+            _ -> [
+                end false
+            ]
+        ]
+    ]
+
+    fun emit_doc_comment(self, e: Expr) [
+        let c = e.clone()
+        match c [
+            StringLit(value, is_doc) -> [
+                self.emit("/// " + value)
+            ]
+            _ -> [
+            ]
+        ]
+    ]
+
+    fun expr_is_attr(self, e: Expr) -> Bool [
+        let c = e.clone()
+        match c [
+            Attr(target, name) -> [
+                end true
+            ]
+            _ -> [
+                end false
+            ]
+        ]
+    ]
+
+    !!! Parytet z `_gen_return_expr()` - `self.pole` zwracane z funkcji o
+    !!! "refable" typie zwracanym dostaje `.clone()` (bo `self`/parametry
+    !!! refable sa ZAWSZE referencjami w tym codegen - `return self.pole;`
+    !!! probowaloby przeniesc wlasnosc spod referencji, Rust to odrzuca -
+    !!! ten SAM mechanizm co juz zastosowany RECZNIE wielokrotnie w tej
+    !!! sesji, np. w typecheck.hcs).
+    fun gen_return_expr(self, value: Expr) -> Str [
+        let rendered = self.gen_expr(value.clone())
+        if self.expr_is_attr(value.clone()) [
+            match self.current_ret_type.clone() [
+                Some(rt) -> [
+                    if self.is_refable_type(rt) [
+                        end rendered + ".clone()"
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        !!! Zwracanie GOLEGO identyfikatora typu Str z funkcji `-> Str` -
+        !!! moze byc `&String` (auto-referencja parametru) - patrz
+        !!! identyczny komentarz w codegen.py.
+        if not self.expr_is_attr(value.clone()) and not self.expr_is_string_lit(value.clone()) [
+            match self.current_ret_type.clone() [
+                Some(rtstr) -> [
+                    if rtstr.name == "Str" [
+                        end rendered + ".to_string()"
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        !!! `TypeRef.generic`/`.generic2` sa ZAWSZE `Option<Box<TypeRef>>` w
+        !!! wygenerowanym Ruscie (TypeRef jest bezposrednio rekurencyjny -
+        !!! patrz `TypeRef::new` w ast_nodes.hcs) - zwrocenie ich wprost z
+        !!! funkcji zadeklarowanej jako `-> Option<TypeRef>` nie kompiluje
+        !!! sie (E0308). `.map(|b| *b)` odpakowuje `Box`. Bug znaleziony
+        !!! przy pierwszej realnej kompilacji `cargo build` w tej sesji.
+        let vc = value.clone()
+        match vc [
+            Attr(target, name) -> [
+                if name == "generic" or name == "generic2" [
+                    match self.current_ret_type.clone() [
+                        Some(rt2) -> [
+                            if rt2.name == "Option" [
+                                end rendered + ".map(|b| *b)"
+                            ]
+                        ]
+                        None -> [
+                        ]
+                    ]
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+        end rendered
+    ]
+
+    fun gen_return_stmt(self, value: Option<Expr>) [
+        match value [
+            Some(v) -> [
+                self.emit("return " + self.gen_return_expr(v) + ";")
+            ]
+            None -> [
+                self.emit("return;")
+            ]
+        ]
+    ]
+
+    !!! Parytet z `LetStmt` w `gen_stmt()`. Deklaruje w `env_vars` PRZED
+    !!! wyliczeniem podpowiedzi typu (`hint`), tak jak Python deklaruje
+    !!! PRZED renderowaniem - kolejnosc ma znaczenie dla poprawnosci
+    !!! `self.gen_expr(node.value)`, jesli WARTOSC odwoluje sie do
+    !!! WLASNEJ nazwy (rekurencja `let x = ... x ...` - rzadkie, ale
+    !!! Python tez tak robi, wiernie odtworzone).
+    !!!
+    !!! UPROSZCZENIE: `skip_hint` w oryginale ma TRZY warunki (struct
+    !!! spoza `local_structs`, `_contains_any`, generyczny struct/enum
+    !!! bez podanego argumentu) - ta wersja implementuje TYLKO drugi
+    !!! (`type_contains_any`) - pozostale dwa wymagalyby sledzenia
+    !!! `local_structs`/pelnych `type_params` struktur (infrastruktura z
+    !!! `project.hcs`, ktory jeszcze nie istnieje) - patrz "Ograniczenia".
+    fun gen_let_stmt(self, name: Str, type_ref: Option<TypeRef>, value: Option<Expr>, is_const: Bool) [
+        let inferred_type = type_ref.clone()
+        match type_ref.clone() [
+            Some(_) -> [
+            ]
+            None -> [
+                match value.clone() [
+                    Some(v) -> [
+                        inferred_type = self.infer_type(v)
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+        ]
+
+        self.declare_env(name.clone(), inferred_type.clone())
+
+        let hint = ""
+        match inferred_type.clone() [
+            Some(t) -> [
+                if not type_contains_any(t.clone()) [
+                    hint = ": " + rust_type_name(t, self.sigs, self.current_type_params)
+                ]
+            ]
+            None -> [
+            ]
+        ]
+
+        let value_rendered = "Default::default()"
+        match value [
+            Some(v2) -> [
+                value_rendered = self.gen_owned_arg(v2)
+            ]
+            None -> [
+            ]
+        ]
+
+        let kw = "let mut"
+        if is_const [
+            kw = "let"
+        ]
+
+        self.emit(kw + " " + name + hint + " = " + value_rendered + ";")
+        match inferred_type.clone() [
+            Some(itype) -> [
+                if itype.name == "Str" and self.char_cache_params.contains(name.clone()) [
+                    self.emit("let __hks_chars_" + name.clone() + ": Vec<char> = " + name.clone() + ".chars().collect();")
+                ]
+            ]
+            None -> [
+            ]
+        ]
+    ]
+
+    fun gen_if_stmt(self, cond: Expr, body: List<Stmt>, elifs: List<ElifArm>, else_body: Option<List<Stmt>>) [
+        self.emit("if " + self.gen_expr(cond) + " {")
+        self.indent = self.indent + 1
+        self.gen_stmts(body)
+        self.indent = self.indent - 1
+        let i = 0
+        let n = elifs.len()
+        while i < n [
+            let arm = elifs[i].clone()
+            self.emit("} else if " + self.gen_expr(arm.cond) + " {")
+            self.indent = self.indent + 1
+            self.gen_stmts(arm.body)
+            self.indent = self.indent - 1
+            i = i + 1
+        ]
+        match else_body [
+            Some(eb) -> [
+                self.emit("} else {")
+                self.indent = self.indent + 1
+                self.gen_stmts(eb)
+                self.indent = self.indent - 1
+            ]
+            None -> [
+            ]
+        ]
+        self.emit("}")
+    ]
+
+    fun join_binds(self, binds: List<Str>) -> Str [
+        let out = ""
+        let i = 0
+        let n = binds.len()
+        while i < n [
+            if i > 0 [
+                out = out + ", "
+            ]
+            out = out + binds[i].clone()
+            i = i + 1
+        ]
+        end out
+    ]
+
+    !!! Parytet z `_pattern_str()`. `_` (wildcard) renderuje sie wprost;
+    !!! `Some`/`None`/`Ok`/`Err` sa natywne (bez kwalifikacji); INNE
+    !!! warianty sa kwalifikowane `Enum::Wariant` przez `sigs.variant_owner`.
+    fun pattern_str(self, variant: Str, binds: List<Str>) -> Str [
+        if variant == "_" [
+            end "_"
+        ]
+        let args = ""
+        if binds.len() > 0 [
+            args = "(" + self.join_binds(binds) + ")"
+        ]
+        if is_builtin_variant(variant.clone()) [
+            end variant + args
+        ]
+        match self.sigs.variant_owner.fetch(variant.clone()) [
+            Some(enum_name) -> [
+                end enum_name + "::" + variant + args
+            ]
+            None -> [
+                log("[hackerc-self] codegen: nieznany wariant '" + variant + "' w 'match'")
+                end variant + args
+            ]
+        ]
+    ]
+
+    !!! Parytet z `gen_match()` - ZAPISUJE/PRZYWRACA stan `env_vars` dla
+    !!! kazdej nazwy bindowanej w galezi (zeby bind nie "wyciekl" poza
+    !!! `match` i zeby TYMCZASOWO nie zaslanial ISTNIEJACEJ zmiennej o
+    !!! tej samej nazwie dla PODA nastepnych galezi/kodu po `match`).
+    fun gen_match(self, subject: Expr, arms: List<MatchArm>) [
+        self.emit("match " + self.gen_expr(subject) + " {")
+        self.indent = self.indent + 1
+        let i = 0
+        let n = arms.len()
+        while i < n [
+            let arm = arms[i].clone()
+            let pattern = self.pattern_str(arm.variant, arm.binds.clone())
+            self.emit(pattern + " => {")
+            self.indent = self.indent + 1
+
+            let prev_present: List<Bool> = []
+            let prev_values: List<Option<TypeRef>> = []
+            let j = 0
+            let bn = arm.binds.len()
+            while j < bn [
+                let b = arm.binds[j].clone()
+                let was_present = self.env_vars.contains(b.clone())
+                prev_present.push(was_present)
+                match self.env_vars.fetch(b.clone()) [
+                    Some(pv) -> [
+                        prev_values.push(pv)
+                    ]
+                    None -> [
+                        prev_values.push(none())
+                    ]
+                ]
+                self.declare_env(b, none())
+                j = j + 1
+            ]
+
+            self.gen_stmts(arm.body)
+
+            let k = 0
+            while k < bn [
+                let b2 = arm.binds[k].clone()
+                if prev_present[k] [
+                    self.declare_env(b2, prev_values[k].clone())
+                ] else [
+                    self.env_vars.remove(b2)
+                ]
+                k = k + 1
+            ]
+
+            self.indent = self.indent - 1
+            self.emit("}")
+            i = i + 1
+        ]
+        self.indent = self.indent - 1
+        self.emit("}")
+    ]
+
+    !!! Parytet z `gen_expr_stmt()` - trzy specjalne przypadki na
+    !!! poziomie INSTRUKCJI (komentarz dokumentacyjny `!!`, `__direct__`,
+    !!! `log`), reszta to zwykle wyrazenie + `;`.
+    !!! Wyciaga wartosc `NumberLit` (Str) z wyrazenia - potrzebne, zeby
+    !!! wyciagnac indeks `N` z `__direct__(N)` (parytet z
+    !!! `int(e.args[0].value)` w gen_expr_stmt).
+    fun expr_number_lit_value(self, e: Expr) -> Str [
+        let c = e.clone()
+        match c [
+            NumberLit(value) -> [
+                end value + ""
+            ]
+            _ -> [
+                end ""
+            ]
+        ]
+    ]
+
+    !!! Parytet z `gen_direct()` - `direct[ ... ]` = surowy kod PYTHONA,
+    !!! wykonywany przez wbudowany interpreter (PyO3 `Python::with_gil`)
+    !!! - Rust jest hostem. `direct_blocks: Dict<Str,Str>` (klucz = indeks
+    !!! jako Str) jest DANE WEJSCIOWE - populowane PRZEZ WYCIAGANIE
+    !!! surowego tekstu Pythona ZE ZRODLA `.hcs` PRZED tokenizacja
+    !!! (parytet z `_extract_direct_blocks` w transpiler.py) - TA
+    !!! EKSTRAKCJA nie jest przepisana w tej sesji (patrz "Ograniczenia"
+    !!! - `parser.hcs::parse_direct` juz to dokumentuje jako "siec
+    !!! bezpieczenstwa"), wiec `direct_blocks` bedzie PUSTY dopoki
+    !!! `transpiler.hcs` (przyszly krok) nie zacznie go wypelniac -
+    !!! `gen_direct` samo w sobie jest jednak KOMPLETNE i gotowe na TEN
+    !!! moment.
+    fun gen_direct(self, idx_text: Str) [
+        self.needs_pyo3 = true
+        let raw = ""
+        match self.direct_blocks.fetch(idx_text) [
+            Some(r) -> [
+                raw = r
+            ]
+            None -> [
+            ]
+        ]
+        self.emit("{")
+        self.indent = self.indent + 1
+        self.emit("Python::with_gil(|py| -> PyResult<()> {")
+        self.indent = self.indent + 1
+        self.emit("py.run(" + python_raw_string(raw) + ", None, None)?;")
+        self.emit("Ok(())")
+        self.indent = self.indent - 1
+        self.emit("}).expect(\"direct[ ... ] (Python) block failed\");")
+        self.indent = self.indent - 1
+        self.emit("}")
+    ]
+
+    fun gen_expr_stmt(self, e: Expr) [
+        if self.expr_is_doc_string(e.clone()) [
+            self.emit_doc_comment(e)
+            end
+        ]
+        let shape = self.call_shape(e.clone())
+        if shape.is_call and shape.ident_name == "__direct__" and shape.args.len() == 1 [
+            let idx_text = self.expr_number_lit_value(shape.args[0].clone())
+            self.gen_direct(idx_text)
+            end
+        ]
+        if shape.is_call and shape.ident_name == "log" [
+            self.emit(self.gen_log(shape.args) + ";")
+            end
+        ]
+        if shape.is_call and shape.ident_name == "elog" [
+            self.emit(self.gen_log_with_macro(shape.args, "eprintln") + ";")
+            end
+        ]
+        self.emit(self.gen_expr(e) + ";")
+    ]
+
+    !!! Glowny dysponent instrukcji - parytet z `gen_stmt()`. `struct`
+    !!! zagniezdzony w ciele funkcji NIE JEST obslugiwany (parytet z
+    !!! `CodegenError` w oryginale - "'struct' musi byc zadeklarowany na
+    !!! najwyzszym poziomie") - tu po prostu `log`-uje i pomija, patrz
+    !!! filozofia bledow w reszcie tego pliku/parser.hcs.
+    fun gen_stmt(self, node: Stmt) [
+        let s = node.clone()
+        match s [
+            LetStmt(name, type_ref, value, is_const) -> [
+                self.gen_let_stmt(name, type_ref, value, is_const)
+            ]
+            AssignStmt(target, op, value) -> [
+                if op == "=" [
+                    self.emit(self.gen_expr(target) + " " + op + " " + self.gen_owned_arg(value) + ";")
+                ] else [
+                    self.emit(self.gen_expr(target) + " " + op + " " + self.gen_expr(value) + ";")
+                ]
+            ]
+            IfStmt(cond, body, elifs, else_body) -> [
+                self.gen_if_stmt(cond, body, elifs, else_body)
+            ]
+            WhileStmt(cond, body) -> [
+                self.emit("while " + self.gen_expr(cond) + " {")
+                self.indent = self.indent + 1
+                self.gen_stmts(body)
+                self.indent = self.indent - 1
+                self.emit("}")
+            ]
+            ForStmt(var, iterable, body) -> [
+                self.emit("for " + var + " in " + self.gen_expr(iterable) + " {")
+                self.indent = self.indent + 1
+                self.gen_stmts(body)
+                self.indent = self.indent - 1
+                self.emit("}")
+            ]
+            ReturnStmt(value) -> [
+                self.gen_return_stmt(value)
+            ]
+            BreakStmt -> [
+                self.emit("break;")
+            ]
+            ContinueStmt -> [
+                self.emit("continue;")
+            ]
+            ManualBlock(body) -> [
+                self.emit("unsafe {")
+                self.indent = self.indent + 1
+                self.gen_stmts(body)
+                self.indent = self.indent - 1
+                self.emit("}")
+            ]
+            GcPragma(mode) -> [
+                self.emit("// gc:use::" + mode + " - bez znaczenia w Rust (wlasnosc/pozyczanie)")
+            ]
+            MatchStmt(subject, arms) -> [
+                self.gen_match(subject, arms)
+            ]
+            ExprStmt(expr) -> [
+                self.gen_expr_stmt(expr)
+            ]
+            _ -> [
+                log("[hackerc-self] codegen: nieobslugiwana instrukcja w gen_stmt (np. 'struct'/'enum'/'fun'/'impl' zagniezdzone w ciele - dozwolone TYLKO na najwyzszym poziomie pliku)")
+            ]
+        ]
+    ]
+
+    fun gen_stmts(self, stmts: List<Stmt>) [
+        let i = 0
+        let n = stmts.len()
+        while i < n [
+            self.gen_stmt(stmts[i])
+            i = i + 1
+        ]
+    ]
+]
+
+!!! -- Emisja deklaracji: `gen_struct`/`gen_enum`/`gen_fun`/`gen_impl` --
+!!! -- (parytet z tymi samymi metodami `CodeGen`) --------------------
+
+!!! Parytet z `_field_blocks_default()` - czy pole typu `t` BLOKUJE
+!!! `#[derive(Default)]` na wlasnym strukcie (enumy/`Result` NIGDY nie
+!!! maja Default, `Option`/`List`/`Dict` ZAWSZE maja Default
+!!! niezaleznie od argumentu, struct zalezy REKURENCYJNIE od
+!!! `no_default_structs`, ktory buduje `compute_no_default_structs`
+!!! ponizej punktem stalym).
+fun field_type_blocks_default(t: TypeRef, sigs: Signatures, no_default_structs: Dict<Str, Bool>) -> Bool [
+    if t.name == "Option" or t.name == "List" or t.name == "Dict" [
+        end false
+    ]
+    if sigs.enums.contains(t.name.clone()) [
+        end true
+    ]
+    if t.name == "Result" [
+        end true
+    ]
+    if sigs.structs.contains(t.name.clone()) [
+        end no_default_structs.contains(t.name)
+    ]
+    end false
+]
+
+!!! Parytet z petla punktu-stalego przy `self._no_default_structs = ...`
+!!! w `__init__`/`gen_program`. Pole Boxowane "direct" ZAWSZE blokuje
+!!! (`Box<X>: Default` wymaga `X: Default`, ktorego nie sprawdzamy tu
+!!! rekurencyjnie - parytet z oryginalem, ktory rowniez po prostu
+!!! blokuje na "direct" bez dalszej analizy); "option" NIGDY nie
+!!! blokuje (`Option<Box<X>>` jest Default niezaleznie od X).
+fun compute_no_default_structs(sigs: Signatures, boxed_fields: Dict<Str, Str>) -> Dict<Str, Bool> [
+    let result: Dict<Str, Bool> = dict()
+    let changed = true
+    while changed [
+        changed = false
+        let i = 0
+        let n = sigs.struct_names.len()
+        while i < n [
+            let name = sigs.struct_names[i].clone()
+            if not result.contains(name.clone()) [
+                match sigs.structs.fetch(name.clone()) [
+                    Some(decl) -> [
+                        let fields = struct_decl_fields_local(decl)
+                        let j = 0
+                        let fn_ = fields.len()
+                        let blocks = false
+                        while j < fn_ and not blocks [
+                            let f = fields[j].clone()
+                            match f.type_ref [
+                                Some(ft) -> [
+                                    let key = name.clone() + "::" + f.name.clone()
+                                    let kind = ""
+                                    match boxed_fields.fetch(key) [
+                                        Some(k) -> [
+                                            kind = k
+                                        ]
+                                        None -> [
+                                        ]
+                                    ]
+                                    if kind == "direct" [
+                                        blocks = true
+                                    ] elif kind != "option" and field_type_blocks_default(ft, sigs, result) [
+                                        blocks = true
+                                    ]
+                                ]
+                                None -> [
+                                ]
+                            ]
+                            j = j + 1
+                        ]
+                        if blocks [
+                            result.insert(name, true)
+                            changed = true
+                        ]
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            i = i + 1
+        ]
+    ]
+    end result
+]
+
+impl CodeGen [
+    fun generic_head(self, type_params: List<Str>) -> Str [
+        if type_params.len() == 0 [
+            end ""
+        ]
+        let out = "<"
+        let i = 0
+        let n = type_params.len()
+        while i < n [
+            if i > 0 [
+                out = out + ", "
+            ]
+            out = out + type_params[i].clone()
+            i = i + 1
+        ]
+        out = out + ">"
+        end out
+    ]
+
+    !!! Parytet z `_field_rust_type()` - jak `rust_type_name`, ale
+    !!! doklejajac `Box<...>`/`Option<Box<...>>` wokol pola oznaczonego
+    !!! w `boxed_fields`.
+    fun field_rust_type(self, owner_name: Str, field_name: Str, f_type: Option<TypeRef>) -> Str [
+        match f_type [
+            Some(ft) -> [
+                let key = owner_name + "::" + field_name
+                match self.boxed_fields.fetch(key) [
+                    Some(kind) -> [
+                        if kind == "option" [
+                            match ft.generic.clone() [
+                                Some(inner) -> [
+                                    end "Option<Box<" + rust_type_name(inner, self.sigs, self.current_type_params) + ">>"
+                                ]
+                                None -> [
+                                    end rust_type_name(ft, self.sigs, self.current_type_params)
+                                ]
+                            ]
+                        ]
+                        if kind == "direct" [
+                            end "Box<" + rust_type_name(ft, self.sigs, self.current_type_params) + ">"
+                        ]
+                        end rust_type_name(ft, self.sigs, self.current_type_params)
+                    ]
+                    None -> [
+                        end rust_type_name(ft, self.sigs, self.current_type_params)
+                    ]
+                ]
+            ]
+            None -> [
+                end "i64"
+            ]
+        ]
+    ]
+
+    fun struct_ctor_params(self, fields: List<Param>) -> Str [
+        let out = ""
+        let i = 0
+        let n = fields.len()
+        while i < n [
+            if i > 0 [
+                out = out + ", "
+            ]
+            let f = fields[i].clone()
+            let t = "i64"
+            match f.type_ref [
+                Some(ft) -> [
+                    t = rust_type_name(ft, self.sigs, self.current_type_params)
+                ]
+                None -> [
+                ]
+            ]
+            out = out + f.name + ": " + t
+            i = i + 1
+        ]
+        end out
+    ]
+
+    !!! Parytet z budowaniem `fields_init` w `gen_struct()` - kazde pole
+    !!! oznaczone w `boxed_fields` dostaje `Box::new(...)`/`.map(Box::new)`
+    !!! przy KONSTRUKCJI (uzytkownik `Nazwa(a, b)` podaje ZWYKLE,
+    !!! nie-boxowane wartosci - boxowanie dzieje sie WEWNATRZ `::new`).
+    fun struct_ctor_init(self, name: Str, fields: List<Param>) -> Str [
+        let out = ""
+        let i = 0
+        let n = fields.len()
+        while i < n [
+            if i > 0 [
+                out = out + ", "
+            ]
+            let f = fields[i].clone()
+            let key = name.clone() + "::" + f.name.clone()
+            match self.boxed_fields.fetch(key) [
+                Some(kind) -> [
+                    if kind == "option" [
+                        out = out + f.name.clone() + ": " + f.name + ".map(Box::new)"
+                    ] elif kind == "direct" [
+                        out = out + f.name.clone() + ": Box::new(" + f.name + ")"
+                    ] else [
+                        out = out + f.name
+                    ]
+                ]
+                None -> [
+                    out = out + f.name
+                ]
+            ]
+            i = i + 1
+        ]
+        end out
+    ]
+
+    !!! Parytet z `gen_struct()`: naglowek `#[derive(...)]` (bez
+    !!! `Default` dla generycznych/samo-referencyjnych - patrz
+    !!! `compute_no_default_structs`), pola (z auto-Box), i konstruktor
+    !!! pozycyjny `Nazwa(a, b)` -> `impl Nazwa { pub fn new(a, b) ->
+    !!! Self }`.
+    fun gen_struct(self, name: Str, fields: List<Param>, type_params: List<Str>) [
+        self.current_type_params = type_params.clone()
+        let gen_head = self.generic_head(type_params.clone())
+        let is_recursive = self.no_default_structs.contains(name.clone())
+        let derive = "#[derive(Debug, Clone, PartialEq)]"
+        if type_params.len() == 0 and not is_recursive [
+            derive = "#[derive(Debug, Clone, PartialEq, Default)]"
+        ]
+        self.emit(derive)
+        self.emit("pub struct " + name.clone() + gen_head.clone() + " {")
+        self.indent = self.indent + 1
+        let i = 0
+        let n = fields.len()
+        while i < n [
+            let f = fields[i].clone()
+            let hint = self.field_rust_type(name.clone(), f.name.clone(), f.type_ref)
+            self.emit("pub " + f.name + ": " + hint + ",")
+            i = i + 1
+        ]
+        self.indent = self.indent - 1
+        self.emit("}")
+        self.emit("")
+
+        let params = self.struct_ctor_params(fields.clone())
+        let fields_init = self.struct_ctor_init(name.clone(), fields)
+        self.emit("impl" + gen_head.clone() + " " + name.clone() + gen_head + " {")
+        self.indent = self.indent + 1
+        self.emit("pub fn new(" + params + ") -> Self {")
+        self.indent = self.indent + 1
+        self.emit(name + " { " + fields_init + " }")
+        self.indent = self.indent - 1
+        self.emit("}")
+        self.indent = self.indent - 1
+        self.emit("}")
+        self.emit("")
+        self.current_type_params = []
+    ]
+
+    fun variant_field_rust_type(self, owner_name: Str, variant_name: Str, idx: Int, t: TypeRef) -> Str [
+        let key = owner_name + "::" + variant_name + "#" + (idx as Str)
+        match self.boxed_fields.fetch(key) [
+            Some(kind) -> [
+                if kind == "option" [
+                    match t.generic.clone() [
+                        Some(inner) -> [
+                            end "Option<Box<" + rust_type_name(inner, self.sigs, self.current_type_params) + ">>"
+                        ]
+                        None -> [
+                            end rust_type_name(t, self.sigs, self.current_type_params)
+                        ]
+                    ]
+                ]
+                if kind == "direct" [
+                    end "Box<" + rust_type_name(t, self.sigs, self.current_type_params) + ">"
+                ]
+                end rust_type_name(t, self.sigs, self.current_type_params)
+            ]
+            None -> [
+                end rust_type_name(t, self.sigs, self.current_type_params)
+            ]
+        ]
+    ]
+
+    fun gen_enum(self, name: Str, variants: List<EnumVariant>, type_params: List<Str>) [
+        self.current_type_params = type_params.clone()
+        let gen_head = self.generic_head(type_params)
+        self.emit("#[derive(Debug, Clone, PartialEq)]")
+        self.emit("pub enum " + name.clone() + gen_head + " {")
+        self.indent = self.indent + 1
+        let i = 0
+        let n = variants.len()
+        while i < n [
+            let v = variants[i].clone()
+            if v.fields.len() > 0 [
+                let args = ""
+                let j = 0
+                let fn_ = v.fields.len()
+                while j < fn_ [
+                    if j > 0 [
+                        args = args + ", "
+                    ]
+                    args = args + self.variant_field_rust_type(name.clone(), v.name.clone(), j, v.fields[j].clone())
+                    j = j + 1
+                ]
+                self.emit(v.name + "(" + args + "),")
+            ] else [
+                self.emit(v.name + ",")
+            ]
+            i = i + 1
+        ]
+        self.indent = self.indent - 1
+        self.emit("}")
+        self.emit("")
+        self.current_type_params = []
+    ]
+
+    fun param_type_str(self, fun_name: Str, p: Param) -> Str [
+        match p.type_ref.clone() [
+            Some(pt) -> [
+                let base = rust_type_name(pt.clone(), self.sigs, self.current_type_params)
+                if self.is_refable_type(pt) [
+                    let mkey = fun_name + "::" + p.name.clone()
+                    if self.mut_params.contains(mkey) [
+                        end "&mut " + base
+                    ]
+                    end "&" + base
+                ]
+                end base
+            ]
+            None -> [
+                end "i64"
+            ]
+        ]
+    ]
+
+    !!! Parytet z `gen_fun()` - CZYSCI/USTAWIA `env_vars` na NOWO (nowa
+    !!! funkcja = nowy zasieg zmiennych, patrz uwaga o `env_vars` przy
+    !!! `CodeGen` wyzej), deklaruje parametry, i emituje sygnature z
+    !!! auto-`&`/`&mut` (`param_type_str`) + cialo (`gen_stmts`).
+    fun gen_fun(self, name: Str, params: List<Param>, ret_type: Option<TypeRef>, body: List<Stmt>, type_params: List<Str>) [
+        self.current_type_params = type_params.clone()
+        let gen_head = self.generic_head(type_params)
+        self.env_vars = dict()
+
+        let i = 0
+        let n = params.len()
+        while i < n [
+            let p = params[i].clone()
+            self.declare_env(p.name, p.type_ref)
+            i = i + 1
+        ]
+
+        let params_str = ""
+        let j = 0
+        while j < n [
+            let p2 = params[j].clone()
+            if j > 0 [
+                params_str = params_str + ", "
+            ]
+            params_str = params_str + p2.name.clone() + ": " + self.param_type_str(name.clone(), p2)
+            j = j + 1
+        ]
+
+        let ret = ""
+        match ret_type.clone() [
+            Some(rt) -> [
+                ret = " -> " + rust_type_name(rt, self.sigs, self.current_type_params)
+            ]
+            None -> [
+            ]
+        ]
+
+        self.current_ret_type = ret_type
+        self.emit("pub fn " + name + gen_head + "(" + params_str + ")" + ret + " {")
+        self.indent = self.indent + 1
+        let str_param_names: List<Str> = []
+        let k = 0
+        while k < n [
+            let pk = params[k].clone()
+            match pk.type_ref.clone() [
+                Some(pt) -> [
+                    if pt.name == "Str" [
+                        str_param_names.push(pk.name)
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+            k = k + 1
+        ]
+        self.char_cache_params = char_indexed_str_params(body, str_param_names, self.sigs)
+        let ci = 0
+        let cn = str_param_names.len()
+        while ci < cn [
+            let pname = str_param_names[ci].clone()
+            if self.char_cache_params.contains(pname.clone()) [
+                self.emit("let __hks_chars_" + pname.clone() + ": Vec<char> = " + pname.clone() + ".chars().collect();")
+            ]
+            ci = ci + 1
+        ]
+        self.gen_stmts(body)
+        self.indent = self.indent - 1
+        self.emit("}")
+        self.emit("")
+        self.current_type_params = []
+        self.current_ret_type = none()
+        self.char_cache_params = dict()
+    ]
+
+    !!! Parytet z `gen_method()` - jak `gen_fun`, ale pierwszy parametr
+    !!! `self` staje sie `&self`/`&mut self` (mutowalnosc z
+    !!! `method_mut_params`, klucz `"Struct::metoda::self"`), reszta
+    !!! parametrow uzywa tej samej logiki co wolne funkcje, tylko z
+    !!! kluczem `"Struct::metoda::param"` zamiast `"funkcja::param"`.
+    fun gen_method(self, struct_name: Str, m: Stmt) [
+        let name = fun_decl_name(m.clone())
+        let params = fun_decl_params(m.clone())
+        let ret_type = fun_decl_ret_type(m.clone())
+        let body = fun_decl_body(m)
+
+        self.env_vars = dict()
+        self.declare_env("self", some(TypeRef(struct_name.clone(), none(), none())))
+
+        let key_prefix = struct_name.clone() + "::" + name.clone() + "::"
+        let params_str = "&self"
+        if self.method_mut_params.contains(key_prefix.clone() + "self") [
+            params_str = "&mut self"
+        ]
+
+        let i = 0
+        let n = params.len()
+        while i < n [
+            let p = params[i].clone()
+            if p.name != "self" [
+                self.declare_env(p.name.clone(), p.type_ref.clone())
+                match p.type_ref.clone() [
+                    Some(pt) -> [
+                        let base = rust_type_name(pt.clone(), self.sigs, self.current_type_params)
+                        if self.is_refable_type(pt) [
+                            let kp: Str = key_prefix.clone()
+                            let pn: Str = p.name.clone()
+                            let mkey = kp + pn
+                            let prefix = "&"
+                            if self.method_mut_params.contains(mkey) [
+                                prefix = "&mut "
+                            ]
+                            params_str = params_str + ", " + p.name + ": " + prefix + base
+                        ] else [
+                            params_str = params_str + ", " + p.name + ": " + base
+                        ]
+                    ]
+                    None -> [
+                        params_str = params_str + ", " + p.name + ": i64"
+                    ]
+                ]
+            ]
+            i = i + 1
+        ]
+
+        let ret = ""
+        match ret_type.clone() [
+            Some(rt) -> [
+                ret = " -> " + rust_type_name(rt, self.sigs, self.current_type_params)
+            ]
+            None -> [
+            ]
+        ]
+
+        self.current_ret_type = ret_type
+        self.emit("pub fn " + name + "(" + params_str + ")" + ret + " {")
+        self.indent = self.indent + 1
+        self.gen_stmts(body)
+        self.indent = self.indent - 1
+        self.emit("}")
+        self.emit("")
+        self.current_ret_type = none()
+    ]
+
+    fun gen_impl(self, struct_name: Str, methods: List<Stmt>, type_params: List<Str>) [
+        self.current_type_params = type_params.clone()
+        let gen_head = self.generic_head(type_params)
+        self.emit("impl" + gen_head.clone() + " " + struct_name.clone() + gen_head + " {")
+        self.indent = self.indent + 1
+        let i = 0
+        let n = methods.len()
+        while i < n [
+            self.gen_method(struct_name.clone(), methods[i].clone())
+            i = i + 1
+        ]
+        self.indent = self.indent - 1
+        self.emit("}")
+        self.emit("")
+        self.current_type_params = []
+    ]
+
+    !!! Parytet z `gen_get_import()` - `use crate::<modul>::...;` dla
+    !!! `std`/`core`/`selfhost` i `crates` (prawdziwa zaleznosc Cargo,
+    !!! sama zaleznosc dopisywana do Cargo.toml przez `project.hcs`,
+    !!! jeszcze nieistniejacy - tu TYLKO `use`), komentarz-wyjasnienie
+    !!! dla `pypi` (dostepne tylko w `direct[]`) i `npm`/`jsr` (jeszcze
+    !!! w budowie).
+    !!! Parytet z `gen_include()` (codegen.py) - `include <sciezka>`
+    !!! zawsze glob-importuje (`use crate::module::*;`), bez `import
+    !!! <details>` (patrz `IncludeStmt` w ast_nodes.hcs).
+    fun gen_include(self, path: Str) [
+        let module = flat_include_module_name(path)
+        self.emit("use crate::" + module + "::*;")
+    ]
+
+    fun gen_get_import(self, source: Str, name: Str, version: Option<Str>, details: List<Str>) [
+        if source == "std" or source == "core" or source == "selfhost" or source == "virus" [
+            let module = flat_module_name(source, name.clone(), version)
+            if details.len() > 0 [
+                self.emit("use crate::" + module + "::{" + self.join_binds(details) + "};")
+            ] else [
+                self.emit("use crate::" + module + "::*;")
+            ]
+            end
+        ]
+        if source == "crates" [
+            if details.len() > 0 [
+                self.emit("use " + name.clone() + "::{" + self.join_binds(details) + "};")
+            ] else [
+                self.emit("use " + name + "::*;")
+            ]
+            end
+        ]
+        if source == "pypi" [
+            self.emit("// get <pypi:" + name + "> - dostepne wewnatrz bloku direct[ ... ] (interpreter Pythona), nie bezposrednio w kodzie Rust")
+            end
+        ]
+        if source == "npm" or source == "jsr" [
+            self.emit("// get <" + source + ":" + name + "> - pobierane przez 'virus install' do cache/libs/" + source + "/" + name + "/; integracja z uruchomieniem JS jest jeszcze w budowie, patrz docs/ROADMAP.md")
+            end
+        ]
+        self.emit("// get <" + source + ":" + name + "> - nieznane zrodlo, pomijam import")
+    ]
+
+    !!! Parytet z `gen_extern()` - deklaracja FFI: `#[link(name =
+    !!! "lib")] extern "C" { pub fn nazwa(...) -> Typ; }`.
+    fun gen_extern(self, lib: Str, name: Str, params: List<Param>, ret_type: Option<TypeRef>) [
+        let params_str = ""
+        let i = 0
+        let n = params.len()
+        while i < n [
+            if i > 0 [
+                params_str = params_str + ", "
+            ]
+            let p = params[i].clone()
+            let t = "i64"
+            match p.type_ref [
+                Some(pt) -> [
+                    t = rust_type_name(pt, self.sigs, self.current_type_params)
+                ]
+                None -> [
+                ]
+            ]
+            params_str = params_str + p.name + ": " + t
+            i = i + 1
+        ]
+        let ret = ""
+        match ret_type [
+            Some(rt) -> [
+                ret = " -> " + rust_type_name(rt, self.sigs, self.current_type_params)
+            ]
+            None -> [
+            ]
+        ]
+        self.emit("#[link(name = \"" + lib + "\")]")
+        self.emit("extern \"C\" {")
+        self.indent = self.indent + 1
+        self.emit("pub fn " + name + "(" + params_str + ")" + ret + ";")
+        self.indent = self.indent - 1
+        self.emit("}")
+        self.emit("")
+    ]
+
+    fun string_lit_value(self, e: Expr) -> Str [
+        let c = e.clone()
+        match c [
+            StringLit(value, is_doc) -> [
+                end value + ""
+            ]
+            _ -> [
+                end ""
+            ]
+        ]
+    ]
+
+    !!! Parytet z obsluga `LetStmt` (`is_const`) w `gen_toplevel()` -
+    !!! stala globalna. `Str` MUSI byc `&str` (nie `String`), bo `.
+    !!! to_string()` NIE jest funkcja `const` w Rust - stad wymog, ze
+    !!! wartosc MUSI byc doslownym literalem string (nie dowolnym
+    !!! wyrazeniem).
+    fun gen_const(self, name: Str, type_ref: Option<TypeRef>, value: Option<Expr>) [
+        let upper_name = str_to_upper(name)
+        let is_str_type = false
+        match type_ref.clone() [
+            Some(t) -> [
+                if t.name == "Str" [
+                    is_str_type = true
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        if is_str_type [
+            match value.clone() [
+                Some(v) -> [
+                    if self.expr_is_string_lit(v.clone()) [
+                        self.emit("pub const " + upper_name + ": &str = " + rust_string_literal(self.string_lit_value(v)) + ";")
+                        end
+                    ]
+                    log("[hackerc-self] codegen: stala globalna typu Str musi byc literalem string")
+                    end
+                ]
+                None -> [
+                ]
+            ]
+            end
+        ]
+        let hint = "i64"
+        match type_ref [
+            Some(t2) -> [
+                hint = rust_type_name(t2, self.sigs, self.current_type_params)
+            ]
+            None -> [
+            ]
+        ]
+        let value_rendered = "Default::default()"
+        match value [
+            Some(v2) -> [
+                value_rendered = self.gen_expr(v2)
+            ]
+            None -> [
+            ]
+        ]
+        self.emit("pub const " + upper_name + ": " + hint + " = " + value_rendered + ";")
+    ]
+
+    !!! Dysponent instrukcji NAJWYZSZEGO POZIOMU - parytet z
+    !!! `gen_toplevel()`. Obejmuje WSZYSTKO, co moze wystapic w
+    !!! `Program.body` (nie tylko `struct`/`enum`/`fun`/`impl` jak
+    !!! wczesniejsza, prostsza wersja `gen_program`'s petli).
+    fun gen_toplevel(self, node: Stmt) [
+        let s = node.clone()
+        match s [
+            UsingStmt(version) -> [
+                self.emit("// using <" + version + "> (wymagana wersja hackerc)")
+            ]
+            GetImportStmt(source, name, version, details) -> [
+                self.seen_real_toplevel_item = true
+                self.gen_get_import(source, name, version, details)
+            ]
+            IncludeStmt(path) -> [
+                self.seen_real_toplevel_item = true
+                self.gen_include(path)
+            ]
+            GcPragma(mode) -> [
+                self.emit("// gc:use::" + mode + " - Rust: brak GC, wlasnosc/pozyczanie zamiast tego")
+            ]
+            StructDecl(name, fields, type_params) -> [
+                self.seen_real_toplevel_item = true
+                self.gen_struct(name, fields, type_params)
+            ]
+            EnumDecl(name, variants, type_params) -> [
+                self.seen_real_toplevel_item = true
+                self.gen_enum(name, variants, type_params)
+            ]
+            ImplDecl(struct_name, methods, itype_params) -> [
+                self.seen_real_toplevel_item = true
+                self.gen_impl(struct_name, methods, itype_params)
+            ]
+            ExternFunDecl(lib, name, params, ret_type) -> [
+                self.seen_real_toplevel_item = true
+                self.gen_extern(lib, name, params, ret_type)
+            ]
+            FunDecl(fname, fparams, fret, fbody, fis_pub, ftype_params) -> [
+                self.seen_real_toplevel_item = true
+                self.gen_fun(fname, fparams, fret, fbody, ftype_params)
+            ]
+            LetStmt(cname, ctype, cvalue, cis_const) -> [
+                if cis_const [
+                    self.seen_real_toplevel_item = true
+                    self.gen_const(cname, ctype, cvalue)
+                ] else [
+                    log("[hackerc-self] codegen: 'let' (nie-const) niedozwolone na najwyzszym poziomie - tylko 'const'")
+                ]
+            ]
+            ExprStmt(expr) -> [
+                if self.expr_is_doc_string(expr.clone()) [
+                    self.emit_module_doc_comment(expr)
+                ] else [
+                    log("[hackerc-self] codegen: nieobslugiwane wyrazenie na najwyzszym poziomie")
+                ]
+            ]
+            _ -> [
+                log("[hackerc-self] codegen: nieobslugiwana instrukcja na najwyzszym poziomie (np. 'match'/'if'/'while' - dozwolone TYLKO wewnatrz cial funkcji)")
+            ]
+        ]
+    ]
+
+    !!! Komentarz dokumentacyjny modulu (`//!`) - TYLKO gdy jeszcze nie
+    !!! wyemitowano zadnego prawdziwego elementu (struct/enum/impl/fun/const/
+    !!! use) - w przeciwnym razie `//!` jest niepoprawnym Rustem (E0753,
+    !!! patrz komentarz przy polu `seen_real_toplevel_item`), wiec spada do
+    !!! zwyklego `//`. Parytet z `ExprStmt(StringLit)` na najwyzszym poziomie
+    !!! w `gen_toplevel()`.
+    fun emit_module_doc_comment(self, e: Expr) [
+        let c = e.clone()
+        match c [
+            StringLit(value, is_doc) -> [
+                if self.seen_real_toplevel_item [
+                    self.emit("// " + value)
+                ] else [
+                    self.emit("//! " + value)
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+    ]
+]
+
+!!! Konstruktor `CodeGen` z pustymi mapami "roboczymi" (`env_vars`/
+!!! `output`) i JUZ POLICZONYMI mapami "globalnymi" (sygnatury/Box/mut) -
+!!! parytet z `CodeGen.__init__`.
+!!! Konstruktor `CodeGen` z pustymi mapami "roboczymi" (`env_vars`/
+!!! `output`) i JUZ POLICZONYMI mapami "globalnymi" (sygnatury/Box/mut) -
+!!! parytet z `CodeGen.__init__`. `sigs.clone()` KONIECZNE (nie
+!!! kosmetyczne): `sigs: Signatures` jest PARAMETREM (struct, wiec
+!!! "refable" - zawsze `&Signatures` w Rust), a pole `CodeGen.sigs` jest
+!!! zwyklym, OWNED `Signatures` - podanie GOLEGO `sigs` (referencji) do
+!!! konstruktora bylo by niezgodnoscia typow (`&Signatures` vs
+!!! `Signatures`) - **bug znaleziony i naprawiony w TEJ sesji**, ten sam
+!!! rodzaj co `extra_variant_names.clone()` w typecheck.hcs (krok 5/N).
+fun new_codegen(sigs: Signatures, boxed_fields: Dict<Str, Str>, mut_params: Dict<Str, Bool>, method_mut_params: Dict<Str, Bool>, variant_arity: Dict<Str, Int>, no_default_structs: Dict<Str, Bool>, direct_blocks: Dict<Str, Str>) -> CodeGen [
+    let env_vars: Dict<Str, Option<TypeRef>> = dict()
+    end CodeGen(sigs.clone(), env_vars, variant_arity, boxed_fields, method_mut_params, mut_params, [], none(), [], 0, no_default_structs, false, direct_blocks, false, dict())
+]
+
+!!! Punkt wejscia - parytet z `CodeGen.gen_program()`. Liczy WSZYSTKIE
+!!! analizy (sygnatury, Box, auto-`&mut`, `no_default_structs`) RAZ, na
+!!! poczatku, potem przechodzi `prog.body` emitujac struct/enum/fun/impl
+!!! po kolei. Zwraca `List<Str>` (linie wygenerowanego Rusta) - CZYSTA
+!!! WARTOSC, nie napisany plik - laczenie WIELU plikow (naglowek
+!!! `use`/moduly) to zadanie `project.hcs` (jeszcze nieistniejacego).
+!!! Punkt wejscia - parytet z `CodeGen.gen_program()`. Liczy WSZYSTKIE
+!!! analizy (sygnatury, Box, auto-`&mut`, `no_default_structs`) RAZ, na
+!!! poczatku, potem przechodzi `prog.body` przez `gen_toplevel`
+!!! (obsluguje WSZYSTKIE formy najwyzszego poziomu, nie tylko
+!!! struct/enum/fun/impl). Doklada NAGLOWEK (komentarz +
+!!! `#![allow(...)]` + `use pyo3::prelude::*;` TYLKO jesli
+!!! `gen.needs_pyo3` - ustawiane przez `gen_direct` - patrz uwaga
+!!! projektowa przy `gen_direct` co do `direct_blocks` jako danych
+!!! WEJSCIOWYCH). Zwraca `List<Str>` (linie wygenerowanego Rusta) -
+!!! CZYSTA WARTOSC, nie napisany plik - laczenie WIELU plikow (moduly)
+!!! to zadanie `project.hcs` (jeszcze nieistniejacego).
+fun gen_program(prog: Program) -> List<Str> [
+    let sigs = collect_signatures(prog.clone())
+    let info = build_recursion_info(sigs.clone())
+    let mparams = compute_mut_params(prog.clone())
+    let empty_extra: Dict<Str, Bool> = dict()
+    let mmparams = compute_method_mut_params(prog.clone(), empty_extra)
+    let varity = build_variant_arity(sigs.clone())
+    let ndstructs = compute_no_default_structs(sigs.clone(), info.boxed_fields.clone())
+    let empty_direct_blocks: Dict<Str, Str> = dict()
+    let gen = new_codegen(sigs, info.boxed_fields, mparams, mmparams, varity, ndstructs, empty_direct_blocks)
+
+    let i = 0
+    let n = prog.body.len()
+    while i < n [
+        gen.gen_toplevel(prog.body[i].clone())
+        i = i + 1
+    ]
+
+    let header: List<Str> = ["// Plik wygenerowany automatycznie przez hackerc (HackerScript -> Rust).", "// NIE EDYTUJ RECZNIE - edytuj zrodlo .hcs i uruchom 'virus build' ponownie.", "#![allow(non_snake_case, unused_mut, dead_code)]"]
+    if gen.needs_pyo3 [
+        header.push("use pyo3::prelude::*;")
+    ]
+    header.push("")
+
+    let out: List<Str> = []
+    let hi = 0
+    let hn = header.len()
+    while hi < hn [
+        out.push(header[hi].clone())
+        hi = hi + 1
+    ]
+    let oi = 0
+    let on = gen.output.len()
+    while oi < on [
+        out.push(gen.output[oi].clone())
+        oi = oi + 1
+    ]
+    end out
+]
+
+!!! Demonstracyjne uzycie - `struct Node [ next: Node ]` (bezposrednia
+!!! samo-rekurencja, oczekuje "direct") i `struct A [ b: B ], struct B [
+!!! a: Option<A> ]` (POSREDNIA rekurencja przez dwa structy, jedna
+!!! krawedz powinna dostac "option").
+fun main() [
+    let node_fields: List<Param> = [Param("next", some(TypeRef("Node", none(), none())), none())]
+    let node_decl = StructDecl("Node", node_fields, [])
+
+    let a_fields: List<Param> = [Param("b", some(TypeRef("B", none(), none())), none())]
+    let a_decl = StructDecl("A", a_fields, [])
+    let b_fields: List<Param> = [Param("a", some(TypeRef("Option", some(TypeRef("A", none(), none())), none())), none())]
+    let b_decl = StructDecl("B", b_fields, [])
+
+    let prog = Program([node_decl, a_decl, b_decl])
+    let sigs = collect_signatures(prog)
+    let info = build_recursion_info(sigs)
+
+    log("Node::next boxed?", info.boxed_fields.contains("Node::next"))
+    log("A::b boxed?", info.boxed_fields.contains("A::b"))
+    log("B::a boxed?", info.boxed_fields.contains("B::a"))
+
+    !! Demonstracyjne uzycie CodeGen::gen_stmt - emituje cialo
+    !! `fun classify(n) [ let msg = "" if n > 0 [ msg = "dodatnie" ]
+    !! else [ msg = "niedodatnie" ] end msg ]` recznie zbudowane jako
+    !! List<Stmt>, i wypisuje wygenerowany tekst Rust linia po linii.
+    let body: List<Stmt> = [LetStmt("msg", none(), some(StringLit("", false)), false), IfStmt(BinOp(">", IdentExpr("n"), NumberLit("0")), [AssignStmt(IdentExpr("msg"), "=", StringLit("dodatnie", false))], [], some([AssignStmt(IdentExpr("msg"), "=", StringLit("niedodatnie", false))])), ReturnStmt(some(IdentExpr("msg")))]
+    let empty_sigs = collect_signatures(Program([]))
+    let empty_dict1: Dict<Str, Int> = dict()
+    let empty_dict2: Dict<Str, Str> = dict()
+    let empty_dict3: Dict<Str, Bool> = dict()
+    let empty_dict4: Dict<Str, Bool> = dict()
+    let empty_vars: Dict<Str, Option<TypeRef>> = dict()
+    let empty_dict5: Dict<Str, Bool> = dict()
+    let empty_dict6: Dict<Str, Str> = dict()
+    let gen = CodeGen(empty_sigs, empty_vars, empty_dict1, empty_dict2, empty_dict3, empty_dict4, [], some(TypeRef("Str", none(), none())), [], 0, empty_dict5, false, empty_dict6, false, dict())
+    gen.gen_stmts(body)
+
+    let i = 0
+    let n = gen.output.len()
+    while i < n [
+        log(gen.output[i])
+        i = i + 1
+    ]
+
+    !! Demonstracyjne uzycie CodeGen::gen_program - `struct Point [ x:
+    !! Int, y: Int ]` + `fun add_one_two() -> Int [ end 1 + 2 ]`,
+    !! calkowicie recznie zbudowane jako Program, PRZEPUSZCZONE PRZEZ
+    !! CALY gen_program (sygnatury -> Box -> auto-mut -> emisja) i
+    !! wypisane linia po linii - najblizszy tej sesji odpowiednik
+    !! "dziala od poczatku do konca" testu calego codegen.hcs.
+    let point_fields: List<Param> = [Param("x", some(TypeRef("Int", none(), none())), none()), Param("y", some(TypeRef("Int", none(), none())), none())]
+    let point_decl = StructDecl("Point", point_fields, [])
+    let sum_body: List<Stmt> = [ReturnStmt(some(BinOp("+", NumberLit("1"), NumberLit("2"))))]
+    let sum_fun = FunDecl("add_one_two", [], some(TypeRef("Int", none(), none())), sum_body, false, [])
+    let demo_prog = Program([point_decl, sum_fun])
+    let generated = gen_program(demo_prog)
+    let gi = 0
+    let gn = generated.len()
+    while gi < gn [
+        log(generated[gi])
+        gi = gi + 1
+    ]
+]
+
+!!! ## Stan tej sesji (patrz docs/ROADMAP.md - "krok 6/N, W PELNI ZAMKNIETY")
+!!!
+!!! `codegen.hcs` jest teraz W PELNI KOMPLETNY jako generator
+!!! POJEDYNCZEGO pliku `.hcs` -> Rust: `rust_type_name` +
+!!! `RecursionAnalyzer`/`build_recursion_info` (Box) + `MutTracker`/
+!!! `SelfCallTracker`/`compute_mut_params`/`compute_method_mut_params`
+!!! (auto-`&mut`, z punktem stalym) + `compute_no_default_structs`
+!!! (`#[derive(Default)]`) + `CodeGen` (struct: `sigs`/`env_vars`/
+!!! `variant_arity`/`boxed_fields`/`method_mut_params`/`mut_params`/
+!!! `current_type_params`/`current_ret_type`/`output`/`indent`/
+!!! `no_default_structs`/`needs_pyo3`/`direct_blocks`) + PELNE
+!!! `gen_expr`/`gen_stmt`/`gen_struct`/`gen_enum`/`gen_fun`/`gen_impl`/
+!!! `gen_method`/`gen_extern`/`gen_const`/`gen_get_import`/`gen_direct`
+!!! (PyO3)/`gen_toplevel`/`gen_program`. `gen_toplevel` obsluguje
+!!! WSZYSTKIE formy najwyzszego poziomu (nie tylko struct/enum/fun/impl -
+!!! DOPISANE: `using`/`get <...>`/`gc:use::`/`extern`/`const`/komentarz
+!!! dokumentacyjny modulu). `gen_program(prog: Program) -> List<Str>`
+!!! spina WSZYSTKO w JEDEN dzialajacy generator - liczy wszystkie
+!!! analizy raz, doklada NAGLOWEK pliku (`#![allow(...)]` + warunkowo
+!!! `use pyo3::prelude::*;`), potem przechodzi `prog.body`.
+!!!
+!!! **KRZYZOWO ZWERYFIKOWANY wobec PRAWDZIWEGO Pythonowego `hackerc`**
+!!! na rownowaznym programie (`struct Point [...]` + prosta `fun`) -
+!!! identyczny ksztalt wyjscia (patrz docs/ROADMAP.md po szczegoly).
+!!!
+!!! **CALKOWICIE NIE ZROBIONE (naleza do INNYCH, przyszlych modulow, nie
+!!! do tego pliku)**:
+!!! - Wyciaganie surowego tekstu `direct[]` ZE ZRODLA `.hcs` PRZED
+!!!   tokenizacja (`transpiler.py`/`_extract_direct_blocks`) - `gen_direct`
+!!!   w TYM pliku jest KOMPLETNE i czeka na `direct_blocks` jako dane
+!!!   wejsciowe, ktore dostarczy `transpiler.hcs` (przyszly krok).
+!!! - Wielo-plikowe skladanie/system modulow/Cargo.toml (`project.hcs`).
+!!!
+!!! ## Ograniczenia
+!!!
+!!! - `rust_type_name` nie ma prawdziwego `CodegenError` - `log`-uje i
+!!!   zwraca przyblizenie (ta sama filozofia co `expect` w parser.hcs).
+!!! - `RecursionInfo.boxed_fields` splaszczone do JEDNEGO `Dict<Str,Str>`
+!!!   (klucz laczy poziom struct+pole/enum+wariant#idx) zamiast
+!!!   Pythonowych dwoch osobnych, zagniezdzonych map - rownowazne
+!!!   informacyjnie, mniej wygodne w API.
+!!! - `compute_mut_params`/`compute_method_mut_params` splaszczone
+!!!   analogicznie (`Dict<Str,Bool>` z kluczem laczonym `"::"` zamiast
+!!!   Pythonowych `dict[str, set[str]]`).
+!!! - `MutTracker`/`SelfCallTracker` maja dodatkowe pole `order:
+!!!   List<Str>` (obok `Dict<Str,Bool>`) WYLACZNIE dlatego, ze ten
+!!!   bootstrap nie ma iteracji po Dict - Python zwraca zwykly `set`.
+!!! - `type_ref_generic`/`type_ref_generic2` (proba "zwrocenia" TypeRef
+!!!   wyciagnietego z Box) zostaly CALKOWICIE USUNIETE jako
+!!!   fundamentalnie niewykonalne w tym bootstrapie (patrz
+!!!   docs/ROADMAP.md) - zastapione `type_ref_generic_name`/
+!!!   `rust_type_name_of_generic`/`_of_generic2`.
+!!! - `CodeGen.env` NIE jest `Option<TypeEnv>` (jak pierwotnie w
+!!!   Pythonie) - splaszczone do `env_vars: Dict<Str, Option<TypeRef>>`
+!!!   BEZPOSREDNIO, z tego samego powodu co `FnChecker` w typecheck.hcs
+!!!   (`self.env.declare(...)` nie wymuszaloby `&mut self`).
+!!! - `gen_let_stmt`'s `skip_hint` implementuje TYLKO jeden z trzech
+!!!   warunkow oryginalu (`_contains_any`) - reszta wymaga infrastruktury
+!!!   z `project.hcs` (jeszcze nieistniejacego).
+!!! - Wielo-plikowe skladanie (naglowki `use`/system modulow) to
+!!!   zadanie `project.hcs` (kolejny krok) - `gen_program` obsluguje
+!!!   TYLKO pojedynczy plik.
+!!! - `extern_libs` (Set nazw bibliotek do polaczenia) z oryginalu NIE
+!!!   zostal przepisany - w Pythonie i tak nic z nim nie robi poza
+!!!   iteracja+`pass` (linki emitowane bezposrednio przy kazdym
+!!!   `ExternFunDecl` przez `gen_extern`), wiec pominiecie go jest
+!!!   nieszkodliwe (brak roznicy w zachowaniu).
+!!! - NIEPRZETESTOWANE na prawdziwym wejsciu w tym srodowisku (brak
+!!!   rustc) - zweryfikowane strukturalnie przez `hackerc check`/
+!!!   `build`, inspekcje wygenerowanego Rusta, I krzyzowe porownanie z
+!!!   PRAWDZIWYM Pythonowym `hackerc` na rownowaznym programie - patrz
+!!!   tests/test_hackerc.py.
