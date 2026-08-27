@@ -91,8 +91,17 @@ def _selfhost_module_file(bootstrap_root: Path, name: str, version: str | None) 
 
 def find_libs_root(start: Path) -> Path | None:
     """Szuka katalogu `libs/` (z podkatalogiem core/) zaczynajac od
-    `start` i idac w gore drzewa katalogow - tak jak virus szuka Virus.hk."""
-    d = start if start.is_dir() else start.parent
+    `start` i idac w gore drzewa katalogow - tak jak virus szuka Virus.hk.
+
+    NAPRAWA BUGA: `start` MUSI byc rozwiazane do sciezki BEZWZGLEDNEJ
+    (`.resolve()`) PRZED petla - dla wzglednej "golej" nazwy pliku bez
+    katalogu (np. `hackerc build cli.hcs`) `Path("cli.hcs").parent`
+    daje `Path(".")`, a `Path(".").parent` daje PONOWNIE `Path(".")`
+    (self-referencyjne dla nierozwiazanych sciezek wzglednych) - warunek
+    petli `d.parent == d` byl wiec PRAWDZIWY juz na starcie, konczac
+    szukanie po SPRAWDZENIU WYLACZNIE biezacego katalogu, bez
+    faktycznego wejscia w gore prawdziwego drzewa katalogow."""
+    d = (start if start.is_dir() else start.parent).resolve()
     while True:
         candidate = d / "libs"
         if candidate.is_dir() and (candidate / "core").is_dir():
@@ -104,8 +113,9 @@ def find_libs_root(start: Path) -> Path | None:
 
 def find_bootstrap_root(start: Path) -> Path | None:
     """Jak `find_libs_root`, ale szuka `bootstrap/hackerc-self/` - korzen
-    modulow dla `get <selfhost:...>` (patrz bootstrap/README.md)."""
-    d = start if start.is_dir() else start.parent
+    modulow dla `get <selfhost:...>` (patrz bootstrap/README.md).
+    Ta sama naprawa co `find_libs_root` - `.resolve()` PRZED petla."""
+    d = (start if start.is_dir() else start.parent).resolve()
     while True:
         candidate = d / "bootstrap" / "hackerc-self"
         if candidate.is_dir():
