@@ -1,0 +1,473 @@
+get <std:json> import <JsonValue::json_parse>
+get <std:http> import <http_get_checked>
+get <std:process> import <run_command_checked::command_succeeds>
+get <std:path> import <path_join>
+get <std:fs> import <create_dir_ok>
+get <std:string> import <str_contains::str_ends_with::str_starts_with::str_index_of>
+include <cache>
+include <manifest>
+include <progress>
+
+!!! `v.klucz` dla `v: JsonValue` bedace `JsonObject` (skrot laczacy
+!!! `manifest_as_map` + `manifest_find_entry` - te dwie funkcje operuja
+!!! generycznie na `JsonValue`, mimo ze zyja w `virus:manifest`).
+fun jv_field(v: JsonValue, key: Str) -> Option<JsonValue> [
+    match manifest_as_map(v) [
+        Some(entries) -> [
+            end manifest_find_entry(entries, key)
+        ]
+        None -> [
+            end none()
+        ]
+    ]
+]
+
+!!! `v.klucz` jako `Str`, jednym wywolaniem.
+fun jv_field_str(v: JsonValue, key: Str) -> Option<Str> [
+    match jv_field(v, key) [
+        Some(fv) -> [
+            end manifest_as_string(fv)
+        ]
+        None -> [
+            end none()
+        ]
+    ]
+]
+
+!!! Pobiera CALY tekst pod `url` przez `curl` (podproces) i zapisuje pod
+!!! `dest_file` - BINARNY-BEZPIECZNY odpowiednik `http_get` (ktore
+!!! obsluguje tylko UTF-8) - patrz uwaga na gorze pliku. Wysyla
+!!! opisowy `User-Agent` - crates.io (i inne rejestry) ODRZUCAJA (403)
+!!! zadania bez niego - udokumentowana polityka tych API, nie kaprys.
+fun curl_download(url: Str, dest_file: Str) -> Result<Str, Str> [
+    if not command_succeeds("curl", ["--version"]) [
+        end err("`virus install` wymaga zainstalowanego `curl` (pobieranie archiwow binarnych - patrz uwaga w install.hcs)")
+    ]
+    end run_command_checked("curl", ["-sL", "--fail", "-A", "virus-hackerscript/0.0.1 (+https://github.com/HackerOS-Linux-System/HackerScript)", "-o", dest_file.clone(), url.clone()])
+]
+
+!!! Rozpakowuje archiwum pobrane do `archive_file` do katalogu `dest`
+!!! (juz istniejacego) - `.tar.gz`/`.tgz` przez `tar`, `.zip`/`.whl`
+!!! przez `unzip`.
+fun extract_archive(archive_file: Str, dest: Str) -> Result<Str, Str> [
+    if str_ends_with(archive_file.clone(), ".zip") or str_ends_with(archive_file.clone(), ".whl") [
+        if not command_succeeds("unzip", ["-v"]) [
+            end err("`virus install` wymaga zainstalowanego `unzip` (rozpakowywanie .whl/.zip)")
+        ]
+        end run_command_checked("unzip", ["-o", "-q", archive_file.clone(), "-d", dest.clone()])
+    ]
+    if not command_succeeds("tar", ["--version"]) [
+        end err("`virus install` wymaga zainstalowanego `tar` (rozpakowywanie .tar.gz/.tgz/.crate)")
+    ]
+    end run_command_checked("tar", ["-xzf", archive_file.clone(), "-C", dest.clone()])
+]
+
+!!! `curl_download` + `extract_archive` + sprzatanie pliku tymczasowego
+!!! - wspolny ostatni krok kazdego `install_*`.
+fun download_and_extract(url: Str, dest: Str, archive_ext: Str) -> Result<Str, Str> [
+    let tmp_file = dest.clone() + "/.download" + archive_ext
+    curl_download(url, tmp_file.clone())?
+    let result = extract_archive(tmp_file.clone(), dest)
+    match run_command("rm", ["-f", tmp_file]) [
+        Ok(_v) -> [
+        ]
+        Err(_e) -> [
+        ]
+    ]
+    end result
+]
+
+!! ---- pypi: bezposrednio przez PyPI JSON API, bez `pip` --------------------
+
+!!! Wybiera najlepszy plik z listy `urls` (odpowiedz PyPI JSON API,
+!!! pole `urls`): preferuje wheel `py3-none-any`, potem dowolny wheel,
+!!! potem sdist - parytet z lancuchem `.find().or_else().or_else()`
+!!! (Rust).
+fun pypi_choose_file(urls: List<JsonValue>) -> Option<JsonValue> [
+    let n = urls.len()
+    let i = 0
+    while i < n [
+        let f = urls[i].clone()
+        let is_wheel = false
+        match jv_field_str(f.clone(), "packagetype") [
+            Some(pt) -> [
+                is_wheel = pt == "bdist_wheel"
+            ]
+            None -> [
+            ]
+        ]
+        if is_wheel [
+            match jv_field_str(f.clone(), "filename") [
+                Some(fname) -> [
+                    if str_contains(fname, "py3-none-any") [
+                        end some(f)
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        i = i + 1
+    ]
+    let i2 = 0
+    while i2 < n [
+        let f2 = urls[i2].clone()
+        match jv_field_str(f2.clone(), "packagetype") [
+            Some(pt2) -> [
+                if pt2 == "bdist_wheel" [
+                    end some(f2)
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        i2 = i2 + 1
+    ]
+    let i3 = 0
+    while i3 < n [
+        let f3 = urls[i3].clone()
+        match jv_field_str(f3.clone(), "packagetype") [
+            Some(pt3) -> [
+                if pt3 == "sdist" [
+                    end some(f3)
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        i3 = i3 + 1
+    ]
+    end none()
+]
+
+fun install_pypi(dest: Str, name: Str, version: Option<Str>) -> Result<Str, Str> [
+    let api_url = "https://pypi.org/pypi/" + name.clone() + "/json"
+    match version.clone() [
+        Some(v) -> [
+            api_url = "https://pypi.org/pypi/" + name.clone() + "/" + v + "/json"
+        ]
+        None -> [
+        ]
+    ]
+    let body = http_get_checked(api_url)?
+    let parsed = json_parse(body)?
+
+    let urls: List<JsonValue> = []
+    match jv_field(parsed, "urls") [
+        Some(uv) -> [
+            match manifest_as_array(uv) [
+                Some(items) -> [
+                    urls = items
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        None -> [
+        ]
+    ]
+    if urls.len() == 0 [
+        end err("PyPI nie ma zadnych plikow do pobrania dla " + name)
+    ]
+
+    let chosen = pypi_choose_file(urls)
+    match chosen [
+        Some(f) -> [
+            let filename = ""
+            match jv_field_str(f.clone(), "filename") [
+                Some(fn2) -> [
+                    filename = fn2
+                ]
+                None -> [
+                ]
+            ]
+            let file_url = ""
+            match jv_field_str(f, "url") [
+                Some(u) -> [
+                    file_url = u
+                ]
+                None -> [
+                ]
+            ]
+            if file_url.len() == 0 [
+                end err("PyPI: brakuje 'url' w wybranym pliku dla " + name)
+            ]
+            let ext = ".tar.gz"
+            if str_ends_with(filename, ".whl") [
+                ext = ".zip"
+            ]
+            end download_and_extract(file_url, dest, ext)
+        ]
+        None -> [
+            end err("brak wspieranego formatu paczki dla " + name + " (ani wheel, ani sdist)")
+        ]
+    ]
+]
+
+!! ---- crates: bezposrednio przez crates.io API, bez `cargo` ----------------
+
+fun install_crates(dest: Str, name: Str, version: Option<Str>) -> Result<Str, Str> [
+    let api_url = "https://crates.io/api/v1/crates/" + name.clone()
+    let body = http_get_checked(api_url)?
+    let parsed = json_parse(body)?
+
+    let versions: List<JsonValue> = []
+    match jv_field(parsed, "versions") [
+        Some(vv) -> [
+            match manifest_as_array(vv) [
+                Some(items) -> [
+                    versions = items
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        None -> [
+        ]
+    ]
+    if versions.len() == 0 [
+        end err("crates.io: " + name + " nie ma zadnych wersji")
+    ]
+
+    let dl_path = ""
+    match version.clone() [
+        Some(v) -> [
+            let i = 0
+            let n = versions.len()
+            let found = false
+            while i < n and not found [
+                let ver = versions[i].clone()
+                match jv_field_str(ver.clone(), "num") [
+                    Some(num) -> [
+                        if num == v [
+                            match jv_field_str(ver, "dl_path") [
+                                Some(dp) -> [
+                                    dl_path = dp
+                                ]
+                                None -> [
+                                ]
+                            ]
+                            found = true
+                        ]
+                    ]
+                    None -> [
+                    ]
+                ]
+                i = i + 1
+            ]
+            if not found [
+                end err("crates.io: brak wersji " + v + " dla " + name)
+            ]
+        ]
+        None -> [
+            match jv_field_str(versions[0].clone(), "dl_path") [
+                Some(dp2) -> [
+                    dl_path = dp2
+                ]
+                None -> [
+                ]
+            ]
+        ]
+    ]
+    if dl_path.len() == 0 [
+        end err("crates.io: brak 'dl_path' dla " + name)
+    ]
+
+    end download_and_extract("https://crates.io" + dl_path, dest, ".tar.gz")
+]
+
+!! ---- npm/jsr: bezposrednio przez registry API, bez `npm`/`pnpm`/`jsr` -----
+
+!!! `registry_base` (np. `https://registry.npmjs.org`) + `name` -
+!!! wspolna logika npm-kompatybilnych rejestrow (npm SAM i JSR, ktore
+!!! publikuje rowniez pod zgodnym z npm endpointem) - parytet z
+!!! `install_from_npm_registry`.
+fun install_from_npm_registry(registry_base: Str, dest: Str, name: Str, version: Option<Str>) -> Result<Str, Str> [
+    let api_url = registry_base + "/" + name.clone()
+    let body = http_get_checked(api_url)?
+    let parsed = json_parse(body)?
+
+    let resolved_version = ""
+    match version.clone() [
+        Some(v) -> [
+            resolved_version = v
+        ]
+        None -> [
+            match jv_field(parsed.clone(), "dist-tags") [
+                Some(dt) -> [
+                    match jv_field_str(dt, "latest") [
+                        Some(latest) -> [
+                            resolved_version = latest
+                        ]
+                        None -> [
+                        ]
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+            if resolved_version.len() == 0 [
+                end err(name + ": brak tagu 'latest' w odpowiedzi rejestru")
+            ]
+        ]
+    ]
+
+    let tarball = ""
+    match jv_field(parsed, "versions") [
+        Some(versions_v) -> [
+            match jv_field(versions_v, resolved_version.clone()) [
+                Some(entry) -> [
+                    match jv_field(entry, "dist") [
+                        Some(dist) -> [
+                            match jv_field_str(dist, "tarball") [
+                                Some(tb) -> [
+                                    tarball = tb
+                                ]
+                                None -> [
+                                ]
+                            ]
+                        ]
+                        None -> [
+                        ]
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        None -> [
+        ]
+    ]
+    if tarball.len() == 0 [
+        end err(name + ": brak wersji " + resolved_version + " w rejestrze")
+    ]
+
+    end download_and_extract(tarball, dest, ".tar.gz")
+]
+
+fun install_npm(dest: Str, name: Str, version: Option<Str>) -> Result<Str, Str> [
+    end install_from_npm_registry("https://registry.npmjs.org", dest, name, version)
+]
+
+!!! Pakiety JSR maja postac `@scope/nazwa`; npm-kompatybilny endpoint
+!!! JSR uzywa notacji `@jsr/scope__nazwa` (podkreslniki zamiast `/`).
+fun jsr_to_npm_compat_name(name: Str) -> Result<Str, Str> [
+    if not str_starts_with(name.clone(), "@") [
+        end err("get <jsr:" + name + "> - pakiety JSR musza byc w formacie @scope/nazwa")
+    ]
+    let rest = name.slice(1, name.len())
+    match str_index_of(rest.clone(), "/") [
+        Some(slash) -> [
+            let scope = rest.slice(0, slash)
+            let pkg = rest.slice(slash + 1, rest.len())
+            end ok("@jsr/" + scope + "__" + pkg)
+        ]
+        None -> [
+            end err("get <jsr:" + name + "> - oczekiwano formatu @scope/nazwa")
+        ]
+    ]
+]
+
+fun install_jsr(dest: Str, name: Str, version: Option<Str>) -> Result<Str, Str> [
+    let npm_compat_name = jsr_to_npm_compat_name(name)?
+    end install_from_npm_registry("https://npm.jsr.io", dest, npm_compat_name, version)
+]
+
+!! ---- Virus.hk (format .hk - patrz hk.hcs/manifest.hcs) -------------------
+
+!!! Czy zaleznosc `source:name` jest juz zapisana w tekscie manifestu
+!!! (w ktorejkolwiek notacji: kropkowej `-> source.name` albo
+!!! zagniezdzonej `--> name`) - parytet z dwoma warunkami `.contains()`
+!!! w oryginale.
+fun install_dotted_key_present(text: Str, source: Str, name: Str) -> Bool [
+    end str_contains(text.clone(), "-> " + source + "." + name + " ") or str_contains(text, "--> " + name + " ")
+]
+
+!!! Dopisuje `-> <zrodlo>.<nazwa> => "<wersja>"` pod `[dependencies]` w
+!!! `Virus.hk` (tworzac sekcje, jesli brak) - NIC nie robi (zwraca `Ok`),
+!!! jesli zaleznosc juz tam jest w ktorejkolwiek notacji.
+fun install_update_manifest(project_root: Str, source: Str, name: Str, version: Option<Str>) -> Result<Str, Str> [
+    let manifest_path = path_join(project_root, "Virus.hk")
+    let text = read_file(manifest_path.clone())?
+    let ver = "*"
+    match version [
+        Some(v) -> [
+            ver = v
+        ]
+        None -> [
+        ]
+    ]
+
+    if install_dotted_key_present(text.clone(), source.clone(), name.clone()) [
+        end ok("zaleznosc " + source + ":" + name + " jest juz w Virus.hk")
+    ]
+
+    let insertion = "-> " + source + "." + name + " => \"" + ver + "\"\n"
+    let new_text = ""
+    if str_contains(text.clone(), "[dependencies]") [
+        match str_index_of(text.clone(), "[dependencies]") [
+            Some(pos) -> [
+                let after = text.slice(pos, text.len())
+                match str_index_of(after.clone(), "\n") [
+                    Some(nl) -> [
+                        let line_end = pos + nl + 1
+                        new_text = text.slice(0, line_end) + insertion + text.slice(line_end, text.len())
+                    ]
+                    None -> [
+                        new_text = text + "\n" + insertion
+                    ]
+                ]
+            ]
+            None -> [
+                new_text = text + "\n[dependencies]\n" + insertion
+            ]
+        ]
+    ] else [
+        new_text = text + "\n[dependencies]\n" + insertion
+    ]
+
+    write_file(manifest_path, new_text)?
+    end ok("dopisano " + source + ":" + name + " (" + ver + ") do Virus.hk")
+]
+
+!! ---- glowny punkt wejscia -------------------------------------------------
+
+!!! `virus install <zrodlo> <nazwa> [wersja]`. `std`/`core` sa czescia
+!!! dystrybucji HackerScript - nic do pobrania. Zwraca sciezke docelowa
+!!! (`Ok`) albo opis bledu.
+fun cmd_install_run(project_root: Str, source: Str, name: Str, version: Option<Str>) -> Result<Str, Str> [
+    let cache = cache_dirs_for_project(project_root.clone())
+    cache_ensure_all(cache.clone())
+
+    progress_step(1, 1, "pobieranie " + source.clone() + ":" + name.clone())
+
+    let dest = cache_lib_path(cache, source.clone(), name.clone())
+    if not create_dir_ok(dest.clone()) [
+        end err("nie mozna utworzyc " + dest)
+    ]
+
+    if source == "std" or source == "core" [
+        progress_success(source.clone() + ":" + name.clone() + " jest czescia dystrybucji HackerScript (libs/" + source + ") - nic do pobrania")
+        end ok(dest)
+    ] elif source == "pypi" [
+        install_pypi(dest.clone(), name.clone(), version.clone())?
+    ] elif source == "crates" [
+        install_crates(dest.clone(), name.clone(), version.clone())?
+    ] elif source == "npm" [
+        install_npm(dest.clone(), name.clone(), version.clone())?
+    ] elif source == "jsr" [
+        install_jsr(dest.clone(), name.clone(), version.clone())?
+    ] else [
+        end err("nieznane zrodlo zaleznosci '" + source + "' (oczekiwano pypi/crates/npm/jsr/std/core)")
+    ]
+
+    progress_success("zainstalowano " + source.clone() + ":" + name.clone() + " -> " + dest)
+    match install_update_manifest(project_root, source, name, version) [
+        Ok(_msg) -> [
+        ]
+        Err(e) -> [
+            progress_error("zainstalowano pliki, ale nie udalo sie zaktualizowac Virus.hk: " + e)
+        ]
+    ]
+    end ok(dest)
+]
