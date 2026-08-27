@@ -1,0 +1,158 @@
+include <cache>
+include <manifest>
+include <hackerc_bridge>
+include <progress>
+get <std:path> import <path_join::path_basename>
+
+!!! Warianty nazwane z prefiksem `Target*`, zeby nie kolidowaly z
+!!! nazwami wariantow innych modulow (patrz uwaga w json.hcs o
+!!! globalnej unikalnosci nazw wariantow).
+enum BuildTarget [
+    TargetDefault,
+    TargetRelease,
+    TargetLibrary,
+    TargetWasm,
+    TargetJar
+]
+
+struct BuildOptions [
+    target: BuildTarget,
+    !! Jesli podano `virus build <plik.hcs>` - zbuduj TYLKO ten plik
+    !! jako entry point, ignorujac [build].entry z Virus.hk (szybka
+    !! iteracja).
+    single_file: Option<Str>
+]
+
+fun build_target_name(t: BuildTarget) -> Str [
+    match t [
+        TargetDefault -> [
+            end "debug"
+        ]
+        TargetRelease -> [
+            end "release"
+        ]
+        TargetLibrary -> [
+            end "library (.so/.rlib/.a)"
+        ]
+        TargetWasm -> [
+            end "wasm"
+        ]
+        TargetJar -> [
+            end "jar"
+        ]
+    ]
+]
+
+!!! Jak `hackerc_resolve`, ale przy niepowodzeniu probuje
+!!! `hackerc_download` (ktore dzis ZAWSZE zwraca Err - patrz
+!!! hackerc_bridge.hcs) - parytet z `ensure_hackerc` w oryginale.
+fun build_ensure_hackerc(cache: CacheDirs, version: Str) -> Result<Str, Str> [
+    match hackerc_resolve(cache.clone(), version.clone()) [
+        Ok(path) -> [
+            end ok(path)
+        ]
+        Err(_e) -> [
+            progress_info("pobieranie hackerc " + version.clone() + "...")
+            end hackerc_download(cache, version)
+        ]
+    ]
+]
+
+!!! Ostrzega (NIE blokuje builda) o zaleznosciach z `[dependencies]`,
+!!! ktore nie sa jeszcze pobrane do `cache/libs/` - `std`/`core`/`crates`
+!!! nie wymagaja `virus install` (odpowiednio: wbudowane w kompilator,
+!!! albo prawdziwa zaleznosc Cargo dopisywana bezposrednio do Cargo.toml
+!!! przez hackerc) - parytet z `install_missing_dependencies`.
+fun build_warn_missing_dependencies(cache: CacheDirs, manifest: Manifest) [
+    let i = 0
+    let n = manifest.dependencies.len()
+    while i < n [
+        let dep = manifest.dependencies[i].clone()
+        let dest = cache_lib_path(cache.clone(), dep.source.clone(), dep.name.clone())
+        let already_ok = path_exists(dest) or dep.source == "std" or dep.source == "core" or dep.source == "crates"
+        if not already_ok [
+            progress_warn("zaleznosc " + dep.source.clone() + ":" + dep.name.clone() + " nie jest jeszcze pobrana - uruchom `virus install " + dep.source + " " + dep.name + "`")
+        ]
+        i = i + 1
+    ]
+]
+
+!!! Krok 4-5 potoku (kompilacja + kopia binarki) - wspolny dla
+!!! `TargetDefault`/`TargetRelease` (rozniacych sie tylko `--release`).
+fun build_compile_and_copy(cache: CacheDirs, crate_dir: Str, name: Str, release: Bool) -> Result<Str, Str> [
+    progress_step(2, 2, "kompilacja (cargo build)")
+    let built = hackerc_compile_crate(crate_dir, name, release)?
+    let dest = path_join(cache.build, path_basename(built.clone()))
+    match copy_file(built, dest.clone()) [
+        Ok(_v) -> [
+        ]
+        Err(e) -> [
+            end err("nie mozna skopiowac zbudowanej binarki: " + e)
+        ]
+    ]
+    progress_success("zbudowano " + dest.clone())
+    end ok(dest)
+]
+
+!!! Caly potok - zwraca sciezke do finalnej binarki (`cache/build/...`),
+!!! albo `Err` z opisem bledu (parytet z `run` w oryginale, ale
+!!! zwracajace wynik zamiast tylko `Ok(())`/wyjatku).
+fun cmd_build_run(project_root: Str, opts: BuildOptions) -> Result<Str, Str> [
+    let cache = cache_dirs_for_project(project_root.clone())
+    cache_ensure_all(cache.clone())
+
+    let manifest = parse_manifest_file(path_join(project_root.clone(), "Virus.hk"))?
+    let version = DEFAULT_HACKERC_VERSION.to_string()
+    match manifest.package.lang_using.clone() [
+        Some(u) -> [
+            version = u
+        ]
+        None -> [
+        ]
+    ]
+
+    progress_header("Budowanie " + manifest.package.name.clone() + " v" + manifest.package.version.clone() + " (" + build_target_name(opts.target.clone()) + ")")
+
+    let hackerc_bin = build_ensure_hackerc(cache.clone(), version)?
+
+    let entry = ""
+    match opts.single_file.clone() [
+        Some(f) -> [
+            entry = path_join(project_root.clone(), f)
+        ]
+        None -> [
+            entry = path_join(project_root.clone(), manifest.build.entry.clone())
+        ]
+    ]
+    if not path_exists(entry.clone()) [
+        end err("nie znaleziono pliku wejsciowego " + entry + " ([build].entry w Virus.hk)")
+    ]
+
+    build_warn_missing_dependencies(cache.clone(), manifest.clone())
+
+    let crate_dir = path_join(cache.build.clone(), "crate")
+    if dir_exists(crate_dir.clone()) [
+        remove_dir_all(crate_dir.clone())
+    ]
+
+    progress_step(1, 2, "generowanie crate'a Rust (hackerc build)")
+    hackerc_build_crate(hackerc_bin, entry, crate_dir.clone(), manifest.package.name.clone())?
+
+    match opts.target [
+        TargetDefault -> [
+            end build_compile_and_copy(cache, crate_dir, manifest.package.name, false)
+        ]
+        TargetRelease -> [
+            end build_compile_and_copy(cache, crate_dir, manifest.package.name, true)
+        ]
+        TargetLibrary -> [
+            end err("`virus build --library` (.so/.rlib/.a) wymaga zmiany [[bin]] na [lib] w wygenerowanym Cargo.toml - nie zaimplementowane, patrz docs/ROADMAP.md")
+        ]
+        TargetWasm -> [
+            end err("`virus build --wasm` wymaga targetu wasm32-unknown-unknown i wasm-bindgen - nie zaimplementowane, patrz docs/ROADMAP.md")
+        ]
+        TargetJar -> [
+            end err("`virus build --jar` nie jest jeszcze zaimplementowane, patrz docs/ROADMAP.md")
+        ]
+    ]
+]
