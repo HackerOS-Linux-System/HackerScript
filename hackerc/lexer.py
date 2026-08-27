@@ -73,34 +73,27 @@ class LexError(Exception):
 
 
 def strip_comments(source: str) -> str:
-    """Usuwa komentarze != ... =! (wieloliniowe) zamieniajac je na
+    """Usuwa komentarze !> ... <! (wieloliniowe) zamieniajac je na
     puste linie (zeby numery linii sie zgadzaly).
 
-    UWAGA: `!=` jest TEZ operatorem nierownosci (a != b). Rozstrzygamy
-    po kontekscie: jesli znak bezposrednio przed `!=` moze konczyc
-    wyrazenie (litera/cyfra/`_`/`)`/`]`/cudzyslow), to operator - nie
-    ruszamy go tutaj, zostawiamy tokenizerowi. W przeciwnym razie (biala
-    spacja, poczatek pliku, inny operator) to otwarcie komentarza.
+    Skladnia (patrz docs/SYNTAX.md): `!!` komentarz zwykly, `!!!`
+    komentarz dokumentacyjny (oba jednoliniowe), `!>...<!` wieloliniowy.
+    `!=` to WYLACZNIE operator nierownosci (nigdy komentarz) - odkad
+    komentarze wieloliniowe otwiera `!>` (nie `!=` jak wczesniej), nie
+    ma juz zadnej dwuznacznosci miedzy `!=` a otwarciem komentarza, wiec
+    (w odroznieniu od wczesniejszej wersji) NIE trzeba tu heurystyki
+    odgadujacej czy `!=` "wyglada jak operator".
 
-    Zanim ten heurystyczny test w ogole sie uruchomi, POMIJAMY W CALOSCI
-    (kopiujac tekst 1:1, bez interpretacji) stringi (`"..."`/`'...'`) i
-    komentarze jednoliniowe/dokumentacyjne (`!`/`!!` do konca linii) -
-    bez tego `!=` WEWNATRZ stringa albo WEWNATRZ TEKSTU takiego
-    komentarza (np. dokumentacja opisujaca operator `!=`) bylo blednie
-    rozpoznawane jako otwarcie komentarza wieloliniowego, psujac caly
-    dalszy plik. Bug znaleziony przy pisaniu
-    bootstrap/hackerc-self/expr_parser.hcs - patrz docs/ROADMAP.md."""
-    _EXPR_END_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_)]\"'")
-
-    def _looks_like_operator(pos: int) -> bool:
-        """Cofa sie przez spacje/taby (nie newline) szukajac poprzedniego
-        nie-bialego znaku - `x != y` ma spacje wokol operatora, wiec samo
-        sprawdzenie source[pos-1] by nie wystarczylo."""
-        k = pos - 1
-        while k >= 0 and source[k] in " \t":
-            k -= 1
-        return k >= 0 and source[k] in _EXPR_END_CHARS
-
+    Zanim jakikolwiek test na `!` w ogole sie uruchomi, POMIJAMY W
+    CALOSCI (kopiujac tekst 1:1, bez interpretacji) stringi
+    (`"..."`/`'...'`) i komentarze jednoliniowe/dokumentacyjne (`!!`/
+    `!!!` do konca linii) - bez tego `!>`/`<!` WEWNATRZ stringa albo
+    WEWNATRZ TEKSTU takiego komentarza (np. dokumentacja opisujaca
+    sklada komentarzy, tak jak ten docstring) bylby blednie rozpoznany
+    jako (nie)otwarcie komentarza wieloliniowego, psujac caly dalszy
+    plik. Ten sam bug (dla starej skladni `!=`/`=!`) zostal znaleziony
+    przy pisaniu bootstrap/hackerc-self/expr_parser.hcs - patrz
+    docs/ROADMAP.md."""
     out = []
     i = 0
     n = len(source)
@@ -109,8 +102,8 @@ def strip_comments(source: str) -> str:
         c = source[i]
 
         # String literal - kopiuj 1:1 (z escape'ami) az do zamykajacego
-        # cudzyslowu, zeby '!=' WEWNATRZ stringa nigdy nie trafilo do
-        # testu ponizej.
+        # cudzyslowu, zeby '!>'/'<!' WEWNATRZ stringa nigdy nie trafilo
+        # do testu ponizej.
         if c == '"' or c == "'":
             quote = c
             j = i + 1
@@ -125,13 +118,12 @@ def strip_comments(source: str) -> str:
             i = j
             continue
 
-        # '!' NIE po ktorym nastepuje '=' - to '!' albo '!!' (komentarz
-        # jednoliniowy/dokumentacyjny), kopiuj do konca linii 1:1 bez
-        # dalszej interpretacji (dokladnie tak jak tokenizer sam by go
-        # obsluzyl) - inaczej '!=' w TRESCI takiego komentarza (np. w
-        # dokumentacji opisujacej ten sam operator) bylby blednie
-        # zinterpretowany ponizej.
-        if c == "!" and (i + 1 >= n or source[i + 1] != "="):
+        # '!!' lub '!!!' - komentarz jednoliniowy/dokumentacyjny, kopiuj
+        # RAW do konca linii bez dalszej interpretacji (sprawdzane PRZED
+        # '!>' ponizej - inaczej TRESC takiego komentarza zawierajaca
+        # '!>'/'<!' zostalaby blednie potraktowana jako prawdziwe
+        # otwarcie/zamkniecie komentarza wieloliniowego).
+        if c == "!" and i + 1 < n and source[i + 1] == "!":
             j = i
             while j < n and source[j] != "\n":
                 j += 1
@@ -139,16 +131,18 @@ def strip_comments(source: str) -> str:
             i = j
             continue
 
-        if source[i : i + 2] == "!=" and not _looks_like_operator(i):
+        # '!>' ... '<!' - komentarz wieloliniowy.
+        if source[i : i + 2] == "!>":
             start_line = line
-            j = source.find("=!", i + 2)
+            j = source.find("<!", i + 2)
             if j == -1:
-                raise LexError("niezamkniety komentarz wieloliniowy != ... =!", start_line)
+                raise LexError("niezamkniety komentarz wieloliniowy !> ... <!", start_line)
             block = source[i:j]
             line += block.count("\n")
             out.append("\n" * block.count("\n"))
             i = j + 2
             continue
+
         out.append(source[i])
         if source[i] == "\n":
             line += 1
@@ -183,25 +177,22 @@ def tokenize(source: str) -> list[Token]:
             i += 1
             continue
 
-        # !! doc comment (do konca linii)
+        # !!! doc comment (do konca linii)
+        if c == "!" and peek(1) == "!" and peek(2) == "!":
+            j = i + 3
+            while j < n and source[j] != "\n":
+                j += 1
+            tokens.append(Token(TokKind.DOC_COMMENT, source[i + 3 : j].strip(), line, col))
+            i = j
+            continue
+
+        # !! komentarz jednoliniowy (do konca linii). `!=` (operator
+        # nierownosci) NIE trafia tutaj, bo peek(1) != "!" dla "!=".
         if c == "!" and peek(1) == "!":
             j = i + 2
             while j < n and source[j] != "\n":
                 j += 1
-            tokens.append(Token(TokKind.DOC_COMMENT, source[i + 2 : j].strip(), line, col))
-            i = j
-            continue
-
-        # ! komentarz jednoliniowy (do konca linii) - ale NIE gdy nastepny
-        # znak to '=' (wtedy to operator '!=' - nierownosc - albo pozostalosc
-        # po komentarzu wieloliniowym, ktory strip_comments juz wyciela
-        # PRZED wywolaniem tokenize(); jesli tu nadal widzimy '!=', to na
-        # pewno operator, nie komentarz).
-        if c == "!" and peek(1) != "=":
-            j = i + 1
-            while j < n and source[j] != "\n":
-                j += 1
-            tokens.append(Token(TokKind.LINE_COMMENT, source[i + 1 : j].strip(), line, col))
+            tokens.append(Token(TokKind.LINE_COMMENT, source[i + 2 : j].strip(), line, col))
             i = j
             continue
 
