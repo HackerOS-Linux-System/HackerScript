@@ -1,0 +1,31 @@
+fun progress_header(text: Str) [
+    log("==>", text)
+]
+
+fun progress_info(text: Str) [
+    log("info:", text)
+]
+
+fun progress_warn(text: Str) [
+    log("uwaga:", text)
+]
+
+!!! Na stderr (parytet z `eprintln!` w oryginalnym Rust).
+fun progress_error(text: Str) [
+    elog("blad:", text)
+]
+
+fun progress_success(text: Str) [
+    log("ok:", text)
+]
+
+!!! Prosty licznik krokow "[obecny/razem] wiadomosc" - zastepuje pasek
+!!! postepu `indicatif` (patrz uwaga na gorze pliku). `total <= 0`
+!!! pomija licznik i drukuje sama wiadomosc.
+fun progress_step(current: Int, total: Int, message: Str) [
+    if total > 0 [
+        log("[" + (current as Str) + "/" + (total as Str) + "]", message)
+    ] else [
+        log(message)
+    ]
+]
