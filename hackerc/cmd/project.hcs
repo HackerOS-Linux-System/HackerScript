@@ -1,0 +1,786 @@
+include <ast_nodes>
+include <parser>
+include <codegen>
+include <transpiler>
+get <std:io> import <file_readable>
+
+const CARGO_TOML_HEADER: Str = "[package]\nname = \""
+const CARGO_TOML_MID: Str = "\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\n[[bin]]\nname = \""
+const CARGO_TOML_TAIL: Str = "\"\npath = \"src/main.rs\"\n\n[dependencies]\n"
+
+!!! Splaszczona, deterministyczna nazwa modulu Rust dla `get <std:...>`
+!!! / `get <core:...>` / `get <selfhost:...>`. MUSI byc identyczna po
+!!! obu stronach (patrz `codegen.hcs::gen_get_import`) - to jest cala
+!!! "umowa" systemu modulow. Musi tez byc poprawnym identyfikatorem
+!!! Rusta (snake_case) - `-` zamieniane na `_`.
+fun flat_module_name(source: Str, name: Str, version: Option<Str>) -> Str [
+    let out = "_hks_" + replace_dash(source) + "_" + replace_dash(name)
+    match version [
+        Some(v) -> [
+            out = out + "_" + replace_dash(v)
+        ]
+        None -> [
+        ]
+    ]
+    end out
+]
+
+fun replace_dash(s: Str) -> Str [
+    let out = ""
+    let i = 0
+    let n = s.len()
+    while i < n [
+        let c = s.char_at(i)
+        if c == "-" [
+            out = out + "_"
+        ] else [
+            out = out + c
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+!!! `<libs_root>/<source>/lib/<name>[/<version>].hcs`.
+fun module_file_path(libs_root: Str, source: Str, name: Str, version: Option<Str>) -> Str [
+    let path = libs_root + "/" + source + "/lib/" + name
+    match version [
+        Some(v) -> [
+            path = path + "/" + v
+        ]
+        None -> [
+        ]
+    ]
+    end path + ".hcs"
+]
+
+!!! Jak `module_file_path`, ale dla `get <selfhost:...>` - pliki
+!!! `bootstrap/hackerc-self/*.hcs` leza PLASKO (bez zagniezdzenia
+!!! `<source>/lib/`), bo to nie jest "prawdziwa" biblioteka tylko
+!!! kolekcja modulow samo-hostowanego kompilatora - patrz
+!!! bootstrap/README.md.
+fun selfhost_module_file_path(bootstrap_root: Str, name: Str, version: Option<Str>) -> Str [
+    let path = bootstrap_root + "/" + name
+    match version [
+        Some(v) -> [
+            path = path + "/" + v
+        ]
+        None -> [
+        ]
+    ]
+    end path + ".hcs"
+]
+
+!!! Odcina ostatni segment `/segment` ze sciezki - `"/a/b" -> "/a"`,
+!!! `"/a" -> "/"`, `"a/b" -> "a"`, `"a" -> ""` (pusty wynik = juz nie
+!!! ma dokad isc w gore, parytet z `d.parent == d` w Pythonie na
+!!! korzeniu filesystemu).
+fun path_parent(p: Str) -> Str [
+    let n = p.len()
+    let i = n
+    while i > 0 and p.char_at(i - 1) != "/" [
+        i = i - 1
+    ]
+    if i == 0 [
+        end ""
+    ]
+    let end_i = i - 1
+    if end_i == 0 [
+        end "/"
+    ]
+    end p.slice(0, end_i)
+]
+
+!!! Szuka katalogu `libs/` (z podkatalogiem `core/`) zaczynajac od
+!!! `start` i idac w gore drzewa katalogow - tak jak `virus` szuka
+!!! `Virus.hk`. Uzywa PRAWDZIWEGO sprawdzenia katalogu (`dir_exists`,
+!!! `get <std:fs>` - dodane w tej sesji), NIE JUZ sondowania przez
+!!! plik-znacznik jak wczesniej (patrz historia w bootstrap/README.md).
+!!! Rozwiazuje `d` do sciezki BEZWZGLEDNEJ (parytet z Python `.resolve()`)
+!!! - NAPRAWA BUGA: bez tego, dla `d` bedacego "gola" wzgledna nazwa
+!!! pliku (np. "cli.hcs") lub pustym stringiem (patrz `path_parent`),
+!!! `find_libs_root`/`find_bootstrap_root` moglyby sprawdzic co
+!!! najwyzej JEDEN katalog wzgledem CWD i sie poddac - zamiast
+!!! faktycznie wejsc w gore PRAWDZIWEGO drzewa katalogow az do korzenia
+!!! systemu plikow (patrz historia w bootstrap/README.md).
+fun to_absolute_dir(d: Str) -> Str [
+    if d.len() > 0 and d.char_at(0) == "/" [
+        end d
+    ]
+    match current_dir() [
+        Ok(cwd) -> [
+            if d.len() == 0 [
+                end cwd
+            ]
+            end cwd + "/" + d
+        ]
+        Err(_e) -> [
+            end d
+        ]
+    ]
+]
+
+fun find_libs_root(start: Str) -> Option<Str> [
+    let d = to_absolute_dir(start)
+    let prev_d = "\0no-such-dir"
+    while d != prev_d [
+        let candidate = path_join_safe(d.clone(), "libs/core")
+        if dir_exists(candidate) [
+            end some(path_join_safe(d, "libs"))
+        ]
+        prev_d = d.clone()
+        d = path_parent(d)
+    ]
+    end none()
+]
+
+!!! Jak `find_libs_root`, ale szuka `bootstrap/hackerc-self/`. UWAGA:
+!!! od kiedy `get <selfhost:...>` jest zablokowane (patrz
+!!! `parser.hcs::parse_get_import` i bootstrap/README.md) - `include
+!!! <sciezka>` NIE UZYWA `bootstrap_root` wcale (rozwiazuje sie
+!!! WZGLEDEM pliku z `include`, nie od globalnego korzenia) - ta
+!!! funkcja i parametr `bootstrap_root` w `build_project`/
+!!! `collect_project_signatures` sa wiec dzis PRAKTYCZNIE MARTWE,
+!!! zachowane tylko dla zgodnosci sygnatur (i na wypadek przyszlego
+!!! `get <selfhost:...>`, gdyby kiedys mial wrocic w innej roli).
+fun find_bootstrap_root(start: Str) -> Option<Str> [
+    let d = to_absolute_dir(start)
+    let prev_d = "\0no-such-dir"
+    while d != prev_d [
+        let candidate = path_join_safe(d.clone(), "bootstrap/hackerc-self")
+        if dir_exists(candidate.clone()) [
+            end some(candidate)
+        ]
+        prev_d = d.clone()
+        d = path_parent(d)
+    ]
+    end none()
+]
+
+!!! Element kolejki BFS discovery - `Stmt` (GetImportStmt/IncludeStmt) +
+!!! katalog PLIKU, w ktorym sie znajduje (potrzebny WYLACZNIE dla
+!!! `IncludeStmt`, rozwiazywanego wzgledem tego katalogu - `GetImportStmt`
+!!! ignoruje `base_dir`, zawsze szuka od libs_root/bootstrap_root).
+!!! HackerScript nie ma tupli, wiec wlasny struct - parytet z parami
+!!! `(stmt, base_dir)` w `module_stmts()` (project.py).
+struct QueueItem [
+    stmt: Stmt,
+    base_dir: Str
+]
+
+!!! Doklejenie `rest` DO `base` jako sciezka - jak Python `pathlib.Path
+!!! (base) / rest` (ktorego uzywa oryginal - `project.py`): dla PUSTEGO
+!!! `base` (plik zrodlowy bez katalogu, np. `src = "cli.hcs"` -
+!!! `path_parent` zwraca `""`) zwraca `rest` WPROST (BEZ wiodacego "/"),
+!!! zamiast naiwnej konkatenacji `base + "/" + rest`, ktora dla pustego
+!!! `base` dawalaby BLEDNIE `"/" + rest` - SCIEZKE BEZWZGLEDNA OD
+!!! KORZENIA SYSTEMU PLIKOW zamiast wzglednej do biezacego katalogu.
+!!! NAPRAWA BUGA: patrz historia w bootstrap/README.md - `include <...>`
+!!! szukalo w "/nazwa.hcs" zamiast we wlasciwym katalogu, gdy plik
+!!! zrodlowy byl podany BEZ katalogu (np. `hackerc build cli.hcs`
+!!! uruchomione z wewnatrz `bootstrap/hackerc-self/`).
+fun path_join_safe(base: Str, rest: Str) -> Str [
+    if base.len() == 0 [
+        end rest
+    ]
+    end base + "/" + rest
+]
+
+!!! Parytet z `resolve_include_path` (project.py) - rozwiazuje `include
+!!! <raw_path>` na prawdziwy plik `.hcs`, WZGLEDEM `base_dir`. Kolejnosc
+!!! jak Rustowe `mod nazwa;` (plik przed katalogiem).
+fun resolve_include_path(raw_path: Str, base_dir: Str) -> Option<Str> [
+    if raw_path.len() >= 4 and raw_path.slice(raw_path.len() - 4, raw_path.len()) == ".hcs" [
+        let candidate = path_join_safe(base_dir, raw_path)
+        if file_readable(candidate.clone()) [
+            end some(candidate)
+        ]
+        end none()
+    ]
+    let file_candidate = path_join_safe(base_dir.clone(), raw_path.clone() + ".hcs")
+    if file_readable(file_candidate.clone()) [
+        end some(file_candidate)
+    ]
+    let dir_candidate = path_join_safe(base_dir, raw_path + "/mod.hcs")
+    if file_readable(dir_candidate.clone()) [
+        end some(dir_candidate)
+    ]
+    end none()
+]
+
+!!! Parytet z `flat_include_module_name` (project.py) - MUSI byc
+!!! identyczna jak kopia w codegen.hcs (ta sama "umowa" co
+!!! `flat_module_name`, patrz tam).
+fun flat_include_module_name(path: Str) -> Str [
+    let p = path
+    if p.len() >= 4 and p.slice(p.len() - 4, p.len()) == ".hcs" [
+        p = p.slice(0, p.len() - 4)
+    ]
+    let out = ""
+    let i = 0
+    let n = p.len()
+    while i < n [
+        let c = p.char_at(i)
+        if c == "-" or c == "/" [
+            out = out + "_"
+        ] else [
+            out = out + c
+        ]
+        i = i + 1
+    ]
+    end "_hks_inc_" + out
+]
+
+struct DiscoveredFile [
+    path: Str,
+    flat_name: Str,
+    source: Str,
+    program: Program
+]
+
+struct ProjectResult [
+    crate_dir: Str,
+    main_rs_path: Str,
+    module_files: List<Str>,
+    cargo_toml_path: Str,
+    needs_pyo3: Bool,
+    crates_deps_names: List<Str>,
+    crates_deps_versions: List<Str>,
+    warnings: List<Str>
+]
+
+!!! Wewnetrzny akumulator odkrytych plikow + kolejki BFS importow -
+!!! wlasny struct zamiast kilku osobnych `let`-ow przekazywanych
+!!! recznie (HackerScript nie ma domkniec/closures mutujacych otoczenie
+!!! poza `self`, patrz docs/SYNTAX.md) - parytet z lokalnymi zmiennymi
+!!! `files`/`seen`/`queue` w `_resolve_project_files` (Python).
+struct Discovery [
+    files: List<DiscoveredFile>,
+    seen_flat_names: Dict<Str, Bool>,
+    warnings: List<Str>
+]
+
+impl Discovery [
+    !!! Parsuje jeden plik (po wyciagnieciu `direct[...]`, jak wszedzie
+    !!! indziej) i dodaje go do `self.files`. Zwraca `true` przy
+    !!! sukcesie.
+    fun parse_and_add(self, path: Str, flat_name: Str, source_tag: Str) -> Bool [
+        match read_file(path.clone()) [
+            Ok(source) -> [
+                let extraction = extract_direct_blocks(source.clone())
+                let prog = parse(extraction.stripped_source)
+                self.files.push(DiscoveredFile(path, flat_name, source_tag, prog))
+                end true
+            ]
+            Err(e) -> [
+                self.warnings.push(path + ": " + e)
+                end false
+            ]
+        ]
+    ]
+
+    !!! Faza 1 (discovery): parsuje `entry` + rekurencyjnie kazdy
+    !!! zaimportowany modul `std`/`core`/`selfhost` - BFS po
+    !!! `GetImportStmt`. Parytet z `_resolve_project_files`.
+    fun resolve(self, entry: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>) [
+        let added = self.parse_and_add(entry.clone(), "main", "main")
+        if not added [
+            end
+        ]
+
+        let queue: List<QueueItem> = []
+        let entry_prog = self.files[0].program.clone()
+        collect_module_imports(entry_prog, path_parent(entry.clone()), queue)
+
+        while queue.len() > 0 [
+            let item = queue.remove(0)
+            let imp = item.stmt
+            let base_dir = item.base_dir
+            match imp [
+                GetImportStmt(isource, iname, iversion, idetails) -> [
+                    let flat = flat_module_name(isource.clone(), iname.clone(), iversion.clone())
+                    if not self.seen_flat_names.contains(flat.clone()) [
+                        self.seen_flat_names.insert(flat.clone(), true)
+
+                        let mod_file = ""
+                        let have_root = false
+                        if isource == "selfhost" [
+                            match bootstrap_root.clone() [
+                                Some(br) -> [
+                                    mod_file = selfhost_module_file_path(br, iname.clone(), iversion.clone())
+                                    have_root = true
+                                ]
+                                None -> [
+                                    self.warnings.push("get <selfhost:" + iname.clone() + "> - nie znaleziono katalogu bootstrap/hackerc-self/ - modul " + flat.clone() + " nie zostanie zbudowany")
+                                ]
+                            ]
+                        ] else [
+                            match libs_root.clone() [
+                                Some(lr) -> [
+                                    mod_file = module_file_path(lr, isource.clone(), iname.clone(), iversion.clone())
+                                    have_root = true
+                                ]
+                                None -> [
+                                    self.warnings.push("get <" + isource.clone() + ":" + iname.clone() + "> - nie znaleziono katalogu libs/ - modul " + flat.clone() + " nie zostanie zbudowany")
+                                ]
+                            ]
+                        ]
+
+                        if have_root [
+                            if file_readable(mod_file.clone()) [
+                                let ok = self.parse_and_add(mod_file.clone(), flat, isource)
+                                if ok [
+                                    let last_prog = self.files[self.files.len() - 1].program.clone()
+                                    collect_module_imports(last_prog, path_parent(mod_file), queue)
+                                ]
+                            ] else [
+                                self.warnings.push("get <" + isource + ":" + iname + "> -> nie znaleziono " + mod_file)
+                            ]
+                        ]
+                    ]
+                ]
+                IncludeStmt(path) -> [
+                    let flat = flat_include_module_name(path.clone())
+                    if not self.seen_flat_names.contains(flat.clone()) [
+                        self.seen_flat_names.insert(flat.clone(), true)
+                        match resolve_include_path(path.clone(), base_dir.clone()) [
+                            Some(mod_file) -> [
+                                let ok = self.parse_and_add(mod_file.clone(), flat, "include")
+                                if ok [
+                                    let last_prog = self.files[self.files.len() - 1].program.clone()
+                                    collect_module_imports(last_prog, path_parent(mod_file), queue)
+                                ]
+                            ]
+                            None -> [
+                                self.warnings.push("include <" + path.clone() + "> -> nie znaleziono " + path_join_safe(base_dir.clone(), path.clone() + ".hcs") + " ani " + path_join_safe(base_dir, path + "/mod.hcs"))
+                            ]
+                        ]
+                    ]
+                ]
+                _ -> [
+                ]
+            ]
+        ]
+    ]
+]
+
+!!! Dopisuje do `queue` kazdy `GetImportStmt` (dla `std`/`core`/
+!!! `selfhost`) i kazdy `IncludeStmt` na najwyzszym poziomie `prog` -
+!!! parytet z `module_stmts()` (project.py). `base_dir` (katalog pliku
+!!! `prog` pochodzi z) jest doczepiany do kazdego elementu - potrzebny
+!!! pozniej WYLACZNIE dla `IncludeStmt`.
+fun collect_module_imports(prog: Program, base_dir: Str, queue: List<QueueItem>) [
+    let i = 0
+    let n = prog.body.len()
+    while i < n [
+        let s = prog.body[i].clone()
+        match s.clone() [
+            GetImportStmt(source, name, version, details) -> [
+                if source == "std" or source == "core" or source == "selfhost" or source == "virus" [
+                    queue.push(QueueItem(s, base_dir.clone()))
+                ]
+            ]
+            IncludeStmt(path) -> [
+                queue.push(QueueItem(s, base_dir.clone()))
+            ]
+            _ -> [
+            ]
+        ]
+        i = i + 1
+    ]
+]
+
+!!! Wynik `collect_project_signatures` - `ExtraSignatures` (z
+!!! transpiler.hcs) plus ostrzezenia discovery. Parytet z krotka
+!!! 7-elementowa w Pythonie (`global_functions, ..., warnings`) - jeden
+!!! struct zamiast tupli (HackerScript nie ma generycznych tupli).
+struct ProjectSignatures [
+    sigs: ExtraSignatures,
+    warnings: List<Str>
+]
+
+!!! Faza 1 z `build_project` (discovery + globalny rejestr sygnatur),
+!!! wydzielona do samodzielnego uzycia - parytet z
+!!! `collect_project_signatures`. `libs_root`/`bootstrap_root` `none()`
+!!! -> auto-wykrywanie przez `find_libs_root`/`find_bootstrap_root`
+!!! zaczynajac od `entry`.
+fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>) -> ProjectSignatures [
+    let lr = libs_root
+    match lr.clone() [
+        Some(_v) -> [
+        ]
+        None -> [
+            lr = find_libs_root(entry.clone())
+        ]
+    ]
+    let br = bootstrap_root
+    match br.clone() [
+        Some(_v) -> [
+        ]
+        None -> [
+            br = find_bootstrap_root(entry.clone())
+        ]
+    ]
+
+    let disc = Discovery([], dict(), [])
+    disc.resolve(entry, lr, br)
+
+    let functions: Dict<Str, Stmt> = dict()
+    let function_names: List<Str> = []
+    let structs: Dict<Str, Stmt> = dict()
+    let struct_names: List<Str> = []
+    let enums: Dict<Str, Stmt> = dict()
+    let enum_names: List<Str> = []
+    let methods: Dict<Str, Stmt> = dict()
+    let method_names: List<Str> = []
+    let mut_params: Dict<Str, Bool> = dict()
+    let method_mut_params: Dict<Str, Bool> = dict()
+
+    let fi = 0
+    let fn_ = disc.files.len()
+    while fi < fn_ [
+        let df = disc.files[fi].clone()
+        let si = 0
+        let sn = df.program.body.len()
+        while si < sn [
+            let stmt = df.program.body[si].clone()
+            match stmt.clone() [
+                FunDecl(name, params, ret, body, is_pub, type_params) -> [
+                    functions.insert(name.clone(), stmt)
+                    function_names.push(name)
+                ]
+                StructDecl(name, fields, type_params) -> [
+                    structs.insert(name.clone(), stmt)
+                    struct_names.push(name)
+                ]
+                EnumDecl(name, variants, type_params) -> [
+                    enums.insert(name.clone(), stmt)
+                    enum_names.push(name)
+                ]
+                ImplDecl(struct_name, impl_methods, type_params) -> [
+                    let mi = 0
+                    let mn = impl_methods.len()
+                    while mi < mn [
+                        let m = impl_methods[mi].clone()
+                        match m.clone() [
+                            FunDecl(mname, mparams, mret, mbody, mis_pub, mtype_params) -> [
+                                let key = struct_name.clone() + "::" + mname.clone()
+                                methods.insert(key.clone(), m)
+                                method_names.push(key)
+                            ]
+                            _ -> [
+                            ]
+                        ]
+                        mi = mi + 1
+                    ]
+                ]
+                _ -> [
+                ]
+            ]
+            si = si + 1
+        ]
+
+        let file_mut_params = compute_mut_params(df.program.clone())
+        let fmi = 0
+        let fmn = function_names.len()
+        while fmi < fmn [
+            match file_mut_params.fetch(function_names[fmi].clone()) [
+                Some(v) -> [
+                    mut_params.insert(function_names[fmi].clone(), v)
+                ]
+                None -> [
+                ]
+            ]
+            fmi = fmi + 1
+        ]
+
+        let empty_extra: Dict<Str, Bool> = dict()
+        let file_method_mut_params = compute_method_mut_params(df.program.clone(), empty_extra)
+        let mmi = 0
+        let mmn = method_names.len()
+        while mmi < mmn [
+            match file_method_mut_params.fetch(method_names[mmi].clone()) [
+                Some(v) -> [
+                    method_mut_params.insert(method_names[mmi].clone(), v)
+                ]
+                None -> [
+                ]
+            ]
+            mmi = mmi + 1
+        ]
+
+        fi = fi + 1
+    ]
+
+    let sigs = ExtraSignatures(functions, function_names, structs, struct_names, enums, enum_names, methods, method_names, mut_params, method_mut_params)
+    end ProjectSignatures(sigs, disc.warnings)
+]
+
+fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, deps_names: List<Str>, deps_versions: List<Str>) -> Str [
+    let deps_lines = ""
+    if needs_pyo3 [
+        deps_lines = deps_lines + "pyo3 = { version = \"0.22\", features = [\"auto-initialize\"] }\n"
+    ]
+    let i = 0
+    let n = deps_names.len()
+    while i < n [
+        deps_lines = deps_lines + deps_names[i] + " = \"" + deps_versions[i] + "\"\n"
+        i = i + 1
+    ]
+    end CARGO_TOML_HEADER + crate_name + CARGO_TOML_MID + crate_name + CARGO_TOML_TAIL + deps_lines
+]
+
+!!! Wstawia `mod X;` (deklaracje modulow) do `entry_rust` PO ostatniej
+!!! wiodacej linii `//`/`//!`/`#![...]`/pustej - NIGDY przed nia (Rust
+!!! odrzuca atrybuty wewnetrzne, ktore nie sa pierwszymi tokenami w
+!!! pliku - E0753). Bug znaleziony i naprawiony w `project.py` przy
+!!! pierwszej realnej kompilacji `cargo build` wielomodulowego projektu
+!!! w tej sesji (poprzednio niemozliwe bez dostepu do rustc) - ten plik
+!!! implementuje to poprawnie OD RAZU, zamiast powtarzac ten sam blad.
+fun insert_mod_declarations(entry_rust: Str, mod_names: List<Str>) -> Str [
+    if mod_names.len() == 0 [
+        end entry_rust
+    ]
+    let mod_header = ""
+    let i = 0
+    let n = mod_names.len()
+    while i < n [
+        mod_header = mod_header + "mod " + mod_names[i] + ";\n"
+        i = i + 1
+    ]
+
+    let lines = split_lines_local(entry_rust)
+    let insert_at = 0
+    let j = 0
+    let ln = lines.len()
+    let scanning = true
+    while j < ln and scanning [
+        let line = lines[j]
+        let is_leading = starts_with(line.clone(), "//") or starts_with(line.clone(), "#![") or trim_str(line.clone()) == ""
+        if is_leading [
+            insert_at = j + 1
+        ] else [
+            scanning = false
+        ]
+        j = j + 1
+    ]
+
+    let out_lines: List<Str> = []
+    let k = 0
+    while k < insert_at [
+        out_lines.push(lines[k].clone())
+        k = k + 1
+    ]
+    out_lines.push("")
+    out_lines.push(mod_header)
+    out_lines.push("")
+    while k < ln [
+        out_lines.push(lines[k].clone())
+        k = k + 1
+    ]
+
+    let joined = ""
+    let m = 0
+    let mn = out_lines.len()
+    while m < mn [
+        joined = joined + out_lines[m]
+        if m < mn - 1 [
+            joined = joined + "\n"
+        ]
+        m = m + 1
+    ]
+    end joined
+]
+
+fun starts_with(s: Str, prefix: Str) -> Bool [
+    let pn = prefix.len()
+    if pn > s.len() [
+        end false
+    ]
+    end s.slice(0, pn) == prefix
+]
+
+fun trim_str(s: Str) -> Str [
+    let n = s.len()
+    let start = 0
+    while start < n and (s.char_at(start) == " " or s.char_at(start) == "\t") [
+        start = start + 1
+    ]
+    let end_i = n
+    while end_i > start and (s.char_at(end_i - 1) == " " or s.char_at(end_i - 1) == "\t") [
+        end_i = end_i - 1
+    ]
+    end s.slice(start, end_i)
+]
+
+!!! Transpiluje `entry` + rekurencyjnie kazdy modul `std`/`core`/
+!!! `selfhost`, ktory importuje, do PELNEGO crate'a Rust w `out_dir`
+!!! (Cargo.toml + src/). NIE kompiluje (to robi `virus`/`cargo build`).
+!!!
+!!! Tworzy `out_dir + "/src"` SAMO (przez `create_dir`, patrz
+!!! `get <std:fs>` - dodane w tej sesji), parytet z `out_dir.mkdir(
+!!! parents=True, exist_ok=True)` w Pythonie. Jesli tworzenie katalogu
+!!! sie nie uda (np. brak uprawnien), zapis kazdego pliku i tak
+!!! sprobuje samodzielnie i doda `Err` do `warnings`, wiec brak
+!!! twardego przerwania calej budowy.
+fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, crate_name: Str) -> ProjectResult [
+    let src_dir = out_dir + "/src"
+    let main_rs_path = src_dir + "/main.rs"
+    let warnings: List<Str> = []
+
+    match create_dir(src_dir.clone()) [
+        Ok(_v) -> [
+        ]
+        Err(e) -> [
+            warnings.push(src_dir.clone() + ": " + e)
+        ]
+    ]
+
+    let lr = libs_root
+    match lr.clone() [
+        Some(_v) -> [
+        ]
+        None -> [
+            lr = find_libs_root(entry.clone())
+        ]
+    ]
+    let br = bootstrap_root
+    match br.clone() [
+        Some(_v) -> [
+        ]
+        None -> [
+            br = find_bootstrap_root(entry.clone())
+        ]
+    ]
+
+    let disc = Discovery([], dict(), [])
+    disc.resolve(entry.clone(), lr.clone(), br.clone())
+    let i = 0
+    let wn = disc.warnings.len()
+    while i < wn [
+        warnings.push(disc.warnings[i].clone())
+        i = i + 1
+    ]
+
+    let ps = collect_project_signatures(entry, lr, br)
+    let extra = ps.sigs
+
+    let needs_pyo3 = false
+    let module_files: List<Str> = []
+    let mod_names: List<Str> = []
+    let crates_names: List<Str> = []
+    let crates_versions: List<Str> = []
+    let entry_rust = ""
+
+    let fi = 0
+    let fn_ = disc.files.len()
+    while fi < fn_ [
+        let df = disc.files[fi].clone()
+        let r = transpile_program_with_extra(df.program.clone(), [], extra)
+
+        if r.needs_pyo3 [
+            needs_pyo3 = true
+        ]
+
+        let si = 0
+        let sn = df.program.body.len()
+        while si < sn [
+            match df.program.body[si].clone() [
+                GetImportStmt(isource, iname, iversion, idetails) -> [
+                    if isource == "crates" [
+                        crates_names.push(iname)
+                        match iversion [
+                            Some(v) -> [
+                                crates_versions.push(v)
+                            ]
+                            None -> [
+                                crates_versions.push("*")
+                            ]
+                        ]
+                    ]
+                ]
+                _ -> [
+                ]
+            ]
+            si = si + 1
+        ]
+
+        if df.flat_name == "main" [
+            entry_rust = r.rust_code
+        ] else [
+            let mod_out = src_dir + "/" + df.flat_name + ".rs"
+            match write_file(mod_out.clone(), r.rust_code) [
+                Ok(_v) -> [
+                    module_files.push(mod_out)
+                    mod_names.push(df.flat_name)
+                ]
+                Err(e) -> [
+                    warnings.push(mod_out + ": " + e)
+                ]
+            ]
+        ]
+        fi = fi + 1
+    ]
+
+    entry_rust = insert_mod_declarations(entry_rust, mod_names)
+    match write_file(main_rs_path.clone(), entry_rust) [
+        Ok(_v) -> [
+        ]
+        Err(e) -> [
+            warnings.push(main_rs_path + ": " + e)
+        ]
+    ]
+
+    let cargo_toml_path = out_dir + "/Cargo.toml"
+    let cargo_text = cargo_toml_text(crate_name, needs_pyo3, crates_names.clone(), crates_versions.clone())
+    match write_file(cargo_toml_path.clone(), cargo_text) [
+        Ok(_v) -> [
+        ]
+        Err(e) -> [
+            warnings.push(cargo_toml_path + ": " + e)
+        ]
+    ]
+
+    end ProjectResult(out_dir, main_rs_path, module_files, cargo_toml_path, needs_pyo3, crates_names, crates_versions, warnings)
+]
+
+!!! Demonstracyjne uzycie - `flat_module_name`/`module_file_path` na
+!!! przykladzie z komentarza na gorze pliku (bez dotykania prawdziwego
+!!! systemu plikow, zeby demo dzialalo wszedzie bez przygotowanego
+!!! katalogu wyjsciowego - patrz ograniczenie `build_project` powyzej).
+fun main() [
+    let flat = flat_module_name("core", "memory", some("arena"))
+    log("flat_module_name:", flat)
+    let path = module_file_path("/repo/libs", "core", "memory", some("arena"))
+    log("module_file_path:", path)
+]
+
+!!! ## Ograniczenia tej wersji (patrz docs/ROADMAP.md)
+!!!
+!!! - `find_libs_root`/`find_bootstrap_root` sonduja obecnosc pliku-
+!!!   znacznika zamiast prawdziwego sprawdzenia katalogu (brak
+!!!   `is_dir` w tym bootstrapie) - patrz duza uwaga na gorze pliku.
+!!! - `build_project` NIE TWORZY `out_dir`/`out_dir/src` (brak `mkdir`)
+!!!   - WYWOLUJACY musi je przygotowac; w przeciwnym razie kazdy zapis
+!!!   ladu je jako wpis w `warnings` zamiast sie udac.
+!!! - `read_file`/`parse` sa best-effort (patrz uwagi w parser.hcs) -
+!!!   `resolve`/`build_project` NIE PRZERYWAJA na bledzie parsera
+!!!   jednego pliku tak jak Pythonowy `ProjectError` (ktory od razu
+!!!   przerywa cala budowe) - zamiast tego plik z bledem I/O trafia do
+!!!   `warnings` i jest pomijany, a plik z bledem SKLADNI (ktorego
+!!!   `parse()` nie sygnalizuje wcale - zwraca best-effort AST) po
+!!!   prostu przechodzi dalej z niepelnym/bledym AST. Inny profil
+!!!   bledow niz Python, konsekwencja tego samego ograniczenia
+!!!   `parser.hcs` udokumentowanego w transpiler.hcs.
+!!! - `Discovery::resolve`/`collect_project_signatures` NIE deduplikuja
+!!!   `crates_deps` (Pythonowy `dict[str,str]` scala duplikaty po
+!!!   nazwie paczki automatycznie; tu `crates_names`/`crates_versions`
+!!!   to rownolegle listy, wiec dwa pliki importujace ta sama paczke
+!!!   `crates` wygeneruja DWA wpisy w Cargo.toml - nieszkodliwe dla
+!!!   Cargo w praktyce, ale nie jest to bajt-w-bajt ten sam plik co z
+!!!   Pythona).
+!!! - NIEPRZETESTOWANE na prawdziwym wielomodulowym projekcie w tym
+!!!   srodowisku (wymaga katalogu wyjsciowego przygotowanego z gory,
+!!!   patrz wyzej) - zweryfikowane strukturalnie (`hackerc check`/
+!!!   `build`) i, gdzie to mozliwe, przez faktyczne `cargo build` na
+!!!   wygenerowanym kodzie (patrz bootstrap/README.md).
