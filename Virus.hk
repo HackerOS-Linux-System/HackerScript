@@ -6,9 +6,9 @@
 ! przyszla sesje (patrz bootstrap/README.md).
 
 [package]
--> name        => virus
--> version     => 0.0.1
--> using       => 1.2
+-> name        => HackerScript
+-> version     => 0.1
+-> using       => 0.1
 -> edition     => 2026
 -> authors     => ["HackerOS-Linux-System"]
 -> description => virus + hackerc, jedna binarka - menedzer pakietow/projektow i transpilator HackerScript -> Rust, statycznie linkujace libs/core i libs/std.
