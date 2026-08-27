@@ -7,7 +7,8 @@
 > virus build --release
   
 ;; install missing libs 
-;; > sudo apt install build-essential cmake g++ ccache python3-dev patchelf nuitka
+;; > sudo apt install build-essential cmake g++ ccache python3-dev patchelf
+;; > python3.14 -m venv venv && source venv/bin/activate && pip install nuitka
 ;; build hackerc
 ;; > cd hackerc && python -m nuitka --onefile --include-package=hackerc --output-dir=dist --output-filename=hackerc entrypoint.py
 
