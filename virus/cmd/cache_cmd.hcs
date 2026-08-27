@@ -1,0 +1,15 @@
+include <cache>
+include <progress>
+
+!!! `true` = sukces (parytet z `run() -> Result<()>` w Rust, ale bez
+!!! propagowania szczegolow bledu - `virus_main` w cli.hcs decyduje o
+!!! kodzie wyjscia na podstawie zwroconego `Bool`).
+fun cmd_cache_run(project_root: Str) -> Bool [
+    let cache = cache_dirs_for_project(project_root)
+    if cache_ensure_all(cache.clone()) [
+        progress_success("katalog cache/ gotowy w " + cache.root)
+        end true
+    ]
+    progress_error("nie udalo sie utworzyc katalogu cache/")
+    end false
+]
