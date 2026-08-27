@@ -1,0 +1,624 @@
+include <ast_nodes>
+include <parser>
+include <typeinfer>
+include <transpiler>
+
+struct Formatter [
+    lines: List<Str>,
+    indent: Int,
+    direct_blocks: Dict<Str, Str>
+]
+
+fun new_formatter(direct_blocks: Dict<Str, Str>) -> Formatter [
+    end Formatter([], 0, direct_blocks)
+]
+
+fun repeat_str(s: Str, n: Int) -> Str [
+    let out = ""
+    let i = 0
+    while i < n [
+        out = out + s
+        i = i + 1
+    ]
+    end out
+]
+
+fun join_str_list(items: List<Str>, sep: Str) -> Str [
+    let out = ""
+    let i = 0
+    let n = items.len()
+    while i < n [
+        if i > 0 [
+            out = out + sep
+        ]
+        out = out + items[i]
+        i = i + 1
+    ]
+    end out
+]
+
+impl Formatter [
+    fun emit(self, text: Str) [
+        if text == "" [
+            self.lines.push("")
+        ] else [
+            self.lines.push(repeat_str("    ", self.indent) + text)
+        ]
+    ]
+
+    fun emit_blank(self) [
+        self.lines.push("")
+    ]
+
+    !!! Renderuje `TypeRef` WLACZAJAC argument generyczny -
+    !!! `type_.name` samo w sobie gubi `<Int>` w `List<Int>` (ten sam
+    !!! bug udokumentowany w formatter.py, naprawiony TAM i tu od
+    !!! razu w pierwszej wersji).
+    fun fmt_type(self, t: TypeRef) -> Str [
+        match t.generic.clone() [
+            Some(g) -> [
+                match t.generic2.clone() [
+                    Some(g2) -> [
+                        end t.name.clone() + "<" + self.fmt_type(g) + ", " + self.fmt_type(g2) + ">"
+                    ]
+                    None -> [
+                        end t.name.clone() + "<" + self.fmt_type(g) + ">"
+                    ]
+                ]
+            ]
+            None -> [
+                end t.name.clone()
+            ]
+        ]
+    ]
+
+    fun format_program(self, prog: Program) -> Str [
+        let i = 0
+        let n = prog.body.len()
+        while i < n [
+            let stmt = prog.body[i].clone()
+            if i > 0 and self.stmt_is_fun_decl(stmt.clone()) [
+                self.emit_blank()
+            ]
+            self.fmt_stmt(stmt)
+            i = i + 1
+        ]
+        let text = join_str_list(self.lines.clone(), "\n")
+        end rstrip_newlines(text) + "\n"
+    ]
+
+    fun stmt_is_fun_decl(self, s: Stmt) -> Bool [
+        match s [
+            FunDecl(name, params, ret, body, is_pub, type_params) -> [
+                end true
+            ]
+            _ -> [
+                end false
+            ]
+        ]
+    ]
+
+    fun fmt_block(self, stmts: List<Stmt>) [
+        self.indent = self.indent + 1
+        let i = 0
+        let n = stmts.len()
+        while i < n [
+            self.fmt_stmt(stmts[i].clone())
+            i = i + 1
+        ]
+        self.indent = self.indent - 1
+    ]
+
+    !!! Parametry `fun`/pola `struct` sformatowane jako `nazwa: Typ` (z
+    !!! wartoscia domyslna `= wyrazenie` dla parametrow, jesli jest) -
+    !!! wspolne dla `fmt_fun`/`ExternFunDecl`.
+    fun fmt_param(self, p: Param) -> Str [
+        let hint = ""
+        match p.type_ref.clone() [
+            Some(t) -> [
+                hint = ": " + self.fmt_type(t)
+            ]
+            None -> [
+            ]
+        ]
+        let default = ""
+        match p.default_expr.clone() [
+            Some(d) -> [
+                default = " = " + self.fmt_expr(d)
+            ]
+            None -> [
+            ]
+        ]
+        end p.name.clone() + hint + default
+    ]
+
+    fun fmt_type_params(self, type_params: List<Str>) -> Str [
+        if type_params.len() == 0 [
+            end ""
+        ]
+        end "<" + join_str_list(type_params, ", ") + ">"
+    ]
+
+    fun fmt_fun(self, name: Str, params: List<Param>, ret: Option<TypeRef>, body: List<Stmt>, is_pub: Bool, type_params: List<Str>) [
+        let param_strs: List<Str> = []
+        let i = 0
+        let n = params.len()
+        while i < n [
+            param_strs.push(self.fmt_param(params[i].clone()))
+            i = i + 1
+        ]
+        let ret_str = ""
+        match ret [
+            Some(rt) -> [
+                ret_str = " -> " + self.fmt_type(rt)
+            ]
+            None -> [
+            ]
+        ]
+        let prefix = ""
+        if is_pub [
+            prefix = "pub "
+        ]
+        self.emit(prefix + "fun " + name + self.fmt_type_params(type_params) + "(" + join_str_list(param_strs, ", ") + ")" + ret_str + " [")
+        self.fmt_block(body)
+        self.emit("]")
+    ]
+
+    !!! Zwraca `Some(idx_text)` jesli `e` to `__direct__(N)` (wynik
+    !!! preprocessingu `extract_direct_blocks`) - parytet z
+    !!! `isinstance(e, A.Call) and e.callee.name == "__direct__"`.
+    !!! Uzywa `expr_as_ident_name` (typeinfer.hcs) zamiast dopasowania
+    !!! bezposrednio na `callee` - `callee` w `Call(callee, args)` jest
+    !!! `Box<Expr>` w wygenerowanym Ruscie (Expr jest posrednio
+    !!! samo-rekurencyjny), a dopasowanie wzorca WPROST na `Box<T>` bez
+    !!! `.as_ref()`/funkcji posredniej nie kompiluje sie - `expr_as_ident_name`
+    !!! (ktora przyjmuje zwykly, auto-zreferencjonowany `Expr`) juz
+    !!! rozwiazuje ten sam problem gdzie indziej w bootstrapie.
+    fun direct_call_index(self, e: Expr) -> Option<Str> [
+        match e [
+            Call(callee, args) -> [
+                if expr_as_ident_name(callee) == "__direct__" and args.len() > 0 [
+                    match args[0].clone() [
+                        NumberLit(v) -> [
+                            end some(v)
+                        ]
+                        _ -> [
+                        ]
+                    ]
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+        end none()
+    ]
+
+    fun fmt_direct_block(self, idx_text: Str) [
+        let raw = ""
+        match self.direct_blocks.fetch(idx_text) [
+            Some(r) -> [
+                raw = r
+            ]
+            None -> [
+            ]
+        ]
+        self.emit("direct [")
+        self.indent = self.indent + 1
+        let raw_lines = split_lines_local(raw)
+        let i = 0
+        let n = raw_lines.len()
+        while i < n [
+            self.emit_raw_line(raw_lines[i].clone())
+            i = i + 1
+        ]
+        self.indent = self.indent - 1
+        self.emit("]")
+    ]
+
+    !!! Linia wewnatrz `direct [ ... ]` jest TRESCIA PYTHONA, nie
+    !!! HackerScript - wypisywana WPROST (z wciecia biezacego poziomu),
+    !!! nawet gdy jest pusta (parytet z `self.emit(line)` w petli po
+    !!! `raw.splitlines()` w formatter.py - w odroznieniu od zwyklego
+    !!! `emit`, ktory dla `text == ""` NIE dodaje wciecia).
+    fun emit_raw_line(self, line: Str) [
+        self.lines.push(repeat_str("    ", self.indent) + line)
+    ]
+
+    fun fmt_stmt(self, node: Stmt) [
+        let s = node.clone()
+        match s [
+            UsingStmt(version) -> [
+                self.emit("using <" + version + ">")
+            ]
+            GetImportStmt(source, name, version, details) -> [
+                let head = "get <" + source.clone() + ":" + name.clone()
+                match version.clone() [
+                    Some(v) -> [
+                        head = head + "::" + v
+                    ]
+                    None -> [
+                    ]
+                ]
+                head = head + ">"
+                if details.len() > 0 [
+                    head = head + " import <" + join_str_list(details, "::") + ">"
+                ]
+                self.emit(head)
+            ]
+            IncludeStmt(path) -> [
+                self.emit("include <" + path + ">")
+            ]
+            GcPragma(mode) -> [
+                self.emit("gc:use::" + mode)
+            ]
+            LetStmt(name, type_ref, value, is_const) -> [
+                let kw = "let"
+                if is_const [
+                    kw = "const"
+                ]
+                let hint = ""
+                match type_ref.clone() [
+                    Some(t) -> [
+                        hint = ": " + self.fmt_type(t)
+                    ]
+                    None -> [
+                    ]
+                ]
+                let value_str = ""
+                match value.clone() [
+                    Some(v) -> [
+                        value_str = " = " + self.fmt_expr(v)
+                    ]
+                    None -> [
+                    ]
+                ]
+                self.emit(kw + " " + name + hint + value_str)
+            ]
+            AssignStmt(target, op, value) -> [
+                self.emit(self.fmt_expr(target) + " " + op + " " + self.fmt_expr(value))
+            ]
+            FunDecl(name, params, ret, body, is_pub, type_params) -> [
+                self.fmt_fun(name, params, ret, body, is_pub, type_params)
+            ]
+            ExternFunDecl(lib, name, params, ret) -> [
+                let param_strs: List<Str> = []
+                let i = 0
+                let n = params.len()
+                while i < n [
+                    param_strs.push(self.fmt_param(params[i].clone()))
+                    i = i + 1
+                ]
+                let ret_str = ""
+                match ret [
+                    Some(rt) -> [
+                        ret_str = " -> " + self.fmt_type(rt)
+                    ]
+                    None -> [
+                    ]
+                ]
+                self.emit("extern \"" + lib + "\" fun " + name + "(" + join_str_list(param_strs, ", ") + ")" + ret_str)
+            ]
+            IfStmt(cond, body, elifs, else_body) -> [
+                self.emit("if " + self.fmt_expr(cond) + " [")
+                self.fmt_block(body)
+                let i = 0
+                let n = elifs.len()
+                while i < n [
+                    let arm = elifs[i].clone()
+                    self.emit("] elif " + self.fmt_expr(arm.cond) + " [")
+                    self.fmt_block(arm.body)
+                    i = i + 1
+                ]
+                match else_body [
+                    Some(eb) -> [
+                        self.emit("] else [")
+                        self.fmt_block(eb)
+                    ]
+                    None -> [
+                    ]
+                ]
+                self.emit("]")
+            ]
+            WhileStmt(cond, body) -> [
+                self.emit("while " + self.fmt_expr(cond) + " [")
+                self.fmt_block(body)
+                self.emit("]")
+            ]
+            ForStmt(var, iterable, body) -> [
+                self.emit("for " + var + " in " + self.fmt_expr(iterable) + " [")
+                self.fmt_block(body)
+                self.emit("]")
+            ]
+            ReturnStmt(value) -> [
+                match value [
+                    Some(v) -> [
+                        self.emit("end " + self.fmt_expr(v))
+                    ]
+                    None -> [
+                        self.emit("end")
+                    ]
+                ]
+            ]
+            BreakStmt -> [
+                self.emit("break")
+            ]
+            ContinueStmt -> [
+                self.emit("continue")
+            ]
+            ManualBlock(body) -> [
+                self.emit("manual [")
+                self.fmt_block(body)
+                self.emit("]")
+            ]
+            DirectBlock(raw_lines) -> [
+                !!! `parse_direct` (siec bezpieczenstwa w parser.hcs) -
+                !!! w tej architekturze `direct[...]` zawsze przechodzi
+                !!! przez `extract_direct_blocks` PRZED `parse`, wiec
+                !!! ta galaz w praktyce nie jest osiagana z
+                !!! `format_source` ponizej - zachowana dla parytetu
+                !!! wyczerpujacego dopasowania i na wypadek wywolania
+                !!! `fmt_stmt` bezposrednio na AST z innego zrodla.
+                self.emit("direct [")
+                self.indent = self.indent + 1
+                let i = 0
+                let n = raw_lines.len()
+                while i < n [
+                    self.emit_raw_line(raw_lines[i].clone())
+                    i = i + 1
+                ]
+                self.indent = self.indent - 1
+                self.emit("]")
+            ]
+            StructDecl(name, fields, type_params) -> [
+                self.emit("struct " + name + self.fmt_type_params(type_params) + " [")
+                self.indent = self.indent + 1
+                let i = 0
+                let n = fields.len()
+                while i < n [
+                    let f = fields[i].clone()
+                    let comma = ","
+                    if i == n - 1 [
+                        comma = ""
+                    ]
+                    let type_name = "Any"
+                    match f.type_ref.clone() [
+                        Some(ft) -> [
+                            type_name = self.fmt_type(ft)
+                        ]
+                        None -> [
+                        ]
+                    ]
+                    self.emit(f.name.clone() + ": " + type_name + comma)
+                    i = i + 1
+                ]
+                self.indent = self.indent - 1
+                self.emit("]")
+            ]
+            EnumDecl(name, variants, type_params) -> [
+                self.emit("enum " + name + self.fmt_type_params(type_params) + " [")
+                self.indent = self.indent + 1
+                let i = 0
+                let n = variants.len()
+                while i < n [
+                    let v = variants[i].clone()
+                    let comma = ","
+                    if i == n - 1 [
+                        comma = ""
+                    ]
+                    if v.fields.len() > 0 [
+                        let field_strs: List<Str> = []
+                        let j = 0
+                        let jn = v.fields.len()
+                        while j < jn [
+                            field_strs.push(self.fmt_type(v.fields[j].clone()))
+                            j = j + 1
+                        ]
+                        self.emit(v.name.clone() + "(" + join_str_list(field_strs, ", ") + ")" + comma)
+                    ] else [
+                        self.emit(v.name.clone() + comma)
+                    ]
+                    i = i + 1
+                ]
+                self.indent = self.indent - 1
+                self.emit("]")
+            ]
+            ImplDecl(struct_name, methods, type_params) -> [
+                self.emit("impl " + struct_name + self.fmt_type_params(type_params) + " [")
+                self.indent = self.indent + 1
+                let i = 0
+                let n = methods.len()
+                while i < n [
+                    if i > 0 [
+                        self.emit_blank()
+                    ]
+                    self.fmt_stmt(methods[i].clone())
+                    i = i + 1
+                ]
+                self.indent = self.indent - 1
+                self.emit("]")
+            ]
+            MatchStmt(subject, arms) -> [
+                self.emit("match " + self.fmt_expr(subject) + " [")
+                self.indent = self.indent + 1
+                let i = 0
+                let n = arms.len()
+                while i < n [
+                    let arm = arms[i].clone()
+                    let head = arm.variant.clone()
+                    if arm.binds.len() > 0 [
+                        head = head + "(" + join_str_list(arm.binds, ", ") + ")"
+                    ]
+                    self.emit(head + " -> [")
+                    self.fmt_block(arm.body)
+                    self.emit("]")
+                    i = i + 1
+                ]
+                self.indent = self.indent - 1
+                self.emit("]")
+            ]
+            ExprStmt(e) -> [
+                self.fmt_expr_stmt(e)
+            ]
+        ]
+    ]
+
+    fun fmt_expr_stmt(self, e: Expr) [
+        match e.clone() [
+            StringLit(value, is_doc) -> [
+                if is_doc [
+                    self.emit("!!! " + value)
+                ] else [
+                    self.emit(self.fmt_expr(e))
+                ]
+            ]
+            _ -> [
+                match self.direct_call_index(e.clone()) [
+                    Some(idx_text) -> [
+                        self.fmt_direct_block(idx_text)
+                    ]
+                    None -> [
+                        self.emit(self.fmt_expr(e))
+                    ]
+                ]
+            ]
+        ]
+    ]
+
+    fun fmt_expr(self, node: Expr) -> Str [
+        let c = node.clone()
+        match c [
+            NumberLit(value) -> [
+                end value
+            ]
+            StringLit(value, is_doc) -> [
+                end fmt_string_lit(value)
+            ]
+            BoolLit(value) -> [
+                if value [
+                    end "true"
+                ]
+                end "false"
+            ]
+            NullLit -> [
+                end "null"
+            ]
+            IdentExpr(name) -> [
+                end name
+            ]
+            ListLit(items) -> [
+                let item_strs: List<Str> = []
+                let i = 0
+                let n = items.len()
+                while i < n [
+                    item_strs.push(self.fmt_expr(items[i].clone()))
+                    i = i + 1
+                ]
+                end "[" + join_str_list(item_strs, ", ") + "]"
+            ]
+            UnaryOp(op, operand) -> [
+                let operand_str: Str = self.fmt_expr(operand)
+                if op == "not" [
+                    end "not " + operand_str
+                ]
+                end op + operand_str
+            ]
+            BinOp(op, left, right) -> [
+                end self.fmt_expr(left) + " " + op + " " + self.fmt_expr(right)
+            ]
+            Attr(target, name) -> [
+                end self.fmt_expr(target) + "." + name
+            ]
+            Index(target, index) -> [
+                end self.fmt_expr(target) + "[" + self.fmt_expr(index) + "]"
+            ]
+            Cast(target, type_ref) -> [
+                end self.fmt_expr(target) + " as " + self.fmt_type(type_ref)
+            ]
+            TryOp(target) -> [
+                end self.fmt_expr(target) + "?"
+            ]
+            Call(callee, args) -> [
+                let arg_strs: List<Str> = []
+                let i = 0
+                let n = args.len()
+                while i < n [
+                    arg_strs.push(self.fmt_expr(args[i].clone()))
+                    i = i + 1
+                ]
+                end self.fmt_expr(callee) + "(" + join_str_list(arg_strs, ", ") + ")"
+            ]
+        ]
+    ]
+]
+
+!!! Escapuje `\` i `"` (parytet z `.replace("\\", "\\\\").replace('"',
+!!! '\\"')` w formatter.py) - reczna petla, bo ten bootstrap nie ma
+!!! `Str.replace`.
+fun fmt_string_lit(value: Str) -> Str [
+    let out = "\""
+    let i = 0
+    let n = value.len()
+    while i < n [
+        let c = value.char_at(i)
+        if c == "\\" [
+            out = out + "\\\\"
+        ] elif c == "\"" [
+            out = out + "\\\""
+        ] else [
+            out = out + c
+        ]
+        i = i + 1
+    ]
+    end out + "\""
+]
+
+!!! Parytet z `.rstrip("\n")` - usuwa TYLKO koncowe `\n` (w odroznieniu
+!!! od `strip_newlines` w transpiler.hcs, ktory usuwa tez wiodace -
+!!! `format_program` w Pythonie robi `text.rstrip("\n") + "\n"`,
+!!! WYLACZNIE od konca).
+fun rstrip_newlines(s: Str) -> Str [
+    let n = s.len()
+    let end_i = n
+    while end_i > 0 and s.char_at(end_i - 1) == "\n" [
+        end_i = end_i - 1
+    ]
+    end s.slice(0, end_i)
+]
+
+!!! Formatuje zrodlo `.hcs` -> kanoniczny tekst - parytet z
+!!! `format_source(source, filename)`.
+fun format_source(source: Str, filename: Str) -> Str [
+    let extraction = extract_direct_blocks(source)
+    let direct_dict = direct_blocks_to_dict(extraction.blocks)
+    let prog = parse(extraction.stripped_source)
+    let fmt = new_formatter(direct_dict)
+    end fmt.format_program(prog)
+]
+
+!!! Demonstracyjne uzycie - formatuje maly, celowo "brudno"
+!!! sformatowany program (bez spacji wokol operatorow/przed `[`) i
+!!! sprawdza ze wynik jest kanoniczny.
+fun main() [
+    let src = "fun  add(a:Int,b:Int)->Int[\n  end a+b\n]\n"
+    let out = format_source(src, "<demo>")
+    log(out)
+]
+
+!!! ## Ograniczenia tej wersji (patrz docs/ROADMAP.md)
+!!!
+!!! - Komentarze jednoliniowe `!` przylegajace do instrukcji i `!!`
+!!!   przylegajace bezposrednio do `fun` SA GUBIONE (patrz duza uwaga
+!!!   na gorze pliku) - ograniczenie `ast_nodes.hcs`/`parser.hcs`, nie
+!!!   tego pliku. `!!` jako WLASNA instrukcja (linia doc-comment sama
+!!!   w sobie, styl uzywany w calym tym bootstrapie) JEST zachowywana.
+!!! - `DirectBlock` (natywny wariant `Stmt` w ast_nodes.hcs) jest
+!!!   obslugiwany w `fmt_stmt` dla kompletnosci dopasowania, ale w
+!!!   praktyce nieosiagalny z `format_source` - `direct[...]` zawsze
+!!!   przechodzi przez `extract_direct_blocks` (preprocessing z
+!!!   transpiler.hcs) i konczy jako `ExprStmt(Call(IdentExpr(
+!!!   "__direct__"), [NumberLit(idx)]))`, nie `DirectBlock`.
+!!! - NIEPRZETESTOWANE na prawdziwym wejsciu w tym srodowisku bez
+!!!   pelnego `rustc`/`cargo` w oryginalnym stage0 - w TEJ sesji
+!!!   zweryfikowane strukturalnie (`hackerc check`) i, gdzie to
+!!!   mozliwe, przez faktyczne `cargo build` na wygenerowanym kodzie
+!!!   (patrz bootstrap/README.md, sekcja o tej sesji).
