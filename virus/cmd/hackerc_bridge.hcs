@@ -1,0 +1,105 @@
+get <std:path> import <path_join>
+get <std:string> import <str_trim>
+get <std:process> import <run_command_checked::command_succeeds>
+include <cache>
+
+const DEFAULT_HACKERC_VERSION: Str = "1.2"
+
+!!! Nazwa assetu wydania GitHub - UPROSZCZONE wzgledem oryginalu: TYLKO
+!!! Linux x86_64 (jak reszta tego stdlib - `virus`/`HackerScript`
+!!! celuja w HackerOS-Linux-System, patrz uwagi w innych modulach).
+fun hackerc_asset_name() -> Str [
+    end "hackerc-linux-x86_64"
+]
+
+fun hackerc_release_url(version: Str) -> Str [
+    end "https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v" + version + "/" + hackerc_asset_name()
+]
+
+!!! Znajduje binarke `hackerc` do uzycia, w kolejnosci:
+!!! 1. zmienna srodowiskowa `HACKERC_BIN`
+!!! 2. `cache/env/hackerc-<wersja>/hackerc` (pobrana wczesniej)
+!!! 3. `hackerc` w PATH (np. zainstalowany przez `pip install -e ./hackerc`)
+fun hackerc_resolve(cache: CacheDirs, version: Str) -> Result<Str, Str> [
+    match env_var("HACKERC_BIN") [
+        Some(p) -> [
+            end ok(p)
+        ]
+        None -> [
+        ]
+    ]
+
+    let cached = cache_hackerc_binary(cache, version.clone())
+    if path_exists(cached.clone()) [
+        end ok(cached)
+    ]
+
+    match run_command("which", ["hackerc"]) [
+        Ok(out) -> [
+            let trimmed = str_trim(out)
+            if trimmed.len() > 0 [
+                end ok(trimmed)
+            ]
+        ]
+        Err(_e) -> [
+        ]
+    ]
+
+    end err("nie znaleziono hackerc (wersja " + version + "). Uruchom `virus cache` aby pobrac narzedzia, ustaw HACKERC_BIN, lub zainstaluj `hackerc` z PATH (patrz " + hackerc_release_url(version) + ")")
+]
+
+!!! Patrz uwaga o ograniczeniu na gorze pliku - NIE zaimplementowane.
+fun hackerc_download(cache: CacheDirs, version: Str) -> Result<Str, Str> [
+    end err("virus (HackerScript): automatyczne pobieranie skompilowanej binarki hackerc nie jest jeszcze wspierane (std:http obsluguje tylko odpowiedzi tekstowe UTF-8, nie surowe dane binarne - patrz libs/std/lib/http.hcs). Obejscie: ustaw HACKERC_BIN na sciezke do juz zainstalowanego hackerc, albo 'pip install -e ./hackerc' (trafi do PATH). Wersja " + version + " bylaby pobrana z: " + hackerc_release_url(version))
+]
+
+!!! `hackerc build <entry> -o <crate_dir> --crate-name <nazwa>` -
+!!! generuje PELNY crate Rust (Cargo.toml + src/main.rs + moduly z
+!!! get<std/core/virus>). NIE kompiluje - to robi `hackerc_compile_crate`.
+fun hackerc_build_crate(hackerc_bin: Str, entry: Str, crate_dir: Str, crate_name: Str) -> Result<Str, Str> [
+    end run_command_checked(hackerc_bin, ["build", entry.clone(), "-o", crate_dir.clone(), "--crate-name", crate_name.clone()])
+]
+
+!!! `hackerc check <plik>` - diagnostyka bez generowania kodu.
+fun hackerc_check_file(hackerc_bin: Str, src: Str) -> Result<Str, Str> [
+    end run_command_checked(hackerc_bin, ["check", src.clone()])
+]
+
+!!! `hackerc lint <plik>` - tylko warningi (podzbior `check`).
+!!! `hackerc lint <plik>` - tylko warningi (podzbior `check`). W
+!!! odroznieniu od `hackerc_check_file` (`Result`) zwraca ZAWSZE `Str` -
+!!! `hackerc lint` pisze warningi na STDERR nawet przy kodzie wyjscia 0
+!!! (sukces), wiec `run_command`/`run_command_checked` (ktore przy
+!!! sukcesie zwracaja TYLKO stdout) zgubilyby cala diagnostyke - patrz
+!!! `run_command_combined` (get <std:process>).
+fun hackerc_lint_file(hackerc_bin: Str, src: Str) -> Str [
+    end run_command_combined(hackerc_bin, ["lint", src.clone()])
+]
+
+!!! Kompiluje crate wygenerowany przez `hackerc build` (Cargo.toml +
+!!! src/) przez `cargo build [--release]`. To jest TOOLCHAIN, nie
+!!! menedzer pakietow - `virus` sam nie zarzadza zaleznosciami przez
+!!! cargo (patrz install.hcs) - ale bez realnego kompilatora Rust na
+!!! maszynie zadnego kodu HackerScript nie da sie uruchomic. Zwraca
+!!! sciezke do zbudowanej binarki.
+fun hackerc_compile_crate(crate_dir: Str, crate_name: Str, release: Bool) -> Result<Str, Str> [
+    if not command_succeeds("cargo", ["--version"]) [
+        end err("budowanie wymaga zainstalowanego Rust (cargo) - crate wygenerowany w " + crate_dir + " nie zostal skompilowany. Zainstaluj Rust: https://rustup.rs")
+    ]
+
+    let cargo_args: List<Str> = ["build", "--manifest-path", path_join(crate_dir.clone(), "Cargo.toml")]
+    if release [
+        cargo_args.push("--release")
+    ]
+    let build_result = run_command_checked("cargo", cargo_args)?
+
+    let profile_dir = "debug"
+    if release [
+        profile_dir = "release"
+    ]
+    let built = path_join(path_join(path_join(crate_dir, "target"), profile_dir), crate_name)
+    if not path_exists(built.clone()) [
+        end err("kompilacja zakonczyla sie (podobno) sukcesem, ale nie znaleziono binarki " + built + " - sprawdz [[bin]].name w Cargo.toml. Wyjscie cargo:\n" + build_result)
+    ]
+    end ok(built)
+]
