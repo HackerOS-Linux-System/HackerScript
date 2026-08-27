@@ -1,0 +1,60 @@
+include <cache>
+include <manifest>
+include <check>
+include <hackerc_bridge>
+include <progress>
+get <std:path> import <path_join>
+
+!!! `file` jak w `cmd_lint_run` - `some(sciezka)` formatuje TYLKO ten
+!!! plik, `none()` wszystkie `.hcs` pod `cmd/`. `check_only` = `--check`
+!!! (nie zapisuje, tylko sprawdza czy juz sformatowane). `true` = sukces
+!!! (przy `check_only`: WSZYSTKIE pliki juz byly sformatowane).
+fun cmd_fmt_run(project_root: Str, file: Option<Str>, check_only: Bool) -> Bool [
+    let cache = cache_dirs_for_project(project_root.clone())
+    let version = check_resolve_version(project_root.clone())
+    let hackerc_bin = ""
+    match hackerc_resolve(cache, version) [
+        Ok(bin) -> [
+            hackerc_bin = bin
+        ]
+        Err(e) -> [
+            progress_error(e)
+            end false
+        ]
+    ]
+
+    let sources: List<Str> = []
+    match file [
+        Some(f) -> [
+            sources.push(path_join(project_root.clone(), f))
+        ]
+        None -> [
+            sources = manifest_walk_hcs_files(manifest_source_dir(project_root))
+        ]
+    ]
+
+    let unformatted = 0
+    let i = 0
+    let n = sources.len()
+    while i < n [
+        let args: List<Str> = ["fmt", sources[i].clone()]
+        if check_only [
+            args.push("--check")
+        ]
+        match run_command(hackerc_bin.clone(), args) [
+            Ok(_out) -> [
+            ]
+            Err(_e) -> [
+                unformatted = unformatted + 1
+            ]
+        ]
+        i = i + 1
+    ]
+
+    if check_only and unformatted > 0 [
+        progress_error((unformatted as Str) + " plik(ow) niesformatowanych (uruchom `virus fmt` bez --check)")
+        end false
+    ]
+    progress_success("virus fmt: sprawdzono/sformatowano " + (n as Str) + " plik(ow)")
+    end true
+]
