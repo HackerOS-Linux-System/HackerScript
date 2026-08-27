@@ -1,0 +1,12 @@
+include <cache>
+include <progress>
+
+fun cmd_clean_run(project_root: Str) -> Bool [
+    let cache = cache_dirs_for_project(project_root)
+    if cache_clean(cache) [
+        progress_success("wyczyszczono cache/")
+        end true
+    ]
+    progress_error("nie udalo sie wyczyscic cache/")
+    end false
+]
