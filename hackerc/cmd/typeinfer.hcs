@@ -1,0 +1,659 @@
+include <ast_nodes>
+
+fun is_numeric_type_name(n: Str) -> Bool [
+    end n == "Int" or n == "Float"
+]
+
+fun make_type0(name: Str) -> TypeRef [
+    end TypeRef(name, none(), none())
+]
+
+fun make_type1(name: Str, generic: TypeRef) -> TypeRef [
+    end TypeRef(name, some(generic), none())
+]
+
+fun make_type2(name: Str, generic: TypeRef, generic2: TypeRef) -> TypeRef [
+    end TypeRef(name, some(generic), some(generic2))
+]
+
+!!! `"." in value` - reczna wersja (bez operatora `in` na Str w tej
+!!! wersji bootstrapu).
+fun str_has_dot(s: Str) -> Bool [
+    let i = 0
+    let n = s.len()
+    while i < n [
+        if s.char_at(i) == "." [
+            end true
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+!!! -- Signatures -------------------------------------------------------
+
+!!! Sygnatury calego programu, zebrane Z GORY (wywolania moga
+!!! poprzedzac deklaracje w pliku) - parytet z klasa `Signatures` w
+!!! typeinfer.py. Przechowuje CALE `Stmt` (np. `FunDecl`), nie same
+!!! typy zwracane - odczyt konkretnego pola wymaga funkcji
+!!! pomocniczej (patrz `fun_decl_ret_type` itd. nizej), bo `Stmt` to
+!!! tagowana unia bez nazwanych pol.
+!!!
+!!! `methods` uzywa klucza `"NazwaStruct::nazwa_metody"` (Str) zamiast
+!!! Pythonowej krotki `(str, str)` - HackerScript nie ma typu krotki.
+!!! `variant_owner` (klucz: nazwa wariantu enuma, wartosc: nazwa
+!!! enuma) NIE MA odpowiednika w Pythonie - tam `infer_expr_type`
+!!! po prostu ITERUJE `env.sigs.enums.items()` szukajac wariantu; ten
+!!! bootstrap NIE MA iteracji po Dict (brak `.keys()`/`.values()`/
+!!! `.items()` - patrz "Ograniczenia"), wiec ta odwrotna mapa jest
+!!! budowana Z GORY podczas `collect_signatures`, zeby pozniejsze
+!!! wyszukiwanie bylo pojedynczym `.fetch()`.
+!!! DOPISANE w kolejnej sesji (`codegen.hcs`, krok 6/N): `struct_names`/
+!!! `enum_names`/`function_names` (List<Str>, w kolejnosci deklaracji)
+!!! - `codegen.hcs` musi ITEROWAC WSZYSTKIE structy/enumy (np. zeby
+!!! zbudowac graf rekurencji Box), ale ten bootstrap NIE MA iteracji po
+!!! Dict (`.keys()`/`.values()`/`.items()`) - te listy sa jedynym
+!!! sposobem, zeby pozniej "przejrzec" zawartosc `structs`/`enums`/
+!!! `functions` (Dict daje tylko `.fetch(known_key)`, nie enumeracje).
+struct Signatures [
+    functions: Dict<Str, Stmt>,
+    structs: Dict<Str, Stmt>,
+    enums: Dict<Str, Stmt>,
+    methods: Dict<Str, Stmt>,
+    variant_owner: Dict<Str, Str>,
+    struct_names: List<Str>,
+    enum_names: List<Str>,
+    function_names: List<Str>
+]
+
+fun fun_decl_ret_type(f: Stmt) -> Option<TypeRef> [
+    match f [
+        FunDecl(name, params, ret_type, body, is_pub, type_params) -> [
+            end ret_type.clone()
+        ]
+        _ -> [
+            end none()
+        ]
+    ]
+]
+
+fun struct_decl_fields(s: Stmt) -> List<Param> [
+    match s [
+        StructDecl(name, fields, type_params) -> [
+            end fields.clone()
+        ]
+        _ -> [
+            end []
+        ]
+    ]
+]
+
+!!! Buduje `Signatures` z calego programu. Idzie po `prog.body` PLUS,
+!!! dla kazdego `ImplDecl`, po jego `methods` (zawsze `FunDecl` z
+!!! konwencji parsera - patrz "Ograniczenia" w ast_nodes.hcs).
+!!!
+!!! Klonuje `stmt`/`m` PRZED dopasowaniem (`stmt.clone()`) - inaczej
+!!! wstawienie CALEGO `stmt` do Dict WEWNATRZ galezi `match stmt [...]`
+!!! byloby "uzyciem czesciowo przeniesionej wartosci" (dopasowanie
+!!! wyciaga pola jak `name` przez przeniesienie, wiec `stmt` sam w
+!!! sobie staje sie niedostepny w tej samej galezi) - Rust by to
+!!! odrzucil.
+fun collect_signatures(prog: Program) -> Signatures [
+    let functions: Dict<Str, Stmt> = dict()
+    let structs: Dict<Str, Stmt> = dict()
+    let enums: Dict<Str, Stmt> = dict()
+    let methods: Dict<Str, Stmt> = dict()
+    let variant_owner: Dict<Str, Str> = dict()
+    let struct_names: List<Str> = []
+    let enum_names: List<Str> = []
+    let function_names: List<Str> = []
+
+    let i = 0
+    let n = prog.body.len()
+    while i < n [
+        let stmt = prog.body[i]
+        let stmt_copy = stmt.clone()
+        match stmt [
+            FunDecl(name, params, ret_type, body, is_pub, type_params) -> [
+                functions.insert(name.clone(), stmt_copy)
+                function_names.push(name)
+            ]
+            StructDecl(name, fields, type_params) -> [
+                structs.insert(name.clone(), stmt_copy)
+                struct_names.push(name)
+            ]
+            EnumDecl(name, variants, type_params) -> [
+                enums.insert(name.clone(), stmt_copy)
+                enum_names.push(name.clone())
+                let k = 0
+                let vn = variants.len()
+                while k < vn [
+                    let v = variants[k].clone()
+                    variant_owner.insert(v.name, name.clone())
+                    k = k + 1
+                ]
+            ]
+            ImplDecl(struct_name, impl_methods, type_params) -> [
+                let j = 0
+                let mn = impl_methods.len()
+                while j < mn [
+                    let m = impl_methods[j].clone()
+                    let m_copy = m.clone()
+                    match m [
+                        FunDecl(mname, mparams, mret, mbody, mis_pub, mtype_params) -> [
+                            methods.insert(struct_name.clone() + "::" + mname, m_copy)
+                        ]
+                        _ -> [
+                        ]
+                    ]
+                    j = j + 1
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+        i = i + 1
+    ]
+
+    end Signatures(functions, structs, enums, methods, variant_owner, struct_names, enum_names, function_names)
+]
+
+!!! -- TypeEnv -----------------------------------------------------------
+
+!!! Srodowisko typow zmiennych lokalnych - jedno na funkcje (bootstrap:
+!!! bez blokowego scoping, tak jak parytet Pythona). `vars` przechowuje
+!!! `Option<TypeRef>` jako WARTOSC (nie tylko `TypeRef`) - odpowiada
+!!! Pythonowemu `dict[str, TypeRef | None]` (zmienna MOZE byc
+!!! zadeklarowana bez znanego typu, np. `let x = f()` gdzie `f` zwraca
+!!! Void/nieznany typ).
+struct TypeEnv [
+    sigs: Signatures,
+    vars: Dict<Str, Option<TypeRef>>
+]
+
+impl TypeEnv [
+    fun declare(self, name: Str, type_: Option<TypeRef>) [
+        self.vars.insert(name, type_)
+    ]
+
+    !!! `self.vars.fetch(name)` zwraca `Option<Option<TypeRef>>` (Dict
+    !!! samo w sobie opakowuje w Option dla "klucz istnieje?", a
+    !!! WARTOSC juz jest `Option<TypeRef>`) - splaszcza obie warstwy do
+    !!! JEDNEGO `Option<TypeRef>`, parytet z Pythonowym `dict.get(name)`
+    !!! (ktore zwraca `None` zarowno gdy klucza nie ma, jak i gdy
+    !!! wartosc jest jawnie `None`).
+    fun lookup(self, name: Str) -> Option<TypeRef> [
+        match self.vars.fetch(name) [
+            Some(inner) -> [
+                end inner
+            ]
+            None -> [
+                end none()
+            ]
+        ]
+    ]
+
+    fun is_declared(self, name: Str) -> Bool [
+        end self.vars.contains(name)
+    ]
+]
+
+!!! Rownosc typow uwzgledniajaca `Any` jako "nieznany, do
+!!! wywnioskowania z kontekstu" (np. element pustej listy `[]`) -
+!!! dopasowanie ZAWSZE prawdziwe wobec `Any`, zeby np. `let xs:
+!!! List<Token> = []` nie falszywie nie zgadzalo sie typow (`List<Any>`
+!!! != `List<Token>`) - dokladnie ten sam bug/fix co w typeinfer.py
+!!! (patrz komentarz przy `_types_equal` tam), teraz odtworzony tu.
+!!!
+!!! Patrz uwaga projektowa na gorze pliku co do tego, DLACZEGO ta cala
+!!! funkcja jest jedna funkcja z zagniezdzonymi `match`-ami zamiast
+!!! wywolan rekurencyjnych na `.generic`/`.generic2`.
+fun types_equal(a: Option<TypeRef>, b: Option<TypeRef>) -> Bool [
+    match a [
+        Some(ta) -> [
+            match b [
+                Some(tb) -> [
+                    if ta.name == "Any" or tb.name == "Any" [
+                        end true
+                    ]
+                    if ta.name != tb.name [
+                        end false
+                    ]
+                    !!! REKURENCYJNE wywolanie `types_equal` (nie plytkie
+                    !!! `ga.name != gb.name`) - inaczej `List<Any>` (typ
+                    !!! wywnioskowany pustej listy `[]`) vs `List<Diagnostic>`
+                    !!! (typ zadeklarowany) falszywie wypada jako NIErowne,
+                    !!! bo "Any" != "Diagnostic" na tym poziomie stringow,
+                    !!! mimo ze `types_equal` na SAMYM `Any` (gdyby
+                    !!! porownywane bezposrednio) zwrocilby `true`. Bug
+                    !!! znaleziony przy uzyciu skompilowanego stage1
+                    !!! (samo-hostowanego hackerc) do zbudowania cli.hcs -
+                    !!! Pythonowy `typecheck.py`/`typeinfer.py` NIE MIAL tego
+                    !!! bledu (tam `_types_equal` jest juz rekurencyjne,
+                    !!! patrz `typeinfer.py::_types_equal`) - `typeinfer.hcs`
+                    !!! mial PLYTSZA, niepelna kopie tej samej funkcji.
+                    if not types_equal(ta.generic, tb.generic) [
+                        end false
+                    ]
+                    if not types_equal(ta.generic2, tb.generic2) [
+                        end false
+                    ]
+                    end true
+                ]
+                None -> [
+                    end false
+                ]
+            ]
+        ]
+        None -> [
+            !!! `None` (brak generyku po OBU stronach - np. `generic2`
+            !!! kazdego prostego `List<X>`) MUSI byc traktowane jako
+            !!! ROWNE, nie "automatycznie false" - inaczej KAZDE
+            !!! porownanie `List<X>` (jeden poziom generyku, `generic2`
+            !!! zawsze `None`) wywoluje `types_equal(None, None)` dla
+            !!! `generic2` i falszywie wypada jako NIErowne. Druga
+            !!! polowa TEGO SAMEGO bledu co wyzej - `_types_equal` w
+            !!! Pythonie NIGDY nie rekuruje na `None` wprost (sprawdza
+            !!! `(a.generic is None) != (b.generic is None)` i rekuruje
+            !!! TYLKO gdy oba Some) - ta rekurencyjna wersja HCS musi
+            !!! wiec sama obsluzyc przypadek `None, None` -> `true`.
+            match b [
+                Some(_tb) -> [
+                    end false
+                ]
+                None -> [
+                    end true
+                ]
+            ]
+        ]
+    ]
+]
+
+!!! -- Wywolania (Call) --------------------------------------------------
+
+!!! Zwraca nazwe identyfikatora, jesli `e` to `IdentExpr`, inaczej
+!!! pusty Str. Patrz uwaga projektowa na gorze pliku - to jest
+!!! WYWOLANIE FUNKCJI (nie zagniezdzony match) specjalnie po to, zeby
+!!! bezpiecznie obsluzyc `Box<Expr>` przychodzacy z zewnetrznego
+!!! `match Call(callee, args)`.
+fun expr_as_ident_name(e: Expr) -> Str [
+    let e2 = e.clone()
+    match e2 [
+        IdentExpr(name) -> [
+            end name
+        ]
+        _ -> [
+            end ""
+        ]
+    ]
+]
+
+!!! Ksztalt `wyrazenie.metoda` uzywany TYLKO do inferencji typu
+!!! wywolania - CELOWO nie przechowuje surowego `target: Expr` (co
+!!! zderzyloby sie z tym samym problemem co on sam mial rozwiazac -
+!!! `Box<Expr>` wstawiany w pole zadeklarowane jako zwykle `Expr`),
+!!! tylko JUZ WYLICZONY typ celu (`target_type: Option<TypeRef>`,
+!!! bezpieczny, bo nie jest czescia grafu cykli `Expr`).
+struct AttrCallShape [
+    is_attr_call: Bool,
+    method_name: Str,
+    target_type: Option<TypeRef>
+]
+
+fun expr_call_shape(e: Expr, env: TypeEnv) -> AttrCallShape [
+    let e2 = e.clone()
+    match e2 [
+        Attr(target, name) -> [
+            let tt = infer_expr_type(target, env)
+            end AttrCallShape(true, name, tt)
+        ]
+        _ -> [
+            end AttrCallShape(false, "", none())
+        ]
+    ]
+]
+
+!!! Wywolanie przez IDENTYFIKATOR: `f(...)`, `Struct(...)`,
+!!! `WariantEnuma(...)`, wbudowane (`log`/`read_file`/`write_file`/
+!!! `some`/`none`/`ok`/`err`/`dict`).
+fun infer_ident_call_type(name: Str, env: TypeEnv) -> Option<TypeRef> [
+    if name == "log" [
+        end none()
+    ]
+    if name == "read_file" [
+        end some(make_type2("Result", make_type0("Str"), make_type0("Str")))
+    ]
+    if name == "write_file" [
+        end some(make_type2("Result", make_type0("Void"), make_type0("Str")))
+    ]
+    if name == "env_var" [
+        end some(make_type1("Option", make_type0("Str")))
+    ]
+    if name == "run_command" [
+        end some(make_type2("Result", make_type0("Str"), make_type0("Str")))
+    ]
+    if name == "run_command_combined" [
+        end some(make_type0("Str"))
+    ]
+    if name == "current_dir" [
+        end some(make_type2("Result", make_type0("Str"), make_type0("Str")))
+    ]
+    if name == "http_get" [
+        end some(make_type2("Result", make_type0("Str"), make_type0("Str")))
+    ]
+    if name == "some" or name == "none" or name == "ok" or name == "err" or name == "dict" [
+        end none()
+    ]
+    match env.sigs.functions.fetch(name) [
+        Some(f) -> [
+            end fun_decl_ret_type(f)
+        ]
+        None -> [
+        ]
+    ]
+    if env.sigs.structs.contains(name) [
+        end some(make_type0(name))
+    ]
+    match env.sigs.variant_owner.fetch(name) [
+        Some(enum_name) -> [
+            end some(make_type0(enum_name))
+        ]
+        None -> [
+            end none()
+        ]
+    ]
+]
+
+!!! Wywolanie metody: `.fetch`/`.remove` na `Dict<K,V>` -> `Option<V>`,
+!!! `.char_at`/`.slice` na `Str` -> `Str`, w przeciwnym razie
+!!! zadeklarowany typ zwracany metody uzytkownika z `impl` (jesli
+!!! `target_type` jest znanym structem majacym taka metode) - parytet z
+!!! `elif isinstance(callee, A.Attr): ... env.sigs.methods.get((target_t.name,
+!!! callee.name))` w typeinfer.py. BRAK tego fallbacku byl bugiem
+!!! znalezionym przy uzyciu skompilowanego stage1 (samo-hostowanego
+!!! hackerc) do zbudowania cli.hcs w tej sesji - `formatter.hcs::fmt_expr`
+!!! wola `self.fmt_expr(...)` (metode uzytkownika), a bez tego fallbacku
+!!! `infer_expr_type` zwracal `None` dla takiego wywolania, co psulo
+!!! wykrywanie konkatenacji Str (`expr_is_strish`) w `op + self.fmt_expr(
+!!! operand)` i generowalo niekompilujacy sie Rust (`&String + String`).
+fun infer_attr_call_type(method_name: Str, target_type: Option<TypeRef>, sigs: Signatures) -> Option<TypeRef> [
+    match target_type [
+        Some(tt) -> [
+            if (method_name == "fetch" or method_name == "remove") and tt.name == "Dict" [
+                match tt.generic2 [
+                    Some(g2) -> [
+                        end some(make_type1("Option", g2))
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            if (method_name == "char_at" or method_name == "slice") and tt.name == "Str" [
+                end some(make_type0("Str"))
+            ]
+            match sigs.methods.fetch(tt.name.clone() + "::" + method_name) [
+                Some(fn_stmt) -> [
+                    match fn_stmt [
+                        FunDecl(fname, fparams, fret, fbody, fis_pub, ftype_params) -> [
+                            end fret
+                        ]
+                        _ -> [
+                        ]
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+            end none()
+        ]
+        None -> [
+            end none()
+        ]
+    ]
+]
+
+!!! -- Glowna funkcja: infer_expr_type -----------------------------------
+
+!!! Parytet z `infer_expr_type(expr, env)` w typeinfer.py. Klonuje `expr`
+!!! do wlasnej, WLASNEJ (owned) lokalnej zmiennej NA STARCIE (patrz
+!!! uwaga projektowa na gorze pliku) - dzieki temu KAZDE dopasowanie w
+!!! tej funkcji jest na wartosci OWNED, wiec zwykle pola (nie-Boxowane,
+!!! np. `NumberLit`'s `Str`) sa bezposrednio uzywalne, a pola Boxowane
+!!! (`Expr` w `BinOp`/`Call`/`Attr`/itd.) sa przekazywane DALEJ tylko
+!!! jako ARGUMENTY WYWOLAN (bezpieczne dzieki koercji Rusta), nigdy
+!!! nie dopasowywane bezposrednio.
+fun infer_expr_type(expr: Expr, env: TypeEnv) -> Option<TypeRef> [
+    let e = expr.clone()
+    match e [
+        NumberLit(value) -> [
+            if str_has_dot(value) [
+                end some(make_type0("Float"))
+            ]
+            end some(make_type0("Int"))
+        ]
+        StringLit(value, is_doc) -> [
+            end some(make_type0("Str"))
+        ]
+        BoolLit(value) -> [
+            end some(make_type0("Bool"))
+        ]
+        NullLit -> [
+            end none()
+        ]
+        IdentExpr(name) -> [
+            end env.lookup(name)
+        ]
+        UnaryOp(op, operand) -> [
+            if op == "not" [
+                end some(make_type0("Bool"))
+            ]
+            end infer_expr_type(operand, env)
+        ]
+        BinOp(op, left, right) -> [
+            if op == "and" or op == "or" or op == "==" or op == "!=" or op == "<" or op == ">" or op == "<=" or op == ">=" [
+                end some(make_type0("Bool"))
+            ]
+            let lt = infer_expr_type(left, env)
+            let rt = infer_expr_type(right, env)
+            match lt [
+                Some(ltv) -> [
+                    match rt [
+                        Some(rtv) -> [
+                            if op == "+" and ltv.name == "Str" and rtv.name == "Str" [
+                                end some(make_type0("Str"))
+                            ]
+                            if is_numeric_type_name(ltv.name) and is_numeric_type_name(rtv.name) [
+                                if ltv.name == "Float" or rtv.name == "Float" [
+                                    end some(make_type0("Float"))
+                                ]
+                                end some(make_type0("Int"))
+                            ]
+                            end none()
+                        ]
+                        None -> [
+                            end none()
+                        ]
+                    ]
+                ]
+                None -> [
+                    end none()
+                ]
+            ]
+        ]
+        Call(callee, args) -> [
+            let ident_name = expr_as_ident_name(callee)
+            if ident_name != "" [
+                end infer_ident_call_type(ident_name, env)
+            ]
+            let shape = expr_call_shape(callee, env)
+            if shape.is_attr_call [
+                end infer_attr_call_type(shape.method_name, shape.target_type, env.sigs)
+            ]
+            end none()
+        ]
+        ListLit(items) -> [
+            if items.len() == 0 [
+                end some(make_type1("List", make_type0("Any")))
+            ]
+            let first = infer_expr_type(items[0], env)
+            match first [
+                Some(ft) -> [
+                    let all_same = true
+                    let i = 1
+                    let n = items.len()
+                    while i < n [
+                        let it = infer_expr_type(items[i], env)
+                        if not types_equal(some(ft.clone()), it) [
+                            all_same = false
+                        ]
+                        i = i + 1
+                    ]
+                    if all_same [
+                        end some(make_type1("List", ft))
+                    ]
+                    end some(make_type1("List", make_type0("Any")))
+                ]
+                None -> [
+                    end some(make_type1("List", make_type0("Any")))
+                ]
+            ]
+        ]
+        Attr(target, name) -> [
+            let target_t = infer_expr_type(target, env)
+            match target_t [
+                Some(tt) -> [
+                    match env.sigs.structs.fetch(tt.name) [
+                        Some(s) -> [
+                            let fields = struct_decl_fields(s)
+                            let i = 0
+                            let n = fields.len()
+                            while i < n [
+                                let f = fields[i]
+                                if f.name == name [
+                                    end f.type_ref
+                                ]
+                                i = i + 1
+                            ]
+                            end none()
+                        ]
+                        None -> [
+                            end none()
+                        ]
+                    ]
+                ]
+                None -> [
+                    end none()
+                ]
+            ]
+        ]
+        Index(target, index) -> [
+            let target_t = infer_expr_type(target, env)
+            match target_t [
+                Some(tt) -> [
+                    if tt.name == "List" [
+                        end tt.generic
+                    ]
+                    end none()
+                ]
+                None -> [
+                    end none()
+                ]
+            ]
+        ]
+        Cast(target, type_ref) -> [
+            end some(type_ref)
+        ]
+        TryOp(target) -> [
+            let target_t = infer_expr_type(target, env)
+            match target_t [
+                Some(tt) -> [
+                    if tt.name == "Result" or tt.name == "Option" [
+                        end tt.generic
+                    ]
+                    end none()
+                ]
+                None -> [
+                    end none()
+                ]
+            ]
+        ]
+    ]
+]
+
+!!! `log()` w tym codegen ZAWSZE uzywa `{}` (Display), NIGDY `{:?}`
+!!! (Debug) - `_gen_log` w codegen.py nie rozroznia typu argumentu.
+!!! Structy/enumy w tym bootstrapie dostaja `#[derive(..., Debug,
+!!! ...)]`, ale NIGDY `Display` - wiec `log(jakis_struct_lub_enum)`
+!!! (w tym `Option<TypeRef>`) NIE SKOMPILUJE SIE w prawdziwym Rust
+!!! (E0277: `TypeRef`/`Option<TypeRef>` nie implementuje `Display`).
+!!! Znalezione przy pisaniu tego pliku - `log()` jest wiec BEZPIECZNY
+!!! tylko dla Int/Float/Str/Bool, NIGDY dla struct/enum/Option<...>
+!!! bezposrednio. Ten maly helper konwertuje `Option<TypeRef>` na Str
+!!! (tylko nazwa najwyzszego poziomu, bez generykow - wystarczy do
+!!! demonstracji) PRZED przekazaniem do `log`.
+fun type_opt_to_str(t: Option<TypeRef>) -> Str [
+    match t [
+        Some(tv) -> [
+            end tv.name
+        ]
+        None -> [
+            end "?"
+        ]
+    ]
+]
+
+!!! Demonstracyjne uzycie - buduje reczne `Signatures`/`TypeEnv` dla
+!!! `struct Point [ x: Int, y: Int ]` + `fun make() -> Point [...]` i
+!!! sprawdza inferencje dla `1 + 2` (Int), `1.5 + 1` (Float),
+!!! `"a" + "b"` (Str), `make().x` (Int, przez pole struct).
+fun main() [
+    let point_fields: List<Param> = [Param("x", some(make_type0("Int")), none()), Param("y", some(make_type0("Int")), none())]
+    let point_decl = StructDecl("Point", point_fields, [])
+    let make_decl = FunDecl("make", [], some(make_type0("Point")), [], false, [])
+    let prog = Program([point_decl, make_decl])
+    let sigs = collect_signatures(prog)
+    let vars: Dict<Str, Option<TypeRef>> = dict()
+    let env = TypeEnv(sigs, vars)
+
+    let e1 = BinOp("+", NumberLit("1"), NumberLit("2"))
+    let e2 = BinOp("+", NumberLit("1.5"), NumberLit("1"))
+    let e3 = BinOp("+", StringLit("a", false), StringLit("b", false))
+    let e4 = Attr(Call(IdentExpr("make"), []), "x")
+
+    log("1+2 ->", type_opt_to_str(infer_expr_type(e1, env)))
+    log("1.5+1 ->", type_opt_to_str(infer_expr_type(e2, env)))
+    log("a+b ->", type_opt_to_str(infer_expr_type(e3, env)))
+    log("make().x ->", type_opt_to_str(infer_expr_type(e4, env)))
+]
+
+!!! ## Ograniczenia tej wersji (patrz docs/ROADMAP.md)
+!!!
+!!! - `types_equal` porownuje generyki TYLKO do 1 poziomu zagniezdzenia
+!!!   (`ta.generic.name == tb.generic.name`, bez dalszej rekursji w
+!!!   `generic.generic`) - patrz uwaga projektowa na gorze pliku
+!!!   (dlaczego rekurencja przez wywolanie funkcji nie dziala tutaj).
+!!!   W praktyce w calym tym repo generyki nigdy nie sa zagniezdzone
+!!!   glebiej niz `Zewnetrzny<Wewnetrzny>` (np. `List<Int>`,
+!!!   `Dict<Str,Stmt>`, `Option<TypeRef>`), wiec to ograniczenie nie ma
+!!!   dzis praktycznego znaczenia.
+!!! - Brak iteracji po `Dict` (`.keys()`/`.values()`/`.items()` nie
+!!!   istnieja w tym bootstrapie) - `Signatures.variant_owner` to
+!!!   obejscie zbudowane Z GORY podczas `collect_signatures` zamiast
+!!!   iterowac `enums` pozniej (jak w Pythonie).
+!!! - `is_declared` uzywa `Dict.contains` (parytet z `name in
+!!!   self.vars` w Pythonie).
+!!! - **Nowe, potwierdzone dzis ograniczenie codegen.py**: `log(...)`
+!!!   ZAWSZE uzywa formatu `{}` (Display), nigdy `{:?}` (Debug) -
+!!!   struct/enum w tym bootstrapie dostaja `Debug`, NIGDY `Display`,
+!!!   wiec `log(jakis_struct_lub_enum)` (w tym `Option<T>` gdzie T to
+!!!   struct/enum) NIE SKOMPILUJE SIE. `log()` jest bezpieczny TYLKO
+!!!   dla Int/Float/Str/Bool. Patrz `type_opt_to_str` powyzej.
+!!! - NIEPODPIETE jeszcze pod `parser.hcs` (parser sam nie wywoluje
+!!!   `infer_expr_type` - to zrobi dopiero `typecheck.hcs`, kolejny
+!!!   krok, ktory rzeczywiscie UZYWA wynikow inferencji do
+!!!   wykrywania niezgodnosci typow).
+!!! - NIEPRZETESTOWANE na prawdziwym wejsciu w tym srodowisku (brak
+!!!   rustc) - zweryfikowane strukturalnie przez `hackerc check`/
+!!!   `build` i BARDZO dokladna inspekcje wygenerowanego Rusta (patrz
+!!!   docs/ROADMAP.md - ten plik mial NAJWIECEJ potencjalnych pulapek
+!!!   typu Box/referencja ze wszystkich dotychczasowych krokow).
