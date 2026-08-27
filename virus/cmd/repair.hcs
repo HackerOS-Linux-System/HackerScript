@@ -1,0 +1,69 @@
+include <progress>
+
+struct RepairDiagnostic [
+    code: Str,
+    title: Str,
+    explanation: Str,
+    suggestion: Str
+]
+
+!!! Baza znanych kodow - parytet z tablica `DIAGNOSTICS` (Rust).
+fun repair_diagnostics() -> List<RepairDiagnostic> [
+    end [
+        RepairDiagnostic("E0001", "niezamkniety blok [ ... ]", "Kazdy blok HackerScript otwarty przez '[' musi byc zamkniety przez ']'.", "Sprawdz czy na koncu funkcji/if/while/for jest brakujacy ']'."),
+        RepairDiagnostic("E0002", "brak `end` na koncu funkcji zwracajacej wartosc", "Funkcja z typem zwracanym (-> Typ) powinna konczyc sie `end <wyrazenie>`.", "Dodaj `end <wartosc>` przed zamknieciem bloku funkcji."),
+        RepairDiagnostic("W0001", "nieuzywana zmienna", "Zmienna zadeklarowana przez `let` nigdy nie jest odczytywana.", "Usun deklaracje albo poprzedz nazwe podkreslnikiem `_nazwa` (docelowo wspierane)."),
+        RepairDiagnostic("E0003", "nieznane zrodlo zaleznosci w `get <zrodlo:nazwa>`", "Obslugiwane zrodla to: pypi, crates, npm, jsr, std, core, selfhost, virus.", "Popraw prefiks zrodla w instrukcji `get`.")
+    ]
+]
+
+!!! Uppercase'uje TYLKO pierwszy znak (kody diagnostyczne to zawsze
+!!! jedna litera + cyfry, np. "e0001" -> "E0001") - odpowiednik
+!!! `code.to_uppercase()" dla tego waskiego przypadku, bez potrzeby
+!!! pelnego `to_uppercase` w std:string.
+fun repair_normalize_code(code: Str) -> Str [
+    if code.len() == 0 [
+        end code
+    ]
+    let first = code.char_at(0)
+    let upper_first = first.clone()
+    if first == "e" [
+        upper_first = "E"
+    ] elif first == "w" [
+        upper_first = "W"
+    ]
+    end upper_first + code.slice(1, code.len())
+]
+
+fun repair_lookup(code_upper: Str) -> Option<RepairDiagnostic> [
+    let diags = repair_diagnostics()
+    let i = 0
+    let n = diags.len()
+    while i < n [
+        let d = diags[i].clone()
+        if d.code == code_upper [
+            end some(d)
+        ]
+        i = i + 1
+    ]
+    end none()
+]
+
+!!! `true` = kod znaleziony i wyjasniony.
+fun cmd_repair_run(code: Str) -> Bool [
+    let code_upper = repair_normalize_code(code.clone())
+    match repair_lookup(code_upper.clone()) [
+        Some(d) -> [
+            progress_header(d.code.clone() + " - " + d.title.clone())
+            log(d.explanation)
+            log("")
+            log("sugestia:", d.suggestion)
+            end true
+        ]
+        None -> [
+            progress_error("nieznany kod diagnostyczny: " + code)
+            elog("brak wpisu dla " + code_upper + " w bazie diagnostyk - jesli to swiezy blad z hackerc, zglos go, zeby dodac go do `virus repair` (docs/ROADMAP.md)")
+            end false
+        ]
+    ]
+]
