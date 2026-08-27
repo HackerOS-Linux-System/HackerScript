@@ -1,0 +1,534 @@
+include <ast_nodes>
+include <parser>
+include <typecheck>
+include <diagnostics>
+include <formatter>
+include <transpiler>
+include <project>
+get <std:io> import <file_readable>
+
+const VERSION: Str = "0.1"
+
+!!! `parse()` ale z tym samym preprocessingiem `direct [ ... ]` co
+!!! transpilacja - inaczej pliki z `direct[...]` psulyby `check`/`lint`
+!!! mylacym bledem parsera (`direct` jest normalnym slowem kluczowym
+!!! TYLKO na etapie preprocessingu, patrz transpiler.hcs). Parytet z
+!!! `_parse_with_direct`.
+fun parse_with_direct(source: Str) -> Program [
+    let extraction = extract_direct_blocks(source)
+    end parse(extraction.stripped_source)
+]
+
+!!! Wypisuje diagnostyki (opcjonalnie przefiltrowane po `severity`) i
+!!! zwraca LICZBE bledow (`severity == "error"`) - parytet z
+!!! `_print_diagnostics`. `only_severity == ""` znaczy "bez filtra"
+!!! (HackerScript nie ma `str | None` - `Option<Str>` uzyty tylko tam,
+!!! gdzie brak wartosci jest semantycznie inny niz pusty string).
+fun print_diagnostics(source: Str, filename: Str, diags: List<Diagnostic>, only_severity: Str) -> Int [
+    let filtered: List<Diagnostic> = []
+    let i = 0
+    let n = diags.len()
+    while i < n [
+        let d = diags[i].clone()
+        if only_severity == "" or d.severity == only_severity [
+            filtered.push(d)
+        ]
+        i = i + 1
+    ]
+    if filtered.len() == 0 [
+        end 0
+    ]
+    log(render_many(source, filename, filtered.clone()))
+    let errors = 0
+    let j = 0
+    let fn_ = filtered.len()
+    while j < fn_ [
+        if filtered[j].severity == "error" [
+            errors = errors + 1
+        ]
+        j = j + 1
+    ]
+    end errors
+]
+
+!!! `hackerc check <plik>` - tylko diagnostyka (typecheck), bez
+!!! zapisu. Zwraca kod wyjscia (0 = sukces). Parytet z `cmd_check`.
+fun cmd_check(src_path: Str) -> Int [
+    if not file_readable(src_path.clone()) [
+        log("hackerc: nie znaleziono pliku " + src_path)
+        end 1
+    ]
+    match read_file(src_path.clone()) [
+        Ok(source) -> [
+            let program = parse_with_direct(source.clone())
+            let diags = check_program(program, [])
+            let errors = print_diagnostics(source, src_path.clone(), diags.clone(), "")
+            if errors > 0 [
+                log("hackerc check: " + (errors as Str) + " blad(ow)")
+                end 1
+            ]
+            log("hackerc check: " + src_path + " OK (" + (diags.len() as Str) + " warning(ow))")
+            end 0
+        ]
+        Err(e) -> [
+            log("hackerc: " + src_path + ": " + e)
+            end 1
+        ]
+    ]
+]
+
+!!! `hackerc lint <plik>` - tylko warningi (podzbior `check`). Parytet
+!!! z `cmd_lint`.
+fun cmd_lint(src_path: Str) -> Int [
+    if not file_readable(src_path.clone()) [
+        log("hackerc: nie znaleziono pliku " + src_path)
+        end 1
+    ]
+    match read_file(src_path.clone()) [
+        Ok(source) -> [
+            let program = parse_with_direct(source.clone())
+            let diags = check_program(program, [])
+            let warnings: List<Diagnostic> = []
+            let i = 0
+            let n = diags.len()
+            while i < n [
+                if diags[i].severity == "warning" [
+                    warnings.push(diags[i].clone())
+                ]
+                i = i + 1
+            ]
+            if warnings.len() == 0 [
+                log("hackerc lint: " + src_path + " - brak uwag")
+                end 0
+            ]
+            log(render_many(source, src_path, warnings))
+            end 0
+        ]
+        Err(e) -> [
+            log("hackerc: " + src_path + ": " + e)
+            end 1
+        ]
+    ]
+]
+
+!!! `hackerc build <plik> -o <dir>` - pelny crate Rust, rozwiazuje
+!!! `get <std/core/selfhost:...>` rekurencyjnie. Parytet z `cmd_build`.
+!!! `out_dir`/`crate_name` juz rozpakowane (patrz uwaga na gorze pliku
+!!! o braku argv) - `out_dir`/`out_dir + "/src"` MUSZA JUZ ISTNIEC,
+!!! patrz to samo ograniczenie udokumentowane przy `build_project` w
+!!! project.hcs.
+fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>) -> Int [
+    if not file_readable(src_path.clone()) [
+        log("hackerc: nie znaleziono pliku " + src_path)
+        end 1
+    ]
+    match read_file(src_path.clone()) [
+        Ok(source) -> [
+            let program = parse_with_direct(source.clone())
+
+            !!! Sygnatury calego projektu PRZED check_program - inaczej
+            !!! konstruktor wariantu z zaimportowanego 'enum' (np.
+            !!! `get <selfhost:ast_nodes> import <Expr>` + `Var(...)`)
+            !!! dawalby spurious ostrzezenie "nieznana funkcja", bo
+            !!! `check_program` widzi domyslnie tylko JEDEN plik -
+            !!! parytet z komentarzem w cmd_build (Python).
+            let ps = collect_project_signatures(src_path.clone(), libs_root.clone(), bootstrap_root.clone())
+            let extra_variants: List<Str> = []
+            let ei = 0
+            let en = ps.sigs.enum_names.len()
+            while ei < en [
+                match ps.sigs.enums.fetch(ps.sigs.enum_names[ei].clone()) [
+                    Some(estmt) -> [
+                        match estmt [
+                            EnumDecl(ename, variants, type_params) -> [
+                                let vi = 0
+                                let vn = variants.len()
+                                while vi < vn [
+                                    extra_variants.push(variants[vi].name.clone())
+                                    vi = vi + 1
+                                ]
+                            ]
+                            _ -> [
+                            ]
+                        ]
+                    ]
+                    None -> [
+                    ]
+                ]
+                ei = ei + 1
+            ]
+
+            let diags = check_program(program, extra_variants)
+            let errors = print_diagnostics(source, src_path.clone(), diags.clone(), "")
+            if errors > 0 [
+                log("hackerc build: przerwano - " + (errors as Str) + " blad(ow) w " + src_path)
+                end 1
+            ]
+
+            let result = build_project(src_path, out_dir, libs_root, bootstrap_root, crate_name)
+
+            let wi = 0
+            let wn = result.warnings.len()
+            while wi < wn [
+                log("hackerc build: uwaga: " + result.warnings[wi])
+                wi = wi + 1
+            ]
+
+            log("hackerc build: crate gotowy w " + result.crate_dir + " (uruchom `cargo build --release` tam)")
+            log("hackerc build: " + result.main_rs_path)
+            let mi = 0
+            let mn = result.module_files.len()
+            while mi < mn [
+                log("hackerc build: modul -> " + result.module_files[mi])
+                mi = mi + 1
+            ]
+            if result.needs_pyo3 [
+                log("hackerc build: wykryto direct[ ... ] -> Cargo.toml zawiera zaleznosc pyo3 (auto-initialize)")
+            ]
+            if result.crates_deps_names.len() > 0 [
+                log("hackerc build: zaleznosci Cargo z get<crates:...>: " + join_str_list(result.crates_deps_names, ", "))
+            ]
+            end 0
+        ]
+        Err(e) -> [
+            log("hackerc: " + src_path + ": " + e)
+            end 1
+        ]
+    ]
+]
+
+fun join_str_list(items: List<Str>, sep: Str) -> Str [
+    let out = ""
+    let i = 0
+    let n = items.len()
+    while i < n [
+        if i > 0 [
+            out = out + sep
+        ]
+        out = out + items[i]
+        i = i + 1
+    ]
+    end out
+]
+
+!!! Domyslny katalog wyjsciowy dla `hackerc build <src>` (bez `-o`) -
+!!! "target-hcs" jako SASIAD pliku zrodlowego, WEWNATRZ jego katalogu
+!!! nadrzednego - parytet z Python `src_path.parent / "target-hcs"`
+!!! (hackerc/hackerc/cli.py).
+!!!
+!!! NAPRAWA BUGA: poprzednia wersja liczyla to jako `src + "/../target-
+!!! hcs"` (zwykla konkatenacja stringow) - dla `src = "cli.hcs"" dawalo
+!!! to doslownie "cli.hcs/../target-hcs", co przy przekazaniu do
+!!! wywolan systemu plikow probuje WEJSC do "cli.hcs" jak do KATALOGU
+!!! (podczas gdy to zwykly plik) - stad bledy "Not a directory" i seria
+!!! bledow po nich (include/libs/ nie znalezione, bo katalog wyjsciowy
+!!! byl kompletnie zly). Ta wersja poprawnie znajduje katalog
+!!! NADRZEDNY pliku (ostatni "/" w `src`) i dokleja "target-hcs" DO
+!!! NIEGO - dla "cli.hcs" (bez "/") daje po prostu "target-hcs"
+!!! (katalog biezacy), a dla "cmd/main.hcs" daje "cmd/target-hcs".
+fun default_build_out_dir(src: Str) -> Str [
+    let n = src.len()
+    let idx = 0 - 1
+    let i = n
+    while i > 0 [
+        i = i - 1
+        if src.char_at(i) == "/" [
+            idx = i
+            break
+        ]
+    ]
+    if idx < 0 [
+        end "target-hcs"
+    ]
+    end src.slice(0, idx) + "/target-hcs"
+]
+
+!!! `hackerc fmt <plik> [-o plik] [--check]` - formatuje kod `.hcs`.
+!!! Parytet z `cmd_fmt`. `check_only`: `true` -> tylko sprawdz (nie
+!!! zapisuj), zwraca 1 jesli plik nie jest sformatowany.
+!!! `dest_path == ""` -> zapisz w miejscu (parytet z `dest = src_path`
+!!! gdy `args.output` brak).
+fun cmd_fmt(src_path: Str, dest_path: Str, check_only: Bool) -> Int [
+    if not file_readable(src_path.clone()) [
+        log("hackerc: nie znaleziono pliku " + src_path)
+        end 1
+    ]
+    match read_file(src_path.clone()) [
+        Ok(source) -> [
+            let formatted = format_source(source.clone(), src_path.clone())
+            if check_only [
+                if formatted != source [
+                    log("hackerc fmt --check: " + src_path + " NIE jest sformatowany")
+                    end 1
+                ]
+                log("hackerc fmt --check: " + src_path + " OK")
+                end 0
+            ]
+            let dest = src_path.clone()
+            if dest_path != "" [
+                dest = dest_path
+            ]
+            match write_file(dest.clone(), formatted) [
+                Ok(_v) -> [
+                    log("hackerc fmt: sformatowano " + dest)
+                    end 0
+                ]
+                Err(e) -> [
+                    log("hackerc: " + dest + ": " + e)
+                    end 1
+                ]
+            ]
+        ]
+        Err(e) -> [
+            log("hackerc: " + src_path + ": " + e)
+            end 1
+        ]
+    ]
+]
+
+!!! Tryb kompatybilnosci wstecznej: transpiluje JEDEN plik `.hcs` do
+!!! `.rs`, bez rozwiazywania `get <std/core:...>` (to robi tylko
+!!! `build`). Parytet z `cmd_transpile_legacy`. `out_path == ""` ->
+!!! wypisz kod Rust zamiast zapisywac (parytet z `else: ... print(
+!!! result.rust_code)` gdy `args.output` brak).
+fun cmd_transpile_legacy(src_path: Str, out_path: Str) -> Int [
+    if not file_readable(src_path.clone()) [
+        log("hackerc: nie znaleziono pliku " + src_path)
+        end 1
+    ]
+    if out_path != "" [
+        match transpile_file(src_path.clone(), out_path.clone(), "module") [
+            Ok(_result) -> [
+                end 0
+            ]
+            Err(e) -> [
+                log("error: " + e)
+                end 1
+            ]
+        ]
+    ]
+    match read_file(src_path.clone()) [
+        Ok(source) -> [
+            let result = transpile_source_full(source, src_path.clone(), "module", empty_extra_signatures())
+            log(result.rust_code)
+            end 0
+        ]
+        Err(e) -> [
+            log("hackerc: " + src_path + ": " + e)
+            end 1
+        ]
+    ]
+]
+
+!!! Demonstracyjne uzycie - `cmd_check` na maly, poprawny program
+!!! wbudowany bezposrednio jako string (nie na prawdziwym pliku, zeby
+!!! demo dzialalo wszedzie bez przygotowanego wejscia) - patrz duza
+!!! uwaga na gorze pliku o braku prawdziwego `argv`. `main()` samo w
+!!! sobie NIE odczytuje linii polecen.
+!!! Wypisuje banner `usage`/`--help` - parytet z
+!!! `build_parser().print_help()` (Python, argparse).
+fun print_usage() [
+    log("usage: hackerc [-h] [--version] {check,lint,build,fmt} ...")
+    log("")
+    log("Transpilator HackerScript -> Rust")
+    log("")
+    log("positional arguments:")
+    log("  {check,lint,build,fmt}")
+    log("    check               typecheck bez generowania kodu")
+    log("    lint                tylko warningi (podzbior 'check')")
+    log("    build               pelny crate Rust (Cargo.toml + src/)")
+    log("    fmt                 formatuje kod .hcs")
+    log("")
+    log("options:")
+    log("  -h, --help            show this help message and exit")
+    log("  --version             pokaz wersje hackerc")
+]
+
+!!! Znajduje wartosc flagi `-short wartosc` / `--long wartosc`
+!!! (rozdzielone spacja - w odroznieniu od argparse ten bootstrap NIE
+!!! obsluguje skladni `--long=wartosc`, patrz "Ograniczenia").
+fun find_flag_value(argv: List<Str>, short: Str, long: Str) -> Option<Str> [
+    let i = 0
+    let n = argv.len()
+    while i < n [
+        let tok = argv[i]
+        if (short != "" and tok == short) or tok == long [
+            if i + 1 < n [
+                end some(argv[i + 1])
+            ]
+        ]
+        i = i + 1
+    ]
+    end none()
+]
+
+fun has_flag(argv: List<Str>, long: Str) -> Bool [
+    let i = 0
+    let n = argv.len()
+    while i < n [
+        if argv[i] == long [
+            end true
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+fun starts_with_dash(s: Str) -> Bool [
+    end s.len() > 0 and s.char_at(0) == "-"
+]
+
+fun cli_list_contains_str(items: List<Str>, target: Str) -> Bool [
+    let i = 0
+    let n = items.len()
+    while i < n [
+        if items[i] == target [
+            end true
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+!!! Pierwszy argument pozycyjny (nie zaczyna sie od `-`) - pomija
+!!! kazda flage z `value_flags` WRAZ Z JEJ WARTOSCIA (parytet z tym, co
+!!! argparse robi automatycznie rozpoznajac zadeklarowane flagi).
+fun first_positional(argv: List<Str>, value_flags: List<Str>) -> Str [
+    let i = 0
+    let n = argv.len()
+    while i < n [
+        let tok = argv[i]
+        if starts_with_dash(tok) [
+            if cli_list_contains_str(value_flags, tok) [
+                i = i + 1
+            ]
+        ] else [
+            end tok
+        ]
+        i = i + 1
+    ]
+    end ""
+]
+
+!!! Punkt wejscia - parytet z `main(argv)` (cli.py), WLACZAJAC
+!!! rzeczywisty odczyt argv przez `args()` (patrz "Roznica
+!!! architektoniczna" na gorze pliku - TERAZ juz zaimplementowana,
+!!! dzieki `args()`/`exit()` w codegen.py/codegen.hcs).
+fun main() [
+    let argv = args()
+
+    if argv.len() == 0 [
+        print_usage()
+        exit(1)
+    ]
+
+    let first = argv[0].clone()
+
+    if first == "--version" [
+        log("hackerc " + VERSION)
+        exit(0)
+    ]
+    if first == "-h" or first == "--help" [
+        print_usage()
+        exit(0)
+    ]
+
+    if first == "check" or first == "lint" or first == "build" or first == "fmt" [
+        let _rest = argv.remove(0)
+        let value_flags: List<Str> = ["-o", "--output", "--crate-name", "--libs-root", "--bootstrap-root"]
+        let src = first_positional(argv, value_flags)
+        if src == "" [
+            log("hackerc " + first + ": brak wymaganego argumentu 'source'")
+            exit(1)
+        ]
+
+        if first == "check" [
+            exit(cmd_check(src))
+        ]
+        if first == "lint" [
+            exit(cmd_lint(src))
+        ]
+        if first == "fmt" [
+            let dest = ""
+            match find_flag_value(argv, "-o", "--output") [
+                Some(v) -> [
+                    dest = v
+                ]
+                None -> [
+                ]
+            ]
+            exit(cmd_fmt(src, dest, has_flag(argv, "--check")))
+        ]
+        !!! first == "build"
+        let out_dir = default_build_out_dir(src.clone())
+        match find_flag_value(argv, "-o", "--output") [
+            Some(v) -> [
+                out_dir = v
+            ]
+            None -> [
+            ]
+        ]
+        let crate_name = "hackerscript_app"
+        match find_flag_value(argv, "", "--crate-name") [
+            Some(v) -> [
+                crate_name = v
+            ]
+            None -> [
+            ]
+        ]
+        let libs_root: Option<Str> = none()
+        match find_flag_value(argv, "", "--libs-root") [
+            Some(v) -> [
+                libs_root = some(v)
+            ]
+            None -> [
+            ]
+        ]
+        let bootstrap_root: Option<Str> = none()
+        match find_flag_value(argv, "", "--bootstrap-root") [
+            Some(v) -> [
+                bootstrap_root = some(v)
+            ]
+            None -> [
+            ]
+        ]
+        exit(cmd_build(src, out_dir, crate_name, libs_root, bootstrap_root))
+    ]
+
+    !!! Tryb kompatybilnosci wstecznej (parytet z `legacy` ArgumentParser
+    !!! w Pythonie) - `first` nie jest zadna znana podkomenda, wiec
+    !!! traktujemy CALE argv jako "plik [-o wyjscie]" tryb legacy.
+    if has_flag(argv, "--version") [
+        log("hackerc " + VERSION)
+        exit(0)
+    ]
+    let legacy_src = first_positional(argv, ["-o", "--output"])
+    if legacy_src == "" [
+        print_usage()
+        exit(1)
+    ]
+    let legacy_out = ""
+    match find_flag_value(argv, "-o", "--output") [
+        Some(v) -> [
+            legacy_out = v
+        ]
+        None -> [
+        ]
+    ]
+    exit(cmd_transpile_legacy(legacy_src, legacy_out))
+]
+
+!!! ## Ograniczenia tej wersji (patrz docs/ROADMAP.md)
+!!!
+!!! - `find_flag_value`/`first_positional` obsluguja TYLKO skladnie
+!!!   `-o wartosc`/`--output wartosc` (rozdzielone spacja) - argparse'owe
+!!!   `--output=wartosc` (znak `=`) NIE JEST rozpoznawane.
+!!! - `cmd_build`/`cmd_transpile_legacy` dziedzicza wszystkie
+!!!   ograniczenia `project.hcs`/`transpiler.hcs` (m. in. brak
+!!!   tworzenia katalogow wyjsciowych, best-effort parser bez
+!!!   `Result` dla bledow skladni) - patrz "Ograniczenia" w tamtych
+!!!   plikach.
+!!! - NIEPRZETESTOWANE na prawdziwym wejsciu z dysku w tym srodowisku
+!!!   poza demo w `main()` - zweryfikowane strukturalnie (`hackerc
+!!!   check`/`build`) i, gdzie to mozliwe, przez faktyczne `cargo
+!!!   build` na wygenerowanym kodzie (patrz bootstrap/README.md).
