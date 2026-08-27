@@ -1,0 +1,57 @@
+include <cache>
+include <progress>
+get <std:string> import <str_split::str_join::str_trim::str_starts_with>
+get <std:path> import <path_join>
+
+!!! `true` = sukces (usunieto pliki - jesli byly - I zaktualizowano
+!!! Virus.hk, bez wzgledu na to, czy zaleznosc w ogole tam byla).
+fun cmd_remove_run(project_root: Str, source: Str, name: Str) -> Bool [
+    let cache = cache_dirs_for_project(project_root.clone())
+    let dest = cache_lib_path(cache, source.clone(), name.clone())
+    if path_exists(dest.clone()) [
+        match remove_dir_all(dest.clone()) [
+            Ok(_v) -> [
+            ]
+            Err(e) -> [
+                progress_error("nie mozna usunac " + dest + ": " + e)
+                end false
+            ]
+        ]
+    ]
+
+    let manifest_path = path_join(project_root, "Virus.hk")
+    match read_file(manifest_path.clone()) [
+        Ok(text) -> [
+            let lines = str_split(text, "\n")
+            let kept: List<Str> = []
+            let dotted_prefix = "-> " + source.clone() + "." + name.clone() + " "
+            let nested_prefix = "--> " + name.clone() + " "
+            let i = 0
+            let n = lines.len()
+            while i < n [
+                let line = lines[i].clone()
+                let trimmed = str_trim(line.clone())
+                let matches_dep = str_starts_with(trimmed.clone(), dotted_prefix.clone()) or str_starts_with(trimmed, nested_prefix.clone())
+                if not matches_dep [
+                    kept.push(line)
+                ]
+                i = i + 1
+            ]
+            match write_file(manifest_path, str_join(kept, "\n")) [
+                Ok(_v) -> [
+                ]
+                Err(e) -> [
+                    progress_error("nie mozna zapisac Virus.hk: " + e)
+                    end false
+                ]
+            ]
+        ]
+        Err(e) -> [
+            progress_error("nie mozna odczytac Virus.hk: " + e)
+            end false
+        ]
+    ]
+
+    progress_success("usunieto " + source + ":" + name)
+    end true
+]
