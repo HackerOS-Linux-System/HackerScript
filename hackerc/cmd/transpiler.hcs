@@ -1,0 +1,562 @@
+include <ast_nodes>
+include <parser>
+include <typeinfer>
+include <codegen>
+
+!!! Wynik transpilacji - parytet z `@dataclass TranspileResult`.
+struct TranspileResult [
+    rust_code: Str,
+    needs_pyo3: Bool
+]
+
+!!! Sygnatury/mut-maps "z zewnatrz" (z INNYCH plikow .hcs, zaimportowanych
+!!! przez `get <std/core/selfhost:...>`) - parytet z parametrami
+!!! `extra_functions`/`extra_structs`/`extra_enums`/`extra_mut_params`/
+!!! `extra_methods`/`extra_method_mut_params` w `transpile_source_full`
+!!! Pythona. HackerScript nie ma iteracji po `Dict` (brak `.keys()`/
+!!! `.items()`, patrz "Ograniczenia" w typeinfer.hcs) - kazdy Dict tu
+!!! MUSI wiec byc towarzyszony wlasna lista nazw-kluczy (`*_names`),
+!!! zeby `merge_signatures_with_extra` mogl "przejrzec" jego zawartosc.
+!!! Wypelnia to `project.hcs` (`collect_project_signatures`).
+struct ExtraSignatures [
+    functions: Dict<Str, Stmt>,
+    function_names: List<Str>,
+    structs: Dict<Str, Stmt>,
+    struct_names: List<Str>,
+    enums: Dict<Str, Stmt>,
+    enum_names: List<Str>,
+    methods: Dict<Str, Stmt>,
+    method_names: List<Str>,
+    mut_params: Dict<Str, Bool>,
+    method_mut_params: Dict<Str, Bool>
+]
+
+!!! `ExtraSignatures` pusty - dla wywolan `transpile_source_full` na
+!!! pojedynczym pliku, bez kontekstu calego projektu (parytet z
+!!! wywolaniem Pythona z domyslnymi `extra_* = None`).
+fun empty_extra_signatures() -> ExtraSignatures [
+    let functions: Dict<Str, Stmt> = dict()
+    let structs: Dict<Str, Stmt> = dict()
+    let enums: Dict<Str, Stmt> = dict()
+    let methods: Dict<Str, Stmt> = dict()
+    let mut_params: Dict<Str, Bool> = dict()
+    let method_mut_params: Dict<Str, Bool> = dict()
+    end ExtraSignatures(functions, [], structs, [], enums, [], methods, [], mut_params, method_mut_params)
+]
+
+!!! Dopisuje do `owner` mapowanie wariant -> nazwa enuma dla JEDNEGO
+!!! `EnumDecl` (parytet z petla po `enum_decl.variants` w
+!!! `_build_variant_registry` z codegen.py - tu wydzielone, bo ten
+!!! plik musi to policzyc TEZ dla enumow pochodzacych z `extra.enums`,
+!!! ktore `collect_signatures` (dzialajace tylko na LOKALNYM programie)
+!!! nie widzi).
+fun collect_variant_owner_for_enum(e: Stmt, owner: Dict<Str, Str>) [
+    match e [
+        EnumDecl(name, variants, type_params) -> [
+            let k = 0
+            let vn = variants.len()
+            while k < vn [
+                owner.insert(variants[k].name.clone(), name.clone())
+                k = k + 1
+            ]
+        ]
+        _ -> [
+        ]
+    ]
+]
+
+!!! Laczy `local` (Signatures policzone TYLKO dla tego pliku przez
+!!! `collect_signatures`) z `extra` (globalny rejestr z reszty
+!!! projektu) - LOKALNE wpisy maja PIERWSZENSTWO (parytet z Pythonowym
+!!! `{**extra_functions, **gen.sigs.functions}` - drugi operand
+!!! nadpisuje pierwszy w skladni `{**a, **b}`, wiec lokalne wygrywaja).
+!!! Iteruje `extra.*_names` (patrz `ExtraSignatures` wyzej) zamiast
+!!! iterowac Dict bezposrednio - ten bootstrap nie ma iteracji po Dict.
+fun merge_signatures_with_extra(local: Signatures, extra: ExtraSignatures) -> Signatures [
+    let functions = local.functions.clone()
+    let function_names = local.function_names.clone()
+    let fi = 0
+    let fn_n = extra.function_names.len()
+    while fi < fn_n [
+        let name = extra.function_names[fi]
+        match local.functions.fetch(name) [
+            Some(_v) -> [
+            ]
+            None -> [
+                match extra.functions.fetch(name) [
+                    Some(v) -> [
+                        functions.insert(name.clone(), v)
+                        function_names.push(name)
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+        ]
+        fi = fi + 1
+    ]
+
+    let structs = local.structs.clone()
+    let struct_names = local.struct_names.clone()
+    let si = 0
+    let st_n = extra.struct_names.len()
+    while si < st_n [
+        let name = extra.struct_names[si]
+        match local.structs.fetch(name) [
+            Some(_v) -> [
+            ]
+            None -> [
+                match extra.structs.fetch(name) [
+                    Some(v) -> [
+                        structs.insert(name.clone(), v)
+                        struct_names.push(name)
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+        ]
+        si = si + 1
+    ]
+
+    let enums = local.enums.clone()
+    let enum_names = local.enum_names.clone()
+    let variant_owner = local.variant_owner.clone()
+    let ei = 0
+    let en_n = extra.enum_names.len()
+    while ei < en_n [
+        let name = extra.enum_names[ei]
+        match local.enums.fetch(name) [
+            Some(_v) -> [
+            ]
+            None -> [
+                match extra.enums.fetch(name) [
+                    Some(v) -> [
+                        enums.insert(name.clone(), v.clone())
+                        enum_names.push(name)
+                        collect_variant_owner_for_enum(v, variant_owner)
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+        ]
+        ei = ei + 1
+    ]
+
+    let methods = local.methods.clone()
+    let mi = 0
+    let m_n = extra.method_names.len()
+    while mi < m_n [
+        let name = extra.method_names[mi]
+        match local.methods.fetch(name) [
+            Some(_v) -> [
+            ]
+            None -> [
+                match extra.methods.fetch(name) [
+                    Some(v) -> [
+                        methods.insert(name.clone(), v)
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+        ]
+        mi = mi + 1
+    ]
+
+    end Signatures(functions, structs, enums, methods, variant_owner, struct_names, enum_names, function_names)
+]
+
+!!! Laczy `local_mut_params` (policzone przez `compute_mut_params` TYLKO
+!!! dla tego pliku) z `extra.mut_params` - lokalne wygrywaja, parytet z
+!!! `{**extra_mut_params, **gen.mut_params}` w `generate()` (codegen.py).
+fun merge_mut_params_with_extra(local_mut: Dict<Str, Bool>, extra: ExtraSignatures) -> Dict<Str, Bool> [
+    let out = local_mut.clone()
+    let i = 0
+    let n = extra.function_names.len()
+    while i < n [
+        let name = extra.function_names[i]
+        match local_mut.fetch(name) [
+            Some(_v) -> [
+            ]
+            None -> [
+                match extra.mut_params.fetch(name) [
+                    Some(v) -> [
+                        out.insert(name, v)
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+!!! Sklada `direct_blocks` (Dict<Int-jako-Str, Str> zebrane przez
+!!! `extract_direct_blocks` nizej) na `Dict<Str, Str>` wymagany przez
+!!! `codegen.hcs::new_codegen` - `idx` jest juz `Str` w tym module
+!!! (patrz `extract_direct_blocks`), wiec to zwykle "przepisanie 1:1",
+!!! wydzielone jako wlasna funkcja dla czytelnosci wywolan nizej.
+fun direct_blocks_to_dict(blocks: List<Str>) -> Dict<Str, Str> [
+    let out: Dict<Str, Str> = dict()
+    let i = 0
+    let n = blocks.len()
+    while i < n [
+        out.insert(i as Str, blocks[i].clone())
+        i = i + 1
+    ]
+    end out
+]
+
+fun is_direct_ident_char(c: Str) -> Bool [
+    if c >= "a" and c <= "z" [
+        end true
+    ]
+    if c >= "A" and c <= "Z" [
+        end true
+    ]
+    if c >= "0" and c <= "9" [
+        end true
+    ]
+    if c == "_" [
+        end true
+    ]
+    end false
+]
+
+!!! Reczny odpowiednik minimalnego wciecia wspolnego dla wszystkich
+!!! NIEPUSTYCH linii (parytet z `textwrap.dedent` - UPROSZCZONY: liczy
+!!! DLUGOSC wiodacych spacji/tabow, nie porownuje same znaki litera po
+!!! literze jak prawdziwy `textwrap.dedent` - wystarczajace dla kodu
+!!! `.hcs`, ktory zawsze uzywa spacji konsekwentnie, patrz
+!!! "Ograniczenia" na koncu pliku).
+fun common_leading_whitespace(lines: List<Str>) -> Int [
+    let min_indent = -1
+    let i = 0
+    let n = lines.len()
+    while i < n [
+        let line = lines[i]
+        let llen = line.len()
+        let blank = true
+        let j = 0
+        while j < llen [
+            let c = line.char_at(j)
+            if not (c == " " or c == "\t") [
+                blank = false
+            ]
+            j = j + 1
+        ]
+        if not blank [
+            let indent = 0
+            let k = 0
+            while k < llen [
+                let c = line.char_at(k)
+                if c == " " or c == "\t" [
+                    indent = indent + 1
+                ] else [
+                    k = llen
+                ]
+                k = k + 1
+            ]
+            if min_indent == -1 or indent < min_indent [
+                min_indent = indent
+            ]
+        ]
+        i = i + 1
+    ]
+    if min_indent == -1 [
+        end 0
+    ]
+    end min_indent
+]
+
+fun dedent_text(raw: Str) -> Str [
+    let lines = split_lines_local(raw)
+    let indent = common_leading_whitespace(lines)
+    let out_lines: List<Str> = []
+    let i = 0
+    let n = lines.len()
+    while i < n [
+        let line = lines[i]
+        let llen = line.len()
+        if indent >= llen [
+            out_lines.push("")
+        ] else [
+            out_lines.push(line.slice(indent, llen))
+        ]
+        i = i + 1
+    ]
+    let joined = ""
+    let j = 0
+    let jn = out_lines.len()
+    while j < jn [
+        if j > 0 [
+            joined = joined + "\n"
+        ]
+        joined = joined + out_lines[j]
+        j = j + 1
+    ]
+    end strip_newlines(joined)
+]
+
+!!! Dzieli po `\n` (BEZ pomijania `\r`, w odroznieniu od
+!!! `diagnostics.hcs::split_lines` - tresc `direct [ ... ]` to Python,
+!!! gdzie `\r` wewnatrz linii jest istotny/rzadki, wiec ten plik nie
+!!! ryzykuje go cicho gubic tak jak `diagnostics.hcs` robi to celowo
+!!! dla zrodla `.hcs`).
+fun split_lines_local(source: Str) -> List<Str> [
+    let lines: List<Str> = []
+    let cur = ""
+    let i = 0
+    let n = source.len()
+    while i < n [
+        let c = source.char_at(i)
+        if c == "\n" [
+            lines.push(cur)
+            cur = ""
+        ] else [
+            cur = cur + c
+        ]
+        i = i + 1
+    ]
+    lines.push(cur)
+    end lines
+]
+
+!!! Parytet z Pythonowym `.strip("\n")` - usuwa TYLKO wiodace/koncowe
+!!! znaki `\n` (nie inne bialе znaki, w odroznieniu od goleg `.strip()`).
+fun strip_newlines(s: Str) -> Str [
+    let n = s.len()
+    let start = 0
+    while start < n and s.char_at(start) == "\n" [
+        start = start + 1
+    ]
+    let end_i = n
+    while end_i > start and s.char_at(end_i - 1) == "\n" [
+        end_i = end_i - 1
+    ]
+    end s.slice(start, end_i)
+]
+
+!!! Wynik `extract_direct_blocks` - HackerScript nie ma generycznych
+!!! tupli, wiec `(Str, Dict<Int,Str>)` z Pythona staje sie wlasnym
+!!! struct (parytet z `ElifArm`/`Edge` gdzie indziej w bootstrapie).
+struct DirectExtraction [
+    stripped_source: Str,
+    blocks: List<Str>
+]
+
+!!! Zamienia kazdy blok `direct [ ... ]` na wyrazenie `__direct__(N)` i
+!!! zwraca (nowe_zrodlo, lista_surowych_blokow_w_kolejnosci) - parytet
+!!! z `_extract_direct_blocks` (transpiler.py). `blocks[N]` odpowiada
+!!! Pythonowemu `blocks[N]` (indeksy 0..len-1 w kolejnosci wystapienia).
+!!!
+!!! Reczne skanowanie zamiast `re.compile(r"\bdirect\b").search` -
+!!! sprawdza znak przed/po dopasowaniu przez `is_direct_ident_char`
+!!! (parytet granicy slowa `\b` dla `[a-zA-Z0-9_]`).
+fun extract_direct_blocks(source: Str) -> DirectExtraction [
+    let blocks: List<Str> = []
+    let out = ""
+    let i = 0
+    let n = source.len()
+    while i < n [
+        let found_at = -1
+        let scan = i
+        while scan < n and found_at == -1 [
+            if scan + 6 <= n and source.slice(scan, scan + 6) == "direct" [
+                let before_ok = scan == 0 or not is_direct_ident_char(source.char_at(scan - 1))
+                let after_ok = scan + 6 >= n or not is_direct_ident_char(source.char_at(scan + 6))
+                if before_ok and after_ok [
+                    found_at = scan
+                ]
+            ]
+            scan = scan + 1
+        ]
+        if found_at == -1 [
+            out = out + source.slice(i, n)
+            i = n
+        ] else [
+            let start = found_at
+            out = out + source.slice(i, start)
+            let j = start + 6
+            while j < n and (source.char_at(j) == " " or source.char_at(j) == "\t") [
+                j = j + 1
+            ]
+            if j >= n or source.char_at(j) != "[" [
+                out = out + source.slice(start, j)
+                i = j
+            ] else [
+                let depth = 0
+                let k = j
+                let closed_at = -1
+                while k < n and closed_at == -1 [
+                    let c = source.char_at(k)
+                    if c == "[" [
+                        depth = depth + 1
+                    ] elif c == "]" [
+                        depth = depth - 1
+                        if depth == 0 [
+                            closed_at = k
+                        ]
+                    ]
+                    k = k + 1
+                ]
+                if closed_at == -1 [
+                    log("[transpiler.hcs] niezamkniety blok direct [ ... ]")
+                    i = n
+                ] else [
+                    let raw = source.slice(j + 1, closed_at)
+                    let dedented = dedent_text(raw)
+                    let idx = blocks.len()
+                    blocks.push(dedented)
+                    out = out + "__direct__(" + (idx as Str) + ")"
+                    i = closed_at + 1
+                ]
+            ]
+        ]
+    ]
+    end DirectExtraction(out, blocks)
+]
+
+!!! Rdzen transpilacji - parytet z `transpile_source_full` (patrz
+!!! uwaga na gorze pliku co do bledow: brak `Result`, zawsze sciezka
+!!! sukcesu). `extra` domyslnie `empty_extra_signatures()` dla
+!!! pojedynczego pliku bez kontekstu projektu.
+fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, extra: ExtraSignatures) -> TranspileResult [
+    let local_sigs = collect_signatures(prog.clone())
+    let sigs = merge_signatures_with_extra(local_sigs, extra)
+    let local_mut = compute_mut_params(prog.clone())
+    let mut_params = merge_mut_params_with_extra(local_mut, extra)
+    let method_mut_params = compute_method_mut_params(prog.clone(), extra.method_mut_params.clone())
+    let info = build_recursion_info(sigs.clone())
+    let varity = build_variant_arity(sigs.clone())
+    let ndstructs = compute_no_default_structs(sigs.clone(), info.boxed_fields.clone())
+    let direct_dict = direct_blocks_to_dict(direct_blocks)
+    let gen = new_codegen(sigs, info.boxed_fields, mut_params, method_mut_params, varity, ndstructs, direct_dict)
+
+    let i = 0
+    let n = prog.body.len()
+    while i < n [
+        gen.gen_toplevel(prog.body[i].clone())
+        i = i + 1
+    ]
+
+    let header: List<Str> = ["// Plik wygenerowany automatycznie przez hackerc (HackerScript -> Rust).", "// NIE EDYTUJ RECZNIE - edytuj zrodlo .hcs i uruchom 'virus build' ponownie.", "#![allow(non_snake_case, unused_mut, dead_code)]"]
+    if gen.needs_pyo3 [
+        header.push("use pyo3::prelude::*;")
+    ]
+    header.push("")
+
+    let rust_lines: List<Str> = []
+    let hi = 0
+    let hn = header.len()
+    while hi < hn [
+        rust_lines.push(header[hi].clone())
+        hi = hi + 1
+    ]
+    let oi = 0
+    let on = gen.output.len()
+    while oi < on [
+        rust_lines.push(gen.output[oi].clone())
+        oi = oi + 1
+    ]
+
+    let rust_code = ""
+    let ri = 0
+    let rn = rust_lines.len()
+    while ri < rn [
+        rust_code = rust_code + rust_lines[ri]
+        if ri < rn - 1 [
+            rust_code = rust_code + "\n"
+        ]
+        ri = ri + 1
+    ]
+    rust_code = rust_code + "\n"
+
+    end TranspileResult(rust_code, gen.needs_pyo3)
+]
+
+!!! Transpiluje zrodlo `.hcs` -> `TranspileResult` (kod Rust + info czy
+!!! potrzebne PyO3) - parytet z `transpile_source_full`. `module_name`
+!!! jest dzis przyjmowany dla zgodnosci sygnatury z Pythonem, ale
+!!! (tak samo jak w `codegen.hcs::gen_program`) NIE trafia jeszcze do
+!!! naglowka wygenerowanego pliku - laczenie wielu plikow/nazewnictwo
+!!! modulow to zadanie `project.hcs`, ktore uzywa go osobno przy
+!!! zapisie `src/{flat_name}.rs`.
+fun transpile_source_full(source: Str, filename: Str, module_name: Str, extra: ExtraSignatures) -> TranspileResult [
+    let extraction = extract_direct_blocks(source)
+    let prog = parse(extraction.stripped_source)
+    end transpile_program_with_extra(prog, extraction.blocks, extra)
+]
+
+!!! Skrot: zwraca tylko kod Rust (bez `needs_pyo3`) - parytet z
+!!! `transpile_source(source, filename)` (Python, domyslny `extra=None`).
+fun transpile_source(source: Str, filename: Str) -> Str [
+    let result = transpile_source_full(source, filename, "module", empty_extra_signatures())
+    end result.rust_code
+]
+
+!!! Czyta `src_path`, transpiluje, zapisuje `.rs` do `out_path` - parytet
+!!! z `transpile_file`. Uzywa wbudowanych `read_file`/`write_file`
+!!! (patrz `libs/std/lib/io.hcs`) zamiast `pathlib.Path.read_text`/
+!!! `write_text` - `mkdir(parents=True)` z Pythona NIE MA odpowiednika
+!!! (brak prymitywu tworzenia katalogow w tym bootstrapie, patrz
+!!! "Ograniczenia" ponizej i `project.hcs`) wiec `out_path` musi
+!!! wskazywac na JUZ ISTNIEJACY katalog.
+fun transpile_file(src_path: Str, out_path: Str, module_name: Str) -> Result<TranspileResult, Str> [
+    let read_result = read_file(src_path)
+    match read_result [
+        Ok(source) -> [
+            let result = transpile_source_full(source, src_path, module_name, empty_extra_signatures())
+            let write_result = write_file(out_path, result.rust_code.clone())
+            match write_result [
+                Ok(_v) -> [
+                    end ok(result)
+                ]
+                Err(e) -> [
+                    end err(e)
+                ]
+            ]
+        ]
+        Err(e) -> [
+            end err(e)
+        ]
+    ]
+]
+
+!!! Demonstracyjne uzycie - transpiluje maly program zawierajacy
+!!! `direct [ ... ]`, sprawdza ze `__direct__(0)` zostal poprawnie
+!!! wyciagniety i ze `needs_pyo3` jest ustawione.
+fun main() [
+    let src = "fun main() [\n    direct [\n        print(\"hello from python\")\n    ]\n    log(\"hello from rust\")\n]\n"
+    let extra = empty_extra_signatures()
+    let result = transpile_source_full(src, "<demo>", "module", extra)
+    log("needs_pyo3:", result.needs_pyo3)
+    log("dlugosc wygenerowanego Rusta:", result.rust_code.len())
+]
+
+!!! ## Ograniczenia tej wersji (patrz docs/ROADMAP.md)
+!!!
+!!! - Brak `Result`/wyjatkow dla bledow PARSERA (patrz uwaga na gorze
+!!!   pliku) - `parser.hcs::parse()` sam w sobie best-effort/`log`-uje.
+!!!   `transpile_file` zwraca `Result` TYLKO dla bledow I/O
+!!!   (`read_file`/`write_file`), nie dla bledow skladni - inny zakres
+!!!   niz Pythonowy `TranspileError`, ktory pokrywa oba.
+!!! - `dedent_text` liczy wciecie PO DLUGOSCI wiodacych spacji/tabow,
+!!!   nie po identycznosci znak-po-znaku jak prawdziwy
+!!!   `textwrap.dedent` (patrz komentarz przy `common_leading_whitespace`)
+!!!   - wystarczajace dla `.hcs`, ktory zawsze wciska spacjami
+!!!   konsekwentnie, ale technicznie inny algorytm niz Python dla
+!!!   mieszanych spacje/taby.
+!!! - `module_name` jest przyjmowany, ale nie trafia jeszcze do
+!!!   wygenerowanego naglowka (parytet z dzisiejszym stanem
+!!!   `codegen.hcs::gen_program`, patrz tam) - `project.hcs` uzywa go
+!!!   TYLKO do nazwania pliku wyjsciowego `src/{module_name}.rs`.
+!!! - NIEPRZETESTOWANE na prawdziwym wejsciu w tym srodowisku bez
+!!!   pelnego `rustc`/`cargo` w oryginalnym stage0 - w TEJ sesji
+!!!   zweryfikowane strukturalnie (`hackerc check`) i, gdzie to mozliwe,
+!!!   przez faktyczne `cargo build` na wygenerowanym kodzie (patrz
+!!!   bootstrap/README.md, sekcja o tej sesji).
