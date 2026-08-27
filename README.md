@@ -106,3 +106,6 @@ Pelna, szczera lista tego co jeszcze brakuje: **`docs/ROADMAP.md`**.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) - co brakuje
 - [`hackerc/README.md`](hackerc/README.md) - architektura transpilatora
 - Format `.hk`: https://hackeros-linux-system.github.io/HackerOS-Website/tools-docs/hk.html
+
+## Uwaga
+HackerScript osiagnal juz bootstraping.
