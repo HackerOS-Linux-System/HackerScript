@@ -1,0 +1,152 @@
+struct TypeRef [
+    name: Str,
+    generic: Option<TypeRef>,
+    generic2: Option<TypeRef>
+]
+
+!!! Wyrazenia. Warianty odwolujace sie do `Expr` BEZPOSREDNIO (nie przez
+!!! `List<Expr>`) tworza cykl rozmiaru i dostaja automatyczny `Box` -
+!!! (`BinOp`/`UnaryOp`/`Call.callee`/`Index`/`Cast.target`/`TryOp`/
+!!! `Attr.target`) - zweryfikowane w wygenerowanym Rust.
+enum Expr [
+    NumberLit(Str),
+    StringLit(Str, Bool),
+    BoolLit(Bool),
+    NullLit,
+    IdentExpr(Str),
+    BinOp(Str, Expr, Expr),
+    UnaryOp(Str, Expr),
+    Call(Expr, List<Expr>),
+    Index(Expr, Expr),
+    Cast(Expr, TypeRef),
+    TryOp(Expr),
+    Attr(Expr, Str),
+    ListLit(List<Expr>)
+]
+
+!!! Jeden parametr `fun`/pole `struct` - `type_ref`/`default_expr` sa
+!!! `Option`, bo NIE KAZDY parametr ma jawna adnotacje typu (`self`) czy
+!!! wartosc domyslna (parytet z `type_: Optional[TypeRef]`/`default: Any
+!!! = None` w Param z ast_nodes.py - nazwy pol zmienione na
+!!! `type_ref`/`default_expr`, bo `type`/`default` sa juz uzywane
+!!! gdzie indziej jako nazwy - patrz "Ograniczenia").
+struct Param [
+    name: Str,
+    type_ref: Option<TypeRef>,
+    default_expr: Option<Expr>
+]
+
+!!! Jedna galaz `elif cond [ body ]` - w Pythonie to `tuple[Expr,
+!!! list]` w `IfStmt.elifs`, tu WLASNY struct (HackerScript nie ma
+!!! generycznych tupli).
+struct ElifArm [
+    cond: Expr,
+    body: List<Stmt>
+]
+
+!!! Jeden wariant `enum` - `Nazwa` (jednostkowy, `fields` puste) albo
+!!! `Nazwa(Typ, Typ2, ...)` (krotkowy).
+struct EnumVariant [
+    name: Str,
+    fields: List<TypeRef>
+]
+
+!!! Jedna galaz `match`: `Wariant(bind1, bind2) -> [ ... ]` albo
+!!! `_ -> [ ... ]` (wildcard, `variant == "_"`).
+struct MatchArm [
+    variant: Str,
+    binds: List<Str>,
+    body: List<Stmt>
+]
+
+!!! Instrukcje/deklaracje - WSZYSTKO, co moze zwrocic `parse_statement`
+!!! w parser.py, w JEDNYM enum (tak jak w Pythonie WSZYSTKIE te klasy
+!!! dziedzicza po `Node` i po prostu ladują w tej samej liscie
+!!! `Program.body`). Zaden wariant nie odwoluje sie do `Stmt`
+!!! BEZPOSREDNIO (tylko przez `List<Stmt>`/`List<ElifArm>`/
+!!! `List<MatchArm>` - wszystkie posrednie) - `Stmt` NIE POTRZEBUJE
+!!! `Box` w zadnym wariancie, zweryfikowane w wygenerowanym Rust.
+!!! `IncludeStmt(Str)` - `include <sciezka>`, odpowiednik Rustowego
+!!! `mod`, WZGLEDEM katalogu biezacego pliku (patrz
+!!! project.hcs::resolve_include_path). Osobny od `GetImportStmt`/
+!!! `get <source:name>`, ktory pozostaje nietkniety - `include` nie ma
+!!! zrodla/wersji/`import <details>`, tylko jeden segment sciezki.
+enum Stmt [
+    LetStmt(Str, Option<TypeRef>, Option<Expr>, Bool),
+    AssignStmt(Expr, Str, Expr),
+    FunDecl(Str, List<Param>, Option<TypeRef>, List<Stmt>, Bool, List<Str>),
+    ExternFunDecl(Str, Str, List<Param>, Option<TypeRef>),
+    IfStmt(Expr, List<Stmt>, List<ElifArm>, Option<List<Stmt>>),
+    WhileStmt(Expr, List<Stmt>),
+    ForStmt(Str, Expr, List<Stmt>),
+    ReturnStmt(Option<Expr>),
+    BreakStmt,
+    ContinueStmt,
+    ExprStmt(Expr),
+    GetImportStmt(Str, Str, Option<Str>, List<Str>),
+    IncludeStmt(Str),
+    UsingStmt(Str),
+    DirectBlock(List<Str>),
+    ManualBlock(List<Stmt>),
+    GcPragma(Str),
+    StructDecl(Str, List<Param>, List<Str>),
+    EnumDecl(Str, List<EnumVariant>, List<Str>),
+    MatchStmt(Expr, List<MatchArm>),
+    ImplDecl(Str, List<Stmt>, List<Str>)
+]
+
+!!! Caly program - lista instrukcji/deklaracji najwyzszego poziomu.
+struct Program [
+    body: List<Stmt>
+]
+
+!!! Demonstracyjne uzycie - buduje reczne AST dla `fun add(a: Int, b:
+!!! Int) -> Int [ end a + b ]` (bez przechodzenia przez parser.hcs -
+!!! ten plik jest samodzielny, testowany osobno) i wypisuje liczbe
+!!! instrukcji.
+fun main() [
+    let int_type = TypeRef("Int", none(), none())
+    let a_param = Param("a", some(int_type.clone()), none())
+    let b_param = Param("b", some(int_type.clone()), none())
+    let body: List<Stmt> = [ReturnStmt(some(BinOp("+", IdentExpr("a"), IdentExpr("b"))))]
+    let f = FunDecl("add", [a_param, b_param], some(int_type), body, false, [])
+    let prog = Program([f])
+    log("instrukcje w programie:", prog.body.len())
+]
+
+!!! ## Ograniczenia tej wersji (patrz docs/ROADMAP.md)
+!!!
+!!! - `Expr::IdentExpr` jest nazwane INACZEJ niz Pythonowe `class Ident`
+!!!   - `TokKind::Ident` (lexer.hcs) i `Expr::Ident` kolidowalyby jako
+!!!   dwa warianty o tej samej nazwie w dwoch roznych enumach, co ten
+!!!   bootstrap ZABRANIA globalnie (patrz E0010 - nazwy wariantow musza
+!!!   byc unikalne w CALYM programie, nie tylko w obrebie jednego enuma,
+!!!   dokladnie ten sam rodzaj kolizji co juz udokumentowany gdzie
+!!!   indziej w docs/ROADMAP.md). `TokKind::Ident` zostalo, bo ma wiecej
+!!!   miejsc uzycia (lexer.hcs + caly parser.hcs); zmienic nazwe
+!!!   musialo `Expr::IdentExpr`.
+!!! - Brak pola `line: Int` na kazdym wezle (Pythonowe `Node.line`) -
+!!!   `parser.hcs` (kolejny plik) rowniez go dzis nie ustawia - komunikaty
+!!!   bledow z `typecheck.hcs` (przyszly krok) beda musialy sobie radzic
+!!!   bez precyzyjnych numerow linii, albo ten brak trzeba bedzie
+!!!   nadrobic pozniej (osobny krok, NIE ten).
+!!! - `StringLit` ma DODATKOWE pole `is_doc: Bool`, ktorego NIE MA w
+!!!   Pythonowej dataclass `StringLit` (tam `_is_doc = True` jest
+!!!   dynamicznym atrybutem dolepianym po konstrukcji WYLACZNIE dla
+!!!   komentarzy dokumentacyjnych `!!` na poziomie instrukcji - patrz
+!!!   `parse_statement` w parser.py). HackerScript nie ma dynamicznych
+!!!   atrybutow struct, wiec to pole musialo stac sie CZESCIA
+!!!   definicji, nie dolepiane po fakcie.
+!!! - `Param`/`LetStmt` uzywaja nazw `type_ref`/`default_expr` zamiast
+!!!   Pythonowych `type_`/`default` - `type`/`default` kolidowalyby z
+!!!   innymi uzyciami w tym samo-hostowanym kompilatorze (np. `type_ref`
+!!!   jako parametr funkcji gdzie indziej).
+!!! - `ImplDecl.methods`/`impl`-blok w `DirectBlock.raw_lines` uzywaja
+!!!   `List<Stmt>`/`List<Str>` bez STATYCZNEGO wymuszenia "tylko
+!!!   FunDecl"/"tylko linie tekstu" - to (jak w Pythonie, gdzie `list`
+!!!   rowniez nie wymusza typu elementow) jest kontraktem parsera
+!!!   (`parser.hcs`), nie systemu typow.
+!!! - NIEPRZETESTOWANE na prawdziwym wejsciu w tym srodowisku (brak
+!!!   rustc) - zweryfikowane strukturalnie przez `hackerc check`/
+!!!   `build` i inspekcje wygenerowanego Rusta, patrz
+!!!   tests/test_hackerc.py.
