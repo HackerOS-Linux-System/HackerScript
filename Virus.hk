@@ -14,7 +14,7 @@
 -> description => virus + hackerc, jedna binarka - menedzer pakietow/projektow i transpilator HackerScript -> Rust, statycznie linkujace libs/core i libs/std.
 
 [workspace]
--> members => ["bootstrap/hackerc-self", "libs/core", "libs/std"]
+-> members => ["hackerc", "virus", "libs/core", "libs/std"]
 
 [dependencies]
 -> std
