@@ -1,0 +1,72 @@
+get <std:path> import <path_join::path_dirname>
+get <std:fs> import <create_dir_ok::remove_dir_all_ok>
+
+const CACHE_DIR_NAME: Str = "cache"
+
+!!! `<projekt>/cache` i jego cztery podkatalogi.
+struct CacheDirs [
+    root: Str,
+    libs: Str,
+    source: Str,
+    env: Str,
+    build: Str
+]
+
+!!! Buduje `CacheDirs` dla projektu w `project_root` (NIE tworzy jeszcze
+!!! katalogow na dysku - patrz `cache_ensure_all`).
+fun cache_dirs_for_project(project_root: Str) -> CacheDirs [
+    let root = path_join(project_root, CACHE_DIR_NAME.to_string())
+    end CacheDirs(root.clone(), path_join(root.clone(), "libs"), path_join(root.clone(), "source"), path_join(root.clone(), "env"), path_join(root, "build"))
+]
+
+!!! Tworzy caly katalog `cache/` (i podkatalogi), jesli nie istnieje -
+!!! odpowiednik `virus cache`. `true` = sukces (wszystkie 5 katalogow
+!!! utworzone/juz istnialy), `false` = ktorys sie nie udal.
+fun cache_ensure_all(cache: CacheDirs) -> Bool [
+    let ok1 = create_dir_ok(cache.root)
+    let ok2 = create_dir_ok(cache.libs)
+    let ok3 = create_dir_ok(cache.source)
+    let ok4 = create_dir_ok(cache.env)
+    let ok5 = create_dir_ok(cache.build)
+    end ok1 and ok2 and ok3 and ok4 and ok5
+]
+
+!!! Usuwa caly katalog `cache/` (rekurencyjnie) - `true` = usuniete
+!!! (albo juz nie istnialo, patrz uwaga w `remove_dir_all_ok`),
+!!! `false` = blad.
+fun cache_clean(cache: CacheDirs) -> Bool [
+    end remove_dir_all_ok(cache.root)
+]
+
+!!! Sciezka do lokalnego cache konkretnej zaleznosci, np.
+!!! `cache/libs/pypi/rich` albo `cache/libs/crates/colorize`.
+fun cache_lib_path(cache: CacheDirs, source: Str, name: Str) -> Str [
+    end path_join(path_join(cache.libs, source), name)
+]
+
+!!! Sciezka gdzie powinien wladowac sie pobrany `hackerc` dla danej
+!!! wersji. UPROSZCZONE wzgledem oryginalu: ZAWSZE `hackerc` bez
+!!! `.exe` - `virus`/`hackerc` w tym repo celuja w Linux (patrz nazwa
+!!! projektu wyzej w drzewie, `HackerOS-Linux-System`), platforma
+!!! Windows nie jest wspierana przez ten stdlib.
+fun cache_hackerc_binary(cache: CacheDirs, version: Str) -> Str [
+    end path_join(path_join(cache.env, "hackerc-" + version), "hackerc")
+]
+
+!!! Szuka `Virus.hk` zaczynajac od `start` i idac w gore drzewa
+!!! katalogow (tak jak `cargo` szuka `Cargo.toml`) - `none()`, jesli
+!!! zaden katalog nadrzedny go nie ma (dotarto do korzenia sciezki).
+fun find_project_root(start: Str) -> Option<Str> [
+    let dir = start
+    while true [
+        if path_exists(path_join(dir.clone(), "Virus.hk")) [
+            end some(dir)
+        ]
+        let parent = path_dirname(dir.clone())
+        if parent.len() == 0 or parent == dir [
+            end none()
+        ]
+        dir = parent
+    ]
+    end none()
+]
