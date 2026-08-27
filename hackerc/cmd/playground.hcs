@@ -1,0 +1,53 @@
+include <ast_nodes>
+include <parser>
+include <typecheck>
+include <diagnostics>
+include <transpiler>
+
+!!! Jak `parse()`, ale z tym samym preprocessingiem `direct [ ... ]`
+!!! co transpilacja - parytet z `parse_with_direct` w cli.hcs (ktorego
+!!! nie mozemy uzyc wprost, bo `cli.hcs` samo w sobie ciagnie
+!!! `project.hcs`/prawdziwy `main()` z argv, niepotrzebne i niedzialajace
+!!! w WASM).
+fun parse_source(source: Str) -> Program [
+    let extraction = extract_direct_blocks(source)
+    end parse(extraction.stripped_source)
+]
+
+!!! Sprawdza `source` (zawartosc PLIKU .hcs jako string, NIE sciezka)
+!!! i zwraca gotowy do wyswietlenia raport: `"OK (N warning(ow))"` przy
+!!! braku bledow, albo pelny raport diagnostyk (styl Rust/Elm - fragment
+!!! kodu + karetka, patrz `render_many`) zakonczony podsumowaniem liczby
+!!! bledow/warningow.
+fun check_source(source: Str) -> Str [
+    let program = parse_source(source)
+    let diags = check_program(program, [])
+    if diags.len() == 0 [
+        end "OK (0 warning(ow))"
+    ]
+    let report = render_many(source, "playground.hcs", diags.clone())
+    let errors = 0
+    let i = 0
+    let n = diags.len()
+    while i < n [
+        if diags[i].severity == "error" [
+            errors = errors + 1
+        ]
+        i = i + 1
+    ]
+    if errors > 0 [
+        end report + "\n\n" + (errors as Str) + " blad(ow), " + ((diags.len() - errors) as Str) + " warning(ow)"
+    ]
+    end report + "\n\nOK (" + (diags.len() as Str) + " warning(ow))"
+]
+
+!!! Smoke-test do `hackerc build`/`cargo run` (weryfikacja PRZED
+!!! zapakowaniem do WASM - patrz playground-wasm/README.md) - NIE jest
+!!! czescia finalnego API playgrounda (to robi `check_source` przez
+!!! wasm-bindgen, patrz playground-wasm/src/lib.rs).
+fun main() [
+    log(check_source("fun main() [\n    log(\"hello\")\n    end\n]"))
+    log("---")
+    log(check_source("fun main() [\n    let x: Int = \"zla wartosc\"\n    end\n]"))
+    end
+]
