@@ -1,0 +1,228 @@
+using <0.1>
+
+include <init>
+include <build>
+include <cache_cmd>
+include <check>
+include <lint>
+include <fmt>
+include <install>
+include <remove>
+include <repair>
+include <clean>
+include <cache>
+get <std:string> import <str_starts_with>
+
+fun cmd_usage() -> Str [
+    end "virus - menedzer pakietow i narzedzie budowania dla HackerScript\n\nUzycie:\n  virus <polecenie> [argumenty]\n\nPolecenia:\n  init [--name NAZWA]                              tworzy szkielet nowego projektu\n  build [plik] [--release|--library|--wasm|--jar]  buduje projekt (domyslnie: debug)\n  cache                                             tworzy/odswieza katalog cache/\n  check                                             sprawdza poprawnosc kodu bez budowania\n  lint [plik]                                       pokazuje tylko warningi\n  fmt [plik] [--check]                              formatuje kod .hcs\n  install <zrodlo> <nazwa> [--version WERSJA]      instaluje zaleznosc (pypi/crates/npm/jsr/std/core)\n  remove <zrodlo> <nazwa>                           usuwa zaleznosc\n  repair <kod>                                      wyjasnia kod diagnostyczny (np. E0001)\n  clean                                             usuwa caly katalog cache/\n"
+]
+
+!!! Czy `flag` (np. `"--release"`) wystepuje GDZIEKOLWIEK w `args`.
+fun find_flag(args: List<Str>, flag: Str) -> Bool [
+    let i = 0
+    let n = args.len()
+    while i < n [
+        if args[i].clone() == flag [
+            end true
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+!!! Wartosc PO `flag` (np. `--version 1.2` -> `some("1.2")`) -
+!!! `none()`, jesli flaga nie wystepuje ALBO jest ostatnim argumentem
+!!! (brak wartosci po niej).
+fun find_option_value(args: List<Str>, flag: Str) -> Option<Str> [
+    let i = 0
+    let n = args.len()
+    while i < n [
+        if args[i].clone() == flag [
+            if i + 1 < n [
+                end some(args[i + 1].clone())
+            ]
+            end none()
+        ]
+        i = i + 1
+    ]
+    end none()
+]
+
+!!! Wszystkie argumenty NIE zaczynajace sie od `--`, z pominieciem
+!!! WARTOSCI flag przyjmujacych parametr (`--version`/`--name`) - np.
+!!! `["install", "--version", "1.0", "crates", "itoa"]` (bez "install",
+!!! juz odcietego przez dispatch w `main`) daje `["crates", "itoa"]`.
+fun positional_args(args: List<Str>) -> List<Str> [
+    let out: List<Str> = []
+    let i = 0
+    let n = args.len()
+    while i < n [
+        let a = args[i].clone()
+        if str_starts_with(a.clone(), "--") [
+            if a == "--version" or a == "--name" [
+                i = i + 1
+            ]
+        ] else [
+            out.push(a)
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+!!! Pierwszy argument pozycyjny (nie-flaga), jesli jest - dla podkomend
+!!! z JEDNYM opcjonalnym plikiem (`build`/`lint`/`fmt`).
+fun first_positional(args: List<Str>) -> Option<Str> [
+    let pos = positional_args(args)
+    if pos.len() > 0 [
+        end some(pos[0].clone())
+    ]
+    end none()
+]
+
+!!! Znajduje korzen projektu (Virus.hk) zaczynajac od biezacego
+!!! katalogu - konczy caly proces kodem 1, jesli sie nie uda (parytet z
+!!! `with_project_root` w oryginale).
+fun require_project_root() -> Str [
+    let cwd = ""
+    match current_dir() [
+        Ok(c) -> [
+            cwd = c
+        ]
+        Err(e) -> [
+            elog("nie mozna odczytac biezacego katalogu: " + e)
+            exit(1)
+        ]
+    ]
+    match find_project_root(cwd) [
+        Some(root) -> [
+            end root
+        ]
+        None -> [
+            elog("nie znaleziono Virus.hk (ani w biezacym katalogu, ani w nadrzednych) - uzyj `virus init` aby utworzyc nowy projekt")
+            exit(1)
+        ]
+    ]
+]
+
+fun main() [
+    let all_args = args()
+    if all_args.len() == 0 [
+        log(cmd_usage())
+        exit(1)
+    ]
+
+    let cmd = all_args[0].clone()
+    let rest: List<Str> = []
+    let i = 1
+    let n = all_args.len()
+    while i < n [
+        rest.push(all_args[i].clone())
+        i = i + 1
+    ]
+
+    if cmd == "init" [
+        match current_dir() [
+            Ok(cwd) -> [
+                let name_opt = find_option_value(rest, "--name")
+                if not cmd_init_run(cwd, name_opt) [
+                    exit(1)
+                ]
+            ]
+            Err(e) -> [
+                elog("nie mozna odczytac biezacego katalogu: " + e)
+                exit(1)
+            ]
+        ]
+    ] elif cmd == "build" [
+        let root = require_project_root()
+        let target = TargetDefault
+        if find_flag(rest.clone(), "--release") [
+            target = TargetRelease
+        ] elif find_flag(rest.clone(), "--library") [
+            target = TargetLibrary
+        ] elif find_flag(rest.clone(), "--wasm") [
+            target = TargetWasm
+        ] elif find_flag(rest.clone(), "--jar") [
+            target = TargetJar
+        ]
+        let file_opt = first_positional(rest)
+        match cmd_build_run(root, BuildOptions(target, file_opt)) [
+            Ok(path) -> [
+                log("zbudowano:", path)
+            ]
+            Err(e) -> [
+                elog(e)
+                exit(1)
+            ]
+        ]
+    ] elif cmd == "cache" [
+        let root = require_project_root()
+        if not cmd_cache_run(root) [
+            exit(1)
+        ]
+    ] elif cmd == "check" [
+        let root = require_project_root()
+        if not cmd_check_run(root) [
+            exit(1)
+        ]
+    ] elif cmd == "lint" [
+        let root = require_project_root()
+        cmd_lint_run(root, first_positional(rest))
+    ] elif cmd == "fmt" [
+        let root = require_project_root()
+        let check_only = find_flag(rest.clone(), "--check")
+        let file_opt3 = first_positional(rest)
+        if not cmd_fmt_run(root, file_opt3, check_only) [
+            exit(1)
+        ]
+    ] elif cmd == "install" [
+        let root = require_project_root()
+        let pos = positional_args(rest.clone())
+        if pos.len() < 2 [
+            elog("uzycie: virus install <zrodlo> <nazwa> [--version WERSJA]")
+            exit(1)
+        ]
+        let version_opt = find_option_value(rest, "--version")
+        match cmd_install_run(root, pos[0].clone(), pos[1].clone(), version_opt) [
+            Ok(dest) -> [
+                log("zainstalowano do:", dest)
+            ]
+            Err(e) -> [
+                elog(e)
+                exit(1)
+            ]
+        ]
+    ] elif cmd == "remove" [
+        let root = require_project_root()
+        let pos2 = positional_args(rest)
+        if pos2.len() < 2 [
+            elog("uzycie: virus remove <zrodlo> <nazwa>")
+            exit(1)
+        ]
+        if not cmd_remove_run(root, pos2[0].clone(), pos2[1].clone()) [
+            exit(1)
+        ]
+    ] elif cmd == "repair" [
+        let pos3 = positional_args(rest)
+        if pos3.len() < 1 [
+            elog("uzycie: virus repair <kod>")
+            exit(1)
+        ]
+        if not cmd_repair_run(pos3[0].clone()) [
+            exit(1)
+        ]
+    ] elif cmd == "clean" [
+        let root = require_project_root()
+        if not cmd_clean_run(root) [
+            exit(1)
+        ]
+    ] elif cmd == "--help" or cmd == "-h" or cmd == "help" [
+        log(cmd_usage())
+    ] else [
+        elog("nieznane polecenie: " + cmd)
+        log(cmd_usage())
+        exit(1)
+    ]
+    end
+]
