@@ -44,7 +44,7 @@ class Formatter:
 
     def fmt_stmt(self, node):
         for comment in getattr(node, "_leading_comments", None) or []:
-            self.emit(f"! {comment}" if comment else "!")
+            self.emit(f"!! {comment}" if comment else "!!")
         if isinstance(node, A.UsingStmt):
             self.emit(f"using <{node.version}>")
             return
@@ -170,7 +170,7 @@ class Formatter:
         if isinstance(node, A.ExprStmt):
             e = node.expr
             if isinstance(e, A.StringLit) and getattr(e, "_is_doc", False):
-                self.emit(f"!! {e.value}")
+                self.emit(f"!!! {e.value}")
                 return
             if (
                 isinstance(e, A.Call)
@@ -192,7 +192,7 @@ class Formatter:
 
     def fmt_fun(self, node: A.FunDecl):
         for doc in getattr(node, "_leading_doc_comments", None) or []:
-            self.emit(f"!! {doc}")
+            self.emit(f"!!! {doc}")
         params = []
         for p in node.params:
             hint = f": {self.fmt_type(p.type_)}" if p.type_ else ""
