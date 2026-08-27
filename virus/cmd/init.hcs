@@ -1,0 +1,51 @@
+get <std:path> import <path_join::path_basename>
+get <std:io> import <write_file_ok>
+get <std:fs> import <create_dir_ok>
+include <progress>
+
+const DEFAULT_MAIN_HCS: Str = "!! Witaj w HackerScript!\n\nfun main() [\n    log(\"Hello, HackerScript!\")\n    end\n]\n"
+
+!!! Tresc domyslnego `Virus.hk` dla nowego projektu o nazwie `pkg_name`.
+fun init_default_manifest(pkg_name: Str) -> Str [
+    end "[package]\n-> name        => " + pkg_name + "\n-> version     => 0.0.1\n-> using       => 1.2\n-> edition     => 2026\n\n[dependencies]\n! -> pypi\n! --> rich => \"*\"\n\n[build]\n-> entry => cmd/main.hcs\n"
+]
+
+!!! `true` = sukces. `name` = jawnie podana nazwa pakietu (`virus init
+!!! nazwa`); jesli brak, uzywa ostatniego segmentu `target_dir` (jak
+!!! oryginal), a jesli i to puste - `"hackerscript-project"`.
+fun cmd_init_run(target_dir: Str, name: Option<Str>) -> Bool [
+    if path_exists(path_join(target_dir.clone(), "Virus.hk")) [
+        progress_error("Virus.hk juz istnieje w " + target_dir)
+        end false
+    ]
+
+    let pkg_name = "hackerscript-project"
+    match name [
+        Some(n) -> [
+            pkg_name = n
+        ]
+        None -> [
+            let base = path_basename(target_dir.clone())
+            if base.len() > 0 [
+                pkg_name = base
+            ]
+        ]
+    ]
+
+    let cmd_dir = path_join(target_dir.clone(), "cmd")
+    if not create_dir_ok(cmd_dir.clone()) [
+        progress_error("nie mozna utworzyc " + cmd_dir)
+        end false
+    ]
+    if not write_file_ok(path_join(cmd_dir, "main.hcs"), DEFAULT_MAIN_HCS.to_string()) [
+        progress_error("nie mozna zapisac cmd/main.hcs")
+        end false
+    ]
+    if not write_file_ok(path_join(target_dir, "Virus.hk"), init_default_manifest(pkg_name.clone())) [
+        progress_error("nie mozna zapisac Virus.hk")
+        end false
+    ]
+
+    progress_success("utworzono nowy projekt HackerScript: " + pkg_name)
+    end true
+]
