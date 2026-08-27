@@ -1,0 +1,404 @@
+enum TokKind [
+    Newline,
+    Open,
+    Close,
+    LParen,
+    RParen,
+    LAngle,
+    RAngle,
+    Colon,
+    DColon,
+    Comma,
+    Op,
+    Number,
+    StrLit,
+    Ident,
+    Keyword,
+    DocComment,
+    LineComment,
+    Question,
+    Eof
+]
+
+struct Token [
+    kind: TokKind,
+    value: Str,
+    line: Int,
+    col: Int,
+    tight: Bool
+]
+
+fun is_digit(c: Str) -> Bool [
+    end c >= "0" and c <= "9"
+]
+
+fun is_alpha(c: Str) -> Bool [
+    end (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
+]
+
+fun is_alnum(c: Str) -> Bool [
+    end is_alpha(c) or is_digit(c)
+]
+
+!!! Lista slow kluczowych jezyka - musi byc trzymana w zgodzie z
+!!! hackerc/hackerc/lexer.py::KEYWORDS. Bez Set-literalu w tej wersji
+!!! uzywamy zwyklej petli po List<Str> (patrz "Ograniczenia" - O(n) na
+!!! kazde sprawdzenie, akceptowalne dla malych plikow zrodlowych .hcs).
+fun is_keyword(w: Str) -> Bool [
+    let kws = ["fun", "let", "const", "if", "else", "elif", "while", "for", "in",
+               "return", "end", "get", "import", "using", "direct", "manual",
+               "true", "false", "null", "struct", "enum", "match", "break",
+               "continue", "gc", "pub", "self", "and", "or", "not", "extern", "as",
+               "impl", "include"]
+    let i = 0
+    while i < kws.len() [
+        if kws[i] == w [
+            end true
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+fun is_multi_op(s: Str) -> Bool [
+    end s == "==" or s == "!=" or s == "<=" or s == ">=" or s == "->" or s == "::" or s == "&&" or s == "||" or s == "+=" or s == "-=" or s == "*=" or s == "/="
+]
+
+fun is_op_char(c: Str) -> Bool [
+    end c == "+" or c == "-" or c == "*" or c == "/" or c == "%" or c == "=" or c == "!" or c == "." or c == "&" or c == "|" or c == "^" or c == "~"
+]
+
+!!! Znaki, po ktorych `!=` MOZE byc operatorem nierownosci (koniec
+!!! wyrazenia po lewej: litera/cyfra/`_`/`)`/`]`/cudzyslow) - parytet
+!!! z `_EXPR_END_CHARS` w lexer.py. Uzywane tylko przez
+!!! `looks_like_operator_before`, ktore odrozniamy od `strip_multiline_comments`.
+fun is_expr_end_char(c: Str) -> Bool [
+    end is_alnum(c) or c == ")" or c == "]" or c == "\"" or c == "'"
+]
+
+!!! Dwuznakowy podglad od pozycji `i` (albo pojedynczy znak, gdy `i` to
+!!! ostatnia pozycja w zrodle) - uzywane do rozpoznawania operatorow
+!!! wieloznakowych (`==`, `->`, `::`, ...) bez wychodzenia poza `n`.
+!!! Reczny `trim` (usuwa spacje/taby/`\r` z obu koncow) - napisany na
+!!! `char_at`/`slice`, BEZ uzycia Rustowego `.trim()` (ktory zwraca
+!!! `&str`, nie `String` - podstawienie go pod `Str` skompilowaloby
+!!! sie do niezgodnosci typow w wygenerowanym Rust, niewykrywalnej
+!!! przez dzisiejszy Pythonowy `typecheck.py`, ktory nie sledzi tego
+!!! konkretnego metod-callu - patrz "Ograniczenia").
+fun trim_str(s: Str) -> Str [
+    let n = s.len()
+    let start = 0
+    while start < n and (s.char_at(start) == " " or s.char_at(start) == "\t" or s.char_at(start) == "\r") [
+        start = start + 1
+    ]
+    let stop = n
+    while stop > start and (s.char_at(stop - 1) == " " or s.char_at(stop - 1) == "\t" or s.char_at(stop - 1) == "\r") [
+        stop = stop - 1
+    ]
+    end s.slice(start, stop)
+]
+
+!!! `two_char_at` (pobieranie 2 znakow na pozycji `i`) BYLO tu, ale
+!!! zostalo USUNIETE - wywolywanie GO jako osobnej funkcji z ciasnej
+!!! petli `tokenize`/`strip_multiline_comments` bylo prawdziwym zrodlem
+!!! O(n^2) w calym bootstrapie (WIEKSZYM niz brak cache'owania
+!!! `.char_at`/`.slice`, ktore naprawiono wczesniej w tej samej sesji):
+!!! kazde wywolanie `two_char_at(source, i, n)` materializowalo WLASNA,
+!!! SWIEZA kopie `Vec<char>` z CALEGO `source` (bo `char_indexed_str_params`
+!!! widzi 2+ uzycia `.char_at`/`.slice` na `source` W CIELE `two_char_at`
+!!! i include cache'owanie TAM) - dla pliku ktory sam siebie kompiluje
+!!! (np. `codegen.hcs`, ~137KB), wywolywane TYSIACE razy w petli
+!!! `tokenize`, dawalo to O(n) PRZY KAZDYM WYWOLANIU zamiast O(1).
+!!! Cache'owanie dziala TYLKO W OBREBIE JEDNEJ funkcji - nie przenosi
+!!! sie przez granice wywolania. Naprawa: kazde miejsce wywolania
+!!! `two_char_at(source, i, n) == "XY"` zastapione WPROST przez
+!!! `i + 1 < n and source.char_at(i) == "X" and source.char_at(i + 1) == "Y"`
+!!! (dwa BEZPOSREDNIE `.char_at()` na JUZ zcache'owanej zmiennej
+!!! WEWNATRZ tokenize/strip_multiline_comments, oba O(1)) - patrz
+!!! bootstrap/README.md za pelny opis. Bug znaleziony przy uzyciu
+!!! skompilowanego stage1 (samo-hostowanego hackerc) do zbudowania
+!!! DUZYCH plikow samego siebie w tej sesji.
+
+!!! `looks_like_operator_before` (cofanie sie od `pos` przez spacje/taby
+!!! i sprawdzanie czy poprzedni niebialy znak konczy wyrazenie, patrz
+!!! `is_expr_end_char`) BYLO tu jako osobna funkcja - USUNIETE i
+!!! wcielone WPROST do `strip_multiline_comments` (jedynego wywolujacego)
+!!! z tego samego powodu co `two_char_at` wyzej: wywolywanie oddzielnej
+!!! funkcji przyjmujacej `source: Str` z ciasnej petli niweczylo
+!!! cache'owanie `.char_at`/`.slice` (dziala TYLKO w obrebie jednej
+!!! funkcji) - patrz duzy komentarz przy `two_char_at` i
+!!! bootstrap/README.md.
+
+!!! Usuwa komentarze `!> ... <!` (wieloliniowe), zamieniajac cala ich
+!!! tresc na TA SAMA liczbe znakow `\n` (zeby numery linii sie nie
+!!! przesunely dla reszty tokenizacji) - parytet ze `strip_comments`
+!!! w lexer.py. Stringi i komentarze `!!`/`!!!` (do konca linii) sa
+!!! kopiowane 1:1 BEZ interpretacji PRZED testem `!>` - bug znaleziony
+!!! w POPRZEDNICH sesjach (patrz docs/ROADMAP.md): `!>`/`<!` WEWNATRZ
+!!! stringa albo wewnatrz TRESCI takiego komentarza nie moze
+!!! (nie)otwierac komentarza wieloliniowego.
+!!!
+!!! `!=` to WYLACZNIE operator nierownosci (nigdy komentarz) - odkad
+!!! komentarze wieloliniowe otwiera `!>` (nie `!=` jak wczesniej), nie
+!!! ma juz zadnej dwuznacznosci wymagajacej heurystyki
+!!! `is_expr_end_char`/cofania sie przez biale znaki (uzywanej w
+!!! poprzedniej wersji tej funkcji, dla starej skladni `!=`/`=!`).
+fun strip_multiline_comments(source: Str) -> Str [
+    let out = ""
+    let i = 0
+    let n = source.len()
+    while i < n [
+        let c = source.char_at(i)
+        let is_bang_bang = c == "!" and i + 1 < n and source.char_at(i + 1) == "!"
+        let is_open = c == "!" and i + 1 < n and source.char_at(i + 1) == ">"
+        if c == "\"" or c == "'" [
+            let quote = c
+            let j = i + 1
+            while j < n and source.char_at(j) != quote and source.char_at(j) != "\n" [
+                if source.char_at(j) == "\\" and j + 1 < n [
+                    j = j + 2
+                ] else [
+                    j = j + 1
+                ]
+            ]
+            if j < n and source.char_at(j) == quote [
+                j = j + 1
+            ]
+            out = out + source.slice(i, j)
+            i = j
+        ] elif is_bang_bang [
+            let j = i
+            while j < n and source.char_at(j) != "\n" [
+                j = j + 1
+            ]
+            out = out + source.slice(i, j)
+            i = j
+        ] elif is_open [
+            let j = i + 2
+            let found = false
+            while j < n and not found [
+                if j + 1 < n and source.char_at(j) == "<" and source.char_at(j + 1) == "!" [
+                    found = true
+                ] else [
+                    j = j + 1
+                ]
+            ]
+            let block = source.slice(i, j)
+            let k = 0
+            while k < block.len() [
+                if block.char_at(k) == "\n" [
+                    out = out + "\n"
+                ]
+                k = k + 1
+            ]
+            i = j + 2
+        ] else [
+            out = out + c
+            i = i + 1
+        ]
+    ]
+    end out
+]
+
+!!! Zamienia jeden znak escape'u (bez `\`) na jego realna wartosc, np.
+!!! `n` -> nowa linia. `""` (pusty Str) sygnalizuje "nierozpoznany
+!!! escape" - wywolujacy (`tokenize`) w tym przypadku zachowuje OBA
+!!! znaki doslownie (`\` + znak), tak jak `_STRING_ESCAPES.get(esc)`
+!!! zwracajace `None` w lexer.py.
+fun resolve_escape(c: Str) -> Str [
+    if c == "n" [
+        end "\n"
+    ]
+    if c == "t" [
+        end "\t"
+    ]
+    if c == "r" [
+        end "\r"
+    ]
+    if c == "\\" [
+        end "\\"
+    ]
+    if c == "\"" [
+        end "\""
+    ]
+    if c == "'" [
+        end "'"
+    ]
+    if c == "0" [
+        end "\0"
+    ]
+    end ""
+]
+
+!!! Tokenizuje zrodlo HackerScript. Zwraca liste tokenow zakonczona
+!!! zawsze tokenem Eof. Woa `strip_multiline_comments` jako pierwszy
+!!! krok (parytet z `tokenize(source)` w lexer.py, ktore rowniez
+!!! zaczyna od `strip_comments(source)`).
+fun tokenize(source: Str) -> List<Token> [
+    let src = strip_multiline_comments(source)
+    let tokens: List<Token> = []
+    let i = 0
+    let n = src.len()
+    let line = 1
+    let line_start = 0
+
+    while i < n [
+        let col = (i - line_start) + 1
+        let c = src.char_at(i)
+        let prev_is_space = i > 0 and (src.char_at(i - 1) == " " or src.char_at(i - 1) == "\t" or src.char_at(i - 1) == "\n" or src.char_at(i - 1) == "\r")
+        let is_tight = i > 0 and not prev_is_space
+
+        if c == "\n" [
+            tokens.push(Token(Newline, c, line, col, false))
+            i = i + 1
+            line = line + 1
+            line_start = i
+        ] elif c == " " or c == "\t" or c == "\r" [
+            i = i + 1
+        ] elif c == "!" and i + 1 < n and src.char_at(i + 1) == "!" and i + 2 < n and src.char_at(i + 2) == "!" [
+            let j = i + 3
+            while j < n and src.char_at(j) != "\n" [
+                j = j + 1
+            ]
+            tokens.push(Token(DocComment, trim_str(src.slice(i + 3, j)), line, col, false))
+            i = j
+        ] elif c == "!" and i + 1 < n and src.char_at(i + 1) == "!" [
+            let j = i + 2
+            while j < n and src.char_at(j) != "\n" [
+                j = j + 1
+            ]
+            tokens.push(Token(LineComment, trim_str(src.slice(i + 2, j)), line, col, false))
+            i = j
+        ] elif is_digit(c) [
+            let j = i
+            while j < n and (is_digit(src.char_at(j)) or src.char_at(j) == ".") [
+                j = j + 1
+            ]
+            tokens.push(Token(Number, src.slice(i, j), line, col, false))
+            i = j
+        ] elif c == "\"" or c == "'" [
+            let quote = c
+            let j = i + 1
+            let buf = ""
+            while j < n and src.char_at(j) != quote and src.char_at(j) != "\n" [
+                if src.char_at(j) == "\\" and j + 1 < n [
+                    let esc = src.char_at(j + 1)
+                    let resolved = resolve_escape(esc)
+                    if resolved == "" [
+                        buf = buf + "\\" + esc
+                    ] else [
+                        buf = buf + resolved
+                    ]
+                    j = j + 2
+                ] else [
+                    buf = buf + src.char_at(j)
+                    j = j + 1
+                ]
+            ]
+            if j < n and src.char_at(j) == quote [
+                j = j + 1
+            ]
+            tokens.push(Token(StrLit, buf, line, col, false))
+            i = j
+        ] elif is_alpha(c) [
+            let j = i
+            while j < n and is_alnum(src.char_at(j)) [
+                j = j + 1
+            ]
+            let text = src.slice(i, j)
+            if is_keyword(text) [
+                tokens.push(Token(Keyword, text, line, col, false))
+            ] else [
+                tokens.push(Token(Ident, text, line, col, false))
+            ]
+            i = j
+        ] elif c == "[" [
+            tokens.push(Token(Open, c, line, col, is_tight))
+            i = i + 1
+        ] elif c == "]" [
+            tokens.push(Token(Close, c, line, col, false))
+            i = i + 1
+        ] elif c == "(" [
+            tokens.push(Token(LParen, c, line, col, false))
+            i = i + 1
+        ] elif c == ")" [
+            tokens.push(Token(RParen, c, line, col, false))
+            i = i + 1
+        ] elif c == "," [
+            tokens.push(Token(Comma, c, line, col, false))
+            i = i + 1
+        ] elif i + 1 < n and src.char_at(i) == ":" and src.char_at(i + 1) == ":" [
+            tokens.push(Token(DColon, "::", line, col, false))
+            i = i + 2
+        ] elif c == ":" [
+            tokens.push(Token(Colon, c, line, col, false))
+            i = i + 1
+        ] elif i + 1 < n and src.char_at(i) == "<" and src.char_at(i + 1) == "=" [
+            tokens.push(Token(Op, "<=", line, col, false))
+            i = i + 2
+        ] elif c == "<" [
+            tokens.push(Token(LAngle, c, line, col, false))
+            i = i + 1
+        ] elif i + 1 < n and src.char_at(i) == ">" and src.char_at(i + 1) == "=" [
+            tokens.push(Token(Op, ">=", line, col, false))
+            i = i + 2
+        ] elif c == ">" [
+            tokens.push(Token(RAngle, c, line, col, false))
+            i = i + 1
+        ] elif c == "?" [
+            tokens.push(Token(Question, c, line, col, false))
+            i = i + 1
+        ] elif is_op_char(c) [
+            let two = c
+            if i + 1 < n [
+                two = c + src.char_at(i + 1)
+            ]
+            if is_multi_op(two) [
+                tokens.push(Token(Op, two, line, col, false))
+                i = i + 2
+            ] else [
+                tokens.push(Token(Op, c, line, col, false))
+                i = i + 1
+            ]
+        ] else [
+            !! Nieznany znak - w tej wersji po prostu pomijamy (docelowo:
+            !! `LexError` jak w lexer.py - patrz "Ograniczenia": jezyk
+            !! samo-hostowanego bootstrapu nie ma jeszcze wyjatkow/`panic`
+            !! z komunikatem, tylko `log`+`end`, wiec prawdziwe
+            !! zglaszanie bledow zostaje na etap `diagnostics.hcs`).
+            i = i + 1
+        ]
+    ]
+
+    tokens.push(Token(Eof, "", line, (i - line_start) + 1, false))
+    end tokens
+]
+
+!!! Demonstracyjne uzycie - tokenizuje fragment HackerScript zawierajacy
+!!! string z escape'em, `!!`/`!` komentarz, `?` i operator `!=`,
+!!! zaszyty w kodzie (bez I/O plikowego), i wypisuje liczbe tokenow.
+fun main() [
+    let sample = "!! doc\n! line\nfun main() [\n    let x = 1 + 2\n    let s = \"a\\nb\"\n    if x != 3 [\n        log(x?)\n    ]\n]\n"
+    let tokens = tokenize(sample)
+    log("tokens:", tokens.len())
+]
+
+!!! ## Ograniczenia tej wersji (patrz docs/ROADMAP.md)
+!!!
+!!! - Liczby: brak jawnego rozroznienia Int/Float na tym etapie (jak w
+!!!   oryginalnym lexer.py - to robi parser na podstawie obecnosci '.').
+!!! - `is_keyword`-owe sprawdzenie to petla O(n) zamiast HashSet - dla
+!!!   malych plikow .hcs bez znaczenia wydajnosciowego.
+!!! - Nieznane znaki sa CICHO pomijane zamiast zglaszac blad leksykalny
+!!!   (`LexError` w Pythonowym lexer.py) - samo-hostowany bootstrap nie
+!!!   ma jeszcze reprezentacji bledow z komunikatem+linia+kolumna poza
+!!!   `log`, to czeka na `diagnostics.hcs` (nastepny krok).
+!!! - Flaga `tight` na `Token::Open` jest juz OBLICZANA poprawnie (brak
+!!!   bialej spacji miedzy poprzednim znakiem a `[`), ale NIC W TYM
+!!!   PLIKU jeszcze z niej nie korzysta - to zadanie parsera
+!!!   (`parse_postfix` w kolejnym kroku), ktory musi odrozniac
+!!!   `xs[i]` (tight=true, indeksowanie) od `if cond [ ... ]`
+!!!   (tight=false, nowy blok).
+!!! - NIEPRZETESTOWANE na prawdziwym wejsciu w tym srodowisku (brak
+!!!   rustc) - zweryfikowane strukturalnie przez `hackerc check` i
+!!!   inspekcje wygenerowanego Rusta, patrz tests/test_hackerc.py.
