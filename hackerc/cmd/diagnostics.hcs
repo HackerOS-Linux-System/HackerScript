@@ -1,0 +1,226 @@
+struct Diagnostic [
+    severity: Str,
+    code: Str,
+    message: Str,
+    line: Int,
+    col: Int,
+    length: Int,
+    filename: Str
+]
+
+fun max_int(a: Int, b: Int) -> Int [
+    if a > b [
+        end a
+    ]
+    end b
+]
+
+fun min_int(a: Int, b: Int) -> Int [
+    if a < b [
+        end a
+    ]
+    end b
+]
+
+!!! Sklada `n` powtorzen jednoznakowego `c` w jeden Str - reczny
+!!! odpowiednik Pythonowego `" " * width`/`"^" * length` (HackerScript
+!!! nie ma operatora powtarzania Str, patrz "Ograniczenia").
+fun repeat_char(c: Str, n: Int) -> Str [
+    let out = ""
+    let i = 0
+    while i < n [
+        out = out + c
+        i = i + 1
+    ]
+    end out
+]
+
+!!! Reczny odpowiednik `source.splitlines() or [""]` z diagnostics.py.
+!!! Dzieli po `\n`, CICHO POMIJAJAC `\r` (parytet dla linii `\r\n` -
+!!! oba znaki razem liczą się jako JEDNO zakonczenie linii, tak jak w
+!!! Pythonowym splitlines() - ale patrz "Ograniczenia" co do SAMOTNEGO
+!!! `\r` bez `\n`, ktory Python liczylby jako oddzielne zakonczenie
+!!! linii, a ta wersja nie). Koncowa czesciowa linia jest dodawana
+!!! TYLKO gdy jest niepusta ALBO gdy zrodlo jest calkowicie puste
+!!! (parytet z `"".splitlines() == []`, a `[] or [""] == [""]`) - bez
+!!! tego `"abc\n"` dostalaby fantomowa dodatkowa puste linie na
+!!! koncu, ktorej Python nie ma.
+!!! `split_lines` UZYWA `.slice()` (nie `cur = cur + c` znak-po-znaku) -
+!!! budowanie stringa przez powtarzane `+` jest O(L^2) dla linii
+!!! dlugosci L (kazde `+` w Rust kopiuje CALY dotychczasowy string).
+!!! Dla duzego pliku (setki/tysiace linii) to sumowalo sie do bardzo
+!!! zauwazalnego spowolnienia. `.slice(start, i)` jest O(dlugosc linii)
+!!! (dzieki cache'owaniu `.char_at`/`.slice` na `source`, patrz
+!!! lexer.hcs/`two_char_at`), wiec cala funkcja jest O(n) zamiast
+!!! O(suma L_i^2). `\r` (stary styl linii Mac, patrz "Ograniczenia"
+!!! ponizej) jest USUWANE z gotowej linii przez `strip_cr` (rzadka
+!!! sciezka, dziala na JUZ WYCIETEJ linii, nie na calym zrodle).
+!!! Bug wydajnosciowy znaleziony przy uzyciu skompilowanego stage1
+!!! (samo-hostowanego hackerc) do zbudowania duzych plikow w tej sesji
+!!! - patrz TEZ `render_many` nizej (druga polowa tego samego bledu:
+!!! `split_lines` bylo wolane RAZ NA DIAGNOSTYKE zamiast raz).
+fun strip_cr(s: Str) -> Str [
+    if not str_contains_char(s, "\r") [
+        end s
+    ]
+    let out = ""
+    let i = 0
+    let n = s.len()
+    while i < n [
+        let c = s.char_at(i)
+        if c != "\r" [
+            out = out + c
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+fun str_contains_char(s: Str, target: Str) -> Bool [
+    let i = 0
+    let n = s.len()
+    while i < n [
+        if s.char_at(i) == target [
+            end true
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+fun split_lines(source: Str) -> List<Str> [
+    let lines: List<Str> = []
+    let start = 0
+    let i = 0
+    let n = source.len()
+    while i < n [
+        let c = source.char_at(i)
+        if c == "\n" [
+            lines.push(strip_cr(source.slice(start, i)))
+            start = i + 1
+        ]
+        i = i + 1
+    ]
+    if start < n or lines.len() == 0 [
+        lines.push(strip_cr(source.slice(start, n)))
+    ]
+    end lines
+]
+
+!!! Renderuje JEDEN komunikat diagnostyczny - parytet z wolna funkcja
+!!! `render(...)` w diagnostics.py. `code` moze byc pustym Str (`""`)
+!!! - odpowiednik `code: str | None = None` w Pythonie (HackerScript w
+!!! tej wersji bootstrapu nie ma `Option<Str>` na tyle wygodnego w
+!!! uzyciu tutaj, wiec pusty string gra role "brak kodu", patrz
+!!! "Ograniczenia").
+fun render(source: Str, filename: Str, line: Int, col: Int, message: Str, code: Str, severity: Str, length: Int) -> Str [
+    end render_from_lines(split_lines(source), filename, line, col, message, code, severity, length)
+]
+
+!!! Rdzen `render` - przyjmuje JUZ POPODZIELONE linie zamiast surowego
+!!! `source`, zeby `render_many` moglo wywolac `split_lines` RAZ dla
+!!! calego pliku i podzielic sie wynikiem miedzy WSZYSTKIE diagnostyki,
+!!! zamiast wolac `split_lines` (petla O(n) po calym zrodle) OSOBNO dla
+!!! KAZDEJ diagnostyki - przy 50+ diagnostykach na duzym pliku to byl
+!!! ogromny, latwy do uniknienia narzut. Bug wydajnosciowy znaleziony
+!!! przy uzyciu skompilowanego stage1 (samo-hostowanego hackerc) do
+!!! zbudowania duzych plikow w tej sesji - patrz TEZ komentarz przy
+!!! `split_lines` (druga polowa tego samego bledu).
+fun render_from_lines(lines: List<Str>, filename: Str, line: Int, col: Int, message: Str, code: Str, severity: Str, length: Int) -> Str [
+    let total = lines.len()
+    let line_idx = max_int(0, min_int(line - 1, total - 1))
+    let src_line = ""
+    if total > 0 [
+        src_line = lines[line_idx]
+    ]
+
+    let gutter = line as Str
+    let gutter_width = gutter.len()
+    let pad = repeat_char(" ", gutter_width)
+
+    let safe_col = max_int(1, col)
+    let safe_length = max_int(1, length)
+    let caret_line = repeat_char(" ", safe_col - 1) + repeat_char("^", safe_length)
+
+    let tag = severity + ""
+    if code != "" [
+        tag = severity + "[" + code + "]"
+    ]
+
+    let out = tag + ": " + message + "\n"
+    out = out + pad + " --> " + filename + ":" + (line as Str) + ":" + (safe_col as Str) + "\n"
+    out = out + pad + " |\n"
+    out = out + gutter + " | " + src_line + "\n"
+    out = out + pad + " | " + caret_line
+    end out
+]
+
+impl Diagnostic [
+    !!! Metoda-wygoda odpowiadajaca `Diagnostic.render(self, source)` w
+    !!! diagnostics.py - po prostu przekazuje wszystkie pola do wolnej
+    !!! funkcji `render`.
+    fun render(self, source: Str) -> Str [
+        end render(source, self.filename, self.line, self.col, self.message, self.code, self.severity, self.length)
+    ]
+]
+
+!!! Renderuje LISTE diagnostyk, kazda oddzielona pustym wierszem -
+!!! parytet z `render_many(source, filename, diagnostics)` w
+!!! diagnostics.py. Nadpisuje `filename` na KAZDEJ diagnostyce PRZED
+!!! renderowaniem (tak jak `d.filename = filename` w Pythonie) - dziala
+!!! na LOKALNEJ KOPII kazdego elementu (`diagnostics[i]` klonuje
+!!! non-Copy elementy, patrz codegen.py/`Index`), wiec NIE mutuje
+!!! oryginalnej listy przekazanej przez wywolujacego - to jest ZAMIERZONA
+!!! roznica wobec Pythona (ktory mutuje obiekty w miejscu, bo listy
+!!! Pythona przechowuja referencje) i nie ma znaczenia dla wyniku, bo
+!!! jedynym celem mutacji jest to, co trafia do renderowanego tekstu.
+!!! `split_lines(source)` WOLANE RAZ (nie raz na diagnostyke, patrz
+!!! `render_from_lines`).
+fun render_many(source: Str, filename: Str, diagnostics: List<Diagnostic>) -> Str [
+    let lines = split_lines(source)
+    let out = ""
+    let i = 0
+    let total = diagnostics.len()
+    while i < total [
+        let d = diagnostics[i]
+        let block = render_from_lines(lines.clone(), filename.clone(), d.line, d.col, d.message.clone(), d.code.clone(), d.severity.clone(), d.length)
+        if i > 0 [
+            out = out + "\n\n"
+        ]
+        out = out + block
+        i = i + 1
+    ]
+    end out
+]
+
+!!! Demonstracyjne uzycie - jedna diagnostyka na fikcyjnym 3-liniowym
+!!! zrodle, wypisuje sformatowany blok (sprawdza `render`/metode
+!!! `Diagnostic::render` na prawdziwych danych, bez I/O plikowego).
+fun main() [
+    let source = "fun main() [\n    end\n]\n"
+    let d = Diagnostic("error", "E0002", "brakuje 'end' z wartoscia w funkcji zwracajacej Int", 2, 5, 3, "<hcs>")
+    log(d.render(source))
+]
+
+!!! ## Ograniczenia tej wersji (patrz docs/ROADMAP.md)
+!!!
+!!! - `split_lines` traktuje SAMOTNE `\r` (bez towarzyszacego `\n`,
+!!!   stary styl linii Mac) jako CZESC tresci linii, NIE jako
+!!!   zakonczenie linii - Pythonowe `str.splitlines()` dzieli TEZ na
+!!!   samotnym `\r`. W praktyce zrodla `.hcs` w tym repo uzywaja `\n`
+!!!   lub `\r\n`, wiec ta roznica nie ma dzis znaczenia, ale jest
+!!!   udokumentowanym odstepstwem od Pythona.
+!!! - `code: Str` uzywa PUSTEGO Str (`""`) jako "brak kodu" (parytet z
+!!!   `code: str | None = None`) - Diagnostic z PRAWDZIWYM kodem `""`
+!!!   (nigdy sie nie zdarza w praktyce - kody to "E0001" itp.) byloby
+!!!   nierozroznialne od "brak kodu"; brak realnego ryzyka, ale warto
+!!!   pamietac.
+!!! - Brak konstruktora z wartosciami domyslnymi (Pythonowe
+!!!   `col: int = 1, length: int = 1, filename: str = "<hcs>"`) -
+!!!   HackerScript (w tej wersji bootstrapu) wymaga WSZYSTKICH 7 pol
+!!!   przy konstrukcji `Diagnostic(...)`, wiec kazde wywolanie w
+!!!   `typecheck.hcs` (kolejny krok) musi je podac explicite.
+!!! - NIEPRZETESTOWANE na prawdziwym wejsciu w tym srodowisku (brak
+!!!   rustc) - zweryfikowane strukturalnie przez `hackerc check`/
+!!!   `build` i inspekcje wygenerowanego Rusta, patrz
+!!!   tests/test_hackerc.py.
