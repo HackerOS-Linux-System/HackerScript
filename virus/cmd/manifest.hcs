@@ -1,0 +1,356 @@
+get <std:hk> import <hk_parse::hk_resolve_interpolations::hk_format_number>
+get <std:path> import <path_join>
+get <std:string> import <str_ends_with>
+get <std:json> import <JsonValue::JsonEntry>
+
+!!! Jedna zaleznosc z `[dependencies]`/`[dev-dependencies]` -
+!!! `source` to np. `"pypi"`/`"crates"`/`"npm"`/`"jsr"`/`"std"`/`"core"`
+!!! (string, NIE enum jak w Rust `DepSource` - HackerScript stdlib jest
+!!! minimalny/praktyczny, zrodlo nieznane po prostu zostaje takim
+!!! stringiem jakim bylo w pliku, parytet z `DepSource::Other`).
+struct Dependency [
+    source: Str,
+    name: Str,
+    version: Str
+]
+
+!!! `[package]`.
+struct PackageSection [
+    name: Str,
+    version: Str,
+    lang_using: Option<Str>,
+    authors: List<Str>,
+    edition: Str,
+    description: Option<Str>
+]
+
+!!! `[workspace]`.
+struct WorkspaceSection [
+    members: List<Str>
+]
+
+!!! `[build]`.
+struct BuildSection [
+    entry: Str
+]
+
+!!! Caly `Virus.hk` (albo dowolny plik `.hk` o tym samym ksztalcie)
+!!! sparsowany do wygodnej, typowanej struktury.
+struct Manifest [
+    package: PackageSection,
+    dependencies: List<Dependency>,
+    dev_dependencies: List<Dependency>,
+    workspace: WorkspaceSection,
+    build: BuildSection
+]
+
+!!! Domyslny `[build] -> entry` gdy sekcja/klucz nie wystepuje w pliku -
+!!! parytet z `impl Default for BuildSection` (Rust).
+fun default_build_section() -> BuildSection [
+    end BuildSection("cmd/main.hcs")
+]
+
+!!! Szuka `key` w liscie par `entries` (JsonObject rozpakowany) - `none()`
+!!! jesli brak.
+fun manifest_find_entry(entries: List<JsonEntry>, key: Str) -> Option<JsonValue> [
+    let i = 0
+    let n = entries.len()
+    while i < n [
+        let e = entries[i].clone()
+        if e.key == key [
+            end some(e.value)
+        ]
+        i = i + 1
+    ]
+    end none()
+]
+
+!!! Wyciaga `List<JsonEntry>` z `v`, jesli to `JsonObject` - `none()`
+!!! w przeciwnym razie (parytet z `HkValue::as_map`, ale zwracajace
+!!! `Option` zamiast propagowac blad).
+fun manifest_as_map(v: JsonValue) -> Option<List<JsonEntry>> [
+    match v [
+        JsonObject(entries) -> [
+            end some(entries.clone())
+        ]
+        _ -> [
+            end none()
+        ]
+    ]
+]
+
+!!! Wyciaga `Str` z `v` (dziala tez dla `JsonNumber`/`JsonBool` - konwertuje
+!!! na tekst, tak jak `HkValue::as_string`) - `none()` dla tablic/map/null.
+fun manifest_as_string(v: JsonValue) -> Option<Str> [
+    match v [
+        JsonString(s) -> [
+            end some(s.clone())
+        ]
+        JsonNumber(n) -> [
+            end some(hk_format_number(n.clone()))
+        ]
+        JsonBool(b) -> [
+            if b.clone() [
+                end some("true")
+            ]
+            end some("false")
+        ]
+        _ -> [
+            end none()
+        ]
+    ]
+]
+
+!!! Wyciaga `List<JsonValue>` z `v`, jesli to `JsonArray` - `none()`
+!!! w przeciwnym razie.
+fun manifest_as_array(v: JsonValue) -> Option<List<JsonValue>> [
+    match v [
+        JsonArray(items) -> [
+            end some(items.clone())
+        ]
+        _ -> [
+            end none()
+        ]
+    ]
+]
+
+!!! `map.get(key)?.as_string()` w jednym wywolaniu - parytet z `get_str`
+!!! (funkcja pomocnicza w Rust).
+fun manifest_get_str(entries: List<JsonEntry>, key: Str) -> Option<Str> [
+    match manifest_find_entry(entries, key) [
+        Some(v) -> [
+            end manifest_as_string(v)
+        ]
+        None -> [
+            end none()
+        ]
+    ]
+]
+
+!!! `map.get(key)?.as_array()` sprowadzone do `List<Str>` (elementy nie
+!!! bedace stringiem sa POMIJANE, nie powoduja bledu) - parytet z
+!!! `get_str_array`. Brak klucza -> pusta lista.
+fun manifest_get_str_array(entries: List<JsonEntry>, key: Str) -> List<Str> [
+    let out: List<Str> = []
+    match manifest_find_entry(entries, key) [
+        Some(v) -> [
+            match manifest_as_array(v) [
+                Some(items) -> [
+                    let i = 0
+                    let n = items.len()
+                    while i < n [
+                        match manifest_as_string(items[i].clone()) [
+                            Some(s) -> [
+                                out.push(s)
+                            ]
+                            None -> [
+                            ]
+                        ]
+                        i = i + 1
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        None -> [
+        ]
+    ]
+    end out
+]
+
+!!! Jak `manifest_find_entry` + `manifest_as_map`, ale z bledem
+!!! (`err_msg`), gdy klucza brak ALBO nie jest mapa - dla POL
+!!! WYMAGANYCH (uzyj z `?`).
+fun manifest_require_map(entries: List<JsonEntry>, key: Str, err_msg: Str) -> Result<List<JsonEntry>, Str> [
+    match manifest_find_entry(entries, key) [
+        Some(v) -> [
+            match manifest_as_map(v) [
+                Some(e) -> [
+                    end ok(e)
+                ]
+                None -> [
+                    end err(err_msg)
+                ]
+            ]
+        ]
+        None -> [
+            end err(err_msg)
+        ]
+    ]
+]
+
+!!! Jak `manifest_require_map`, ale BEZ bledu - brakujaca/zla sekcja
+!!! daje po prostu pusta liste (dla sekcji OPCJONALNYCH: dependencies/
+!!! dev-dependencies/workspace/build).
+fun manifest_optional_map(entries: List<JsonEntry>, key: Str) -> List<JsonEntry> [
+    match manifest_find_entry(entries, key) [
+        Some(v) -> [
+            match manifest_as_map(v) [
+                Some(e) -> [
+                    end e
+                ]
+                None -> [
+                    let empty: List<JsonEntry> = []
+                    end empty
+                ]
+            ]
+        ]
+        None -> [
+            let empty: List<JsonEntry> = []
+            end empty
+        ]
+    ]
+]
+
+!!! `manifest_get_str` z bledem (`err_msg`) zamiast `None`, gdy klucza
+!!! brak - dla POL WYMAGANYCH (uzyj z `?`).
+fun manifest_require_str(entries: List<JsonEntry>, key: Str, err_msg: Str) -> Result<Str, Str> [
+    match manifest_get_str(entries, key) [
+        Some(v) -> [
+            end ok(v)
+        ]
+        None -> [
+            end err(err_msg)
+        ]
+    ]
+]
+
+!!! Wyciaga `List<JsonEntry>` z sparsowanego (i rozwiazanej interpolacji)
+!!! configu `config` (musi byc `JsonObject` na najwyzszym poziomie -
+!!! zawsze jest, jesli pochodzi z `hk_parse`, chyba ze plik jest pusty).
+fun manifest_root_entries(config: JsonValue, origin: Str) -> Result<List<JsonEntry>, Str> [
+    match manifest_as_map(config) [
+        Some(e) -> [
+            end ok(e)
+        ]
+        None -> [
+            end err("nieprawidlowy plik .hk: " + origin)
+        ]
+    ]
+]
+
+!!! `[dependencies]`/`[dev-dependencies]` sa zagniezdzone (`-> pypi.rich
+!!! => "*"` albo `-> pypi \n --> rich => "*"`) - obie formy daja ta sama
+!!! mape zagniezdzona `{pypi: {rich: "*"}}`, ktora tu splaszczamy do
+!!! listy `Dependency` - parytet z `collect_dependencies`.
+fun manifest_collect_dependencies(entries: List<JsonEntry>) -> List<Dependency> [
+    let out: List<Dependency> = []
+    let i = 0
+    let n = entries.len()
+    while i < n [
+        let source_entry = entries[i].clone()
+        match manifest_as_map(source_entry.value) [
+            Some(inner) -> [
+                let j = 0
+                let m = inner.len()
+                while j < m [
+                    let dep_entry = inner[j].clone()
+                    let version = "*"
+                    match manifest_as_string(dep_entry.value) [
+                        Some(v) -> [
+                            version = v
+                        ]
+                        None -> [
+                        ]
+                    ]
+                    out.push(Dependency(source_entry.key.clone(), dep_entry.key, version))
+                    j = j + 1
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+!!! Parsuje `source` (tekst pliku `.hk`) jako `Manifest`. `origin` jest
+!!! uzywany TYLKO w komunikatach bledow (np. sciezka pliku) - parytet z
+!!! `parse_manifest_str`.
+fun parse_manifest_str(source: Str, origin: Str) -> Result<Manifest, Str> [
+    let raw = hk_parse(source)?
+    let config = hk_resolve_interpolations(raw)?
+    let root_entries = manifest_root_entries(config, origin.clone())?
+
+    let package_entries = manifest_require_map(root_entries.clone(), "package", "brakujace pole: [package] w " + origin)?
+    let name = manifest_require_str(package_entries.clone(), "name", "brakujace pole: package.name")?
+    let version = manifest_require_str(package_entries.clone(), "version", "brakujace pole: package.version")?
+    let lang_using = manifest_get_str(package_entries.clone(), "using")
+    let authors = manifest_get_str_array(package_entries.clone(), "authors")
+    let edition = "2026"
+    match manifest_get_str(package_entries.clone(), "edition") [
+        Some(v) -> [
+            edition = v
+        ]
+        None -> [
+        ]
+    ]
+    let description = manifest_get_str(package_entries.clone(), "description")
+    let package = PackageSection(name, version, lang_using, authors, edition, description)
+
+    let dependencies = manifest_collect_dependencies(manifest_optional_map(root_entries.clone(), "dependencies"))
+    let dev_dependencies = manifest_collect_dependencies(manifest_optional_map(root_entries.clone(), "dev-dependencies"))
+    let workspace = WorkspaceSection(manifest_get_str_array(manifest_optional_map(root_entries.clone(), "workspace"), "members"))
+
+    let build_entries = manifest_optional_map(root_entries.clone(), "build")
+    let build = default_build_section()
+    match manifest_get_str(build_entries, "entry") [
+        Some(v) -> [
+            build = BuildSection(v)
+        ]
+        None -> [
+        ]
+    ]
+
+    end ok(Manifest(package, dependencies, dev_dependencies, workspace, build))
+]
+
+!!! Wczytuje i parsuje `Virus.hk` (albo dowolny plik `.hk` o tym samym
+!!! ksztalcie) z dysku - parytet z `parse_file`.
+fun parse_manifest_file(path: Str) -> Result<Manifest, Str> [
+    let text = read_file(path.clone())?
+    end parse_manifest_str(text, path)
+]
+
+!!! Katalog zrodel uzytkownika - ZAWSZE `cmd/` (nazwa zarezerwowana, nie
+!!! do zmiany przez uzytkownika - patrz docs/SYNTAX.md) - parytet z
+!!! `source_dir`.
+fun manifest_source_dir(project_root: Str) -> Str [
+    end path_join(project_root, "cmd")
+]
+
+!!! Wszystkie pliki `.hcs` pod `dir`, REKURENCYJNIE (odpowiednik
+!!! `WalkDir::new(...).filter(...)` w oryginale) - katalogi, ktorych nie
+!!! da sie odczytac, sa po prostu POMIJANE (bez bledu - parytet z
+!!! `filter_map(|e| e.ok())`).
+fun manifest_walk_hcs_files(dir: Str) -> List<Str> [
+    let out: List<Str> = []
+    match list_dir(dir.clone()) [
+        Ok(names) -> [
+            let i = 0
+            let n = names.len()
+            while i < n [
+                let full = path_join(dir.clone(), names[i].clone())
+                if dir_exists(full.clone()) [
+                    let sub = manifest_walk_hcs_files(full)
+                    let j = 0
+                    let jn = sub.len()
+                    while j < jn [
+                        out.push(sub[j].clone())
+                        j = j + 1
+                    ]
+                ] else [
+                    if str_ends_with(full.clone(), ".hcs") [
+                        out.push(full)
+                    ]
+                ]
+                i = i + 1
+            ]
+        ]
+        Err(_e) -> [
+        ]
+    ]
+    end out
+]
