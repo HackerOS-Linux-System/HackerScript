@@ -1,0 +1,69 @@
+include <cache>
+include <manifest>
+include <hackerc_bridge>
+include <progress>
+get <std:path> import <path_join>
+
+!!! Zwraca `[wersja z Virus.hk / DEFAULT_HACKERC_VERSION]`, BEZ bledu
+!!! nawet gdy manifest brakuje/jest zly (parytet z `.ok()` w oryginale -
+!!! `virus check`/`virus lint` maja dzialac nawet z niekompletnym
+!!! manifestem, byle znalazly jakikolwiek `hackerc`).
+fun check_resolve_version(project_root: Str) -> Str [
+    let version = DEFAULT_HACKERC_VERSION.to_string()
+    match parse_manifest_file(path_join(project_root, "Virus.hk")) [
+        Ok(m) -> [
+            match m.package.lang_using [
+                Some(u) -> [
+                    version = u
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        Err(_e) -> [
+        ]
+    ]
+    end version
+]
+
+!!! `true` = 0 bledow. Wypisuje diagnostyke `hackerc` (przechwycona z
+!!! jego stderr) dla kazdego pliku, ktory sie nie sprawdzil.
+fun cmd_check_run(project_root: Str) -> Bool [
+    let cache = cache_dirs_for_project(project_root.clone())
+    cache_ensure_all(cache.clone())
+
+    let version = check_resolve_version(project_root.clone())
+    let hackerc_bin = ""
+    match hackerc_resolve(cache, version) [
+        Ok(bin) -> [
+            hackerc_bin = bin
+        ]
+        Err(e) -> [
+            progress_error(e)
+            end false
+        ]
+    ]
+
+    let sources = manifest_walk_hcs_files(manifest_source_dir(project_root))
+    let errors = 0
+    let i = 0
+    let n = sources.len()
+    while i < n [
+        match hackerc_check_file(hackerc_bin.clone(), sources[i].clone()) [
+            Ok(_out) -> [
+            ]
+            Err(e) -> [
+                progress_error(e)
+                errors = errors + 1
+            ]
+        ]
+        i = i + 1
+    ]
+
+    if errors > 0 [
+        progress_error("`virus check` znalazl bledy w " + (errors as Str) + "/" + (n as Str) + " plik(ow)")
+        end false
+    ]
+    progress_success("sprawdzono " + (n as Str) + " plik(ow), 0 bledow")
+    end true
+]
