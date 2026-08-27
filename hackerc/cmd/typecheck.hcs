@@ -1,0 +1,543 @@
+include <ast_nodes>
+include <diagnostics>
+include <typeinfer>
+
+fun is_known_get_source(s: Str) -> Bool [
+    end s == "pypi" or s == "crates" or s == "std" or s == "core" or s == "selfhost" or s == "virus"
+]
+
+fun is_builtin_func(name: Str) -> Bool [
+    end name == "log" or name == "elog" or name == "__direct__" or name == "some" or name == "none" or name == "ok" or name == "err" or name == "read_file" or name == "write_file" or name == "dict" or name == "env_var" or name == "run_command" or name == "run_command_combined" or name == "http_get" or name == "current_dir"
+]
+
+fun str_starts_with_underscore(s: Str) -> Bool [
+    if s.len() == 0 [
+        end false
+    ]
+    end s.char_at(0) == "_"
+]
+
+!!! -- Akcesory `Stmt::FunDecl` (rozszerzaja te z typeinfer.hcs) --------
+
+fun fun_decl_name(f: Stmt) -> Str [
+    match f [
+        FunDecl(name, params, ret_type, body, is_pub, type_params) -> [
+            end name
+        ]
+        _ -> [
+            end ""
+        ]
+    ]
+]
+
+fun fun_decl_params(f: Stmt) -> List<Param> [
+    match f [
+        FunDecl(name, params, ret_type, body, is_pub, type_params) -> [
+            end params.clone()
+        ]
+        _ -> [
+            end []
+        ]
+    ]
+]
+
+fun fun_decl_body(f: Stmt) -> List<Stmt> [
+    match f [
+        FunDecl(name, params, ret_type, body, is_pub, type_params) -> [
+            end body.clone()
+        ]
+        _ -> [
+            end []
+        ]
+    ]
+]
+
+!!! -- E0002: czy cialo funkcji ma GDZIEKOLWIEK `end <wartosc>` --------
+
+!!! Analiza UPROSZCZONA (jak w Pythonie) - nie sledzi WSZYSTKICH sciezek
+!!! wykonania, tylko OBECNOSC takiej instrukcji gdziekolwiek w drzewie.
+fun has_value_return(stmts: List<Stmt>) -> Bool [
+    let i = 0
+    let n = stmts.len()
+    while i < n [
+        let s = stmts[i]
+        match s [
+            ReturnStmt(value) -> [
+                match value [
+                    Some(v) -> [
+                        end true
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            IfStmt(cond, body, elifs, else_body) -> [
+                if has_value_return(body) [
+                    end true
+                ]
+                let j = 0
+                let en = elifs.len()
+                while j < en [
+                    let arm = elifs[j].clone()
+                    if has_value_return(arm.body) [
+                        end true
+                    ]
+                    j = j + 1
+                ]
+                match else_body [
+                    Some(eb) -> [
+                        if has_value_return(eb) [
+                            end true
+                        ]
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            WhileStmt(cond, body) -> [
+                if has_value_return(body) [
+                    end true
+                ]
+            ]
+            ForStmt(var, iterable, body) -> [
+                if has_value_return(body) [
+                    end true
+                ]
+            ]
+            ManualBlock(body) -> [
+                if has_value_return(body) [
+                    end true
+                ]
+            ]
+            MatchStmt(subject, arms) -> [
+                let k = 0
+                let an = arms.len()
+                while k < an [
+                    let arm2 = arms[k].clone()
+                    if has_value_return(arm2.body) [
+                        end true
+                    ]
+                    k = k + 1
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+!!! -- FnChecker: sprawdza CIALO JEDNEJ funkcji/metody -------------------
+
+!!! Patrz uwaga projektowa na gorze pliku co do tego, DLACZEGO to NIE
+!!! opakowuje `TypeEnv` jako pole, tylko trzyma `sigs`/`vars` osobno.
+struct FnChecker [
+    sigs: Signatures,
+    diags: List<Diagnostic>,
+    used: Dict<Str, Bool>,
+    declared_names: List<Str>,
+    vars: Dict<Str, Option<TypeRef>>,
+    ret_type: Option<TypeRef>,
+    fn_name: Str,
+    imported_names: Dict<Str, Bool>,
+    extra_variant_names: List<Str>
+]
+
+impl FnChecker [
+    fun mark_used(self, name: Str) [
+        self.used.insert(name, true)
+    ]
+
+    fun declare_var(self, name: Str, t: Option<TypeRef>) [
+        self.vars.insert(name, t)
+    ]
+
+    !!! Buduje `TypeEnv` "na zawolanie" (klonujac `sigs`/`vars`) - TYLKO
+    !!! do przekazania do `infer_expr_type` (czysty odczyt, nigdy nie
+    !!! mutuje) - patrz uwaga projektowa na gorze pliku.
+    fun env_snapshot(self) -> TypeEnv [
+        end TypeEnv(self.sigs.clone(), self.vars.clone())
+    ]
+
+    !!! E0001/W0002 - parytet z `_check_call` w typecheck.py. `name` to
+    !!! JUZ wyciagnieta nazwa identyfikatora calleego (patrz
+    !!! `expr_as_ident_name` w typeinfer.hcs).
+    fun check_call(self, name: Str, arg_count: Int) [
+        if is_builtin_func(name) or self.sigs.structs.contains(name) or self.sigs.variant_owner.contains(name) or self.imported_names.contains(name) [
+            end
+        ]
+        match self.sigs.functions.fetch(name) [
+            Some(f) -> [
+                let params = fun_decl_params(f)
+                if arg_count != params.len() [
+                    self.diags.push(Diagnostic("error", "E0001", "'" + name + "' oczekuje " + (params.len() as Str) + " argument(ow), otrzymano " + (arg_count as Str), 0, 0, 1, ""))
+                ]
+            ]
+            None -> [
+                self.diags.push(Diagnostic("warning", "W0002", "wywolanie nieznanej funkcji '" + name + "' (jesli pochodzi z 'get <...>', to ograniczenie bootstrapu - patrz docs/ROADMAP.md)", 0, 0, 1, ""))
+            ]
+        ]
+    ]
+
+    !!! Odwiedza wyrazenie - oznacza uzyte identyfikatory (`used`),
+    !!! sprawdza wywolania (`check_call`), sprawdza `?` (E0011).
+    fun visit_expr(self, e: Expr) [
+        let e2 = e.clone()
+        match e2 [
+            IdentExpr(name) -> [
+                self.mark_used(name)
+            ]
+            BinOp(op, left, right) -> [
+                self.visit_expr(left)
+                self.visit_expr(right)
+            ]
+            UnaryOp(op, operand) -> [
+                self.visit_expr(operand)
+            ]
+            Attr(target, name) -> [
+                self.visit_expr(target)
+            ]
+            Index(target, index) -> [
+                self.visit_expr(target)
+                self.visit_expr(index)
+            ]
+            ListLit(items) -> [
+                let i = 0
+                let n = items.len()
+                while i < n [
+                    self.visit_expr(items[i])
+                    i = i + 1
+                ]
+            ]
+            Call(callee, args) -> [
+                let ident_name = expr_as_ident_name(callee)
+                if ident_name != "" [
+                    self.mark_used(ident_name)
+                    self.check_call(ident_name, args.len())
+                ] else [
+                    self.visit_expr(callee)
+                ]
+                let j = 0
+                let an = args.len()
+                while j < an [
+                    self.visit_expr(args[j])
+                    j = j + 1
+                ]
+            ]
+            Cast(target, type_ref) -> [
+                self.visit_expr(target)
+            ]
+            TryOp(target) -> [
+                self.visit_expr(target)
+                let rt = self.ret_type.clone()
+                let ok = false
+                match rt [
+                    Some(rtv) -> [
+                        if rtv.name == "Result" or rtv.name == "Option" [
+                            ok = true
+                        ]
+                    ]
+                    None -> [
+                    ]
+                ]
+                if not ok [
+                    let fname = self.fn_name.clone()
+                    self.diags.push(Diagnostic("error", "E0011", "'?' uzyte w '" + fname + "', ktora nie zwraca Result<T,E> ani Option<T> - '?' propaguje Err/None do OTACZAJACEJ funkcji, wiec jej typ zwracany musi na to pozwalac", 0, 0, 1, ""))
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+    ]
+
+    fun visit_stmts(self, stmts: List<Stmt>) [
+        let i = 0
+        let n = stmts.len()
+        while i < n [
+            self.visit_stmt(stmts[i])
+            i = i + 1
+        ]
+    ]
+
+    !!! Odwiedza jedna instrukcje - deklaruje zmienne (`vars`/
+    !!! `declared_names`), sprawdza E0005, rekuruje w bloki zagniezdzone.
+    fun visit_stmt(self, s: Stmt) [
+        let s2 = s.clone()
+        match s2 [
+            LetStmt(name, type_ref, value, is_const) -> [
+                let inferred: Option<TypeRef> = none()
+                match value [
+                    Some(v) -> [
+                        self.visit_expr(v.clone())
+                        let env = self.env_snapshot()
+                        inferred = infer_expr_type(v, env)
+                    ]
+                    None -> [
+                    ]
+                ]
+                match type_ref [
+                    Some(tref) -> [
+                        match inferred [
+                            Some(inf) -> [
+                                if not types_equal(some(tref.clone()), some(inf.clone())) [
+                                    self.diags.push(Diagnostic("error", "E0005", "zmienna '" + name + "' zadeklarowana jako " + tref.name + ", ale przypisana wartosc ma wywnioskowany typ " + inf.name, 0, 0, 1, ""))
+                                ]
+                            ]
+                            None -> [
+                            ]
+                        ]
+                        self.declare_var(name, some(tref))
+                    ]
+                    None -> [
+                        self.declare_var(name, inferred)
+                    ]
+                ]
+                self.declared_names.push(name)
+            ]
+            AssignStmt(target, op, value) -> [
+                self.visit_expr(value)
+                let target_ident = expr_as_ident_name(target)
+                if target_ident == "" [
+                    self.visit_expr(target)
+                ]
+            ]
+            IfStmt(cond, body, elifs, else_body) -> [
+                self.visit_expr(cond)
+                self.visit_stmts(body)
+                let i = 0
+                let n = elifs.len()
+                while i < n [
+                    let arm = elifs[i].clone()
+                    self.visit_expr(arm.cond)
+                    self.visit_stmts(arm.body)
+                    i = i + 1
+                ]
+                match else_body [
+                    Some(eb) -> [
+                        self.visit_stmts(eb)
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            WhileStmt(cond, body) -> [
+                self.visit_expr(cond)
+                self.visit_stmts(body)
+            ]
+            ForStmt(var, iterable, body) -> [
+                self.visit_expr(iterable)
+                self.declare_var(var, none())
+                self.visit_stmts(body)
+            ]
+            ReturnStmt(value) -> [
+                match value [
+                    Some(v) -> [
+                        self.visit_expr(v)
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            ManualBlock(body) -> [
+                self.visit_stmts(body)
+            ]
+            ExprStmt(expr) -> [
+                self.visit_expr(expr)
+            ]
+            MatchStmt(subject, arms) -> [
+                self.visit_expr(subject)
+                let i2 = 0
+                let n2 = arms.len()
+                while i2 < n2 [
+                    let arm = arms[i2].clone()
+                    let j = 0
+                    let bn = arm.binds.len()
+                    while j < bn [
+                        self.declare_var(arm.binds[j], none())
+                        j = j + 1
+                    ]
+                    self.visit_stmts(arm.body)
+                    i2 = i2 + 1
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+    ]
+]
+
+!!! -- Checker: sprawdza CALY program -------------------------------------
+
+struct Checker [
+    sigs: Signatures,
+    diags: List<Diagnostic>,
+    imported_names: Dict<Str, Bool>,
+    extra_variant_names: List<Str>
+]
+
+impl Checker [
+    !!! E0003 - parytet z `_check_get`.
+    fun check_get(self, source: Str, name: Str) [
+        if not is_known_get_source(source) [
+            self.diags.push(Diagnostic("error", "E0003", "nieznane zrodlo '" + source + "' w 'get <" + source + ":" + name + ">' (dozwolone: core, crates, pypi, selfhost, std, virus)", 0, 0, 1, ""))
+        ]
+    ]
+
+    !!! Sprawdza jedna funkcje/metode - buduje `FnChecker`, odwiedza
+    !!! cale cialo, robi E0002/W0001, i doklada wynik do `self.diags`.
+    fun check_fun(self, fn_stmt: Stmt, self_type: Option<TypeRef>) [
+        let owned_fn = fn_stmt.clone()
+        let fn_name = fun_decl_name(owned_fn.clone())
+        let params = fun_decl_params(owned_fn.clone())
+        let ret_type = fun_decl_ret_type(owned_fn.clone())
+        let body = fun_decl_body(owned_fn)
+
+        let checker = FnChecker(self.sigs.clone(), [], dict(), [], dict(), ret_type, fn_name, self.imported_names.clone(), self.extra_variant_names.clone())
+
+        let i = 0
+        let n = params.len()
+        while i < n [
+            let p = params[i]
+            if p.name == "self" [
+                checker.declare_var("self", self_type.clone())
+            ] else [
+                checker.declare_var(p.name, p.type_ref)
+            ]
+            i = i + 1
+        ]
+
+        checker.visit_stmts(body.clone())
+
+        let ret_type_for_e0002 = checker.ret_type.clone()
+        match ret_type_for_e0002 [
+            Some(rt) -> [
+                if not has_value_return(body) [
+                    let fname_for_e0002 = checker.fn_name.clone()
+                    checker.diags.push(Diagnostic("error", "E0002", "funkcja '" + fname_for_e0002 + "' deklaruje typ zwracany " + rt.name + ", ale nigdzie nie ma 'end <wartosc>'", 0, 0, 1, ""))
+                ]
+            ]
+            None -> [
+            ]
+        ]
+
+        let j = 0
+        let dn = checker.declared_names.len()
+        while j < dn [
+            let dname = checker.declared_names[j]
+            if not checker.used.contains(dname) and not str_starts_with_underscore(dname) [
+                checker.diags.push(Diagnostic("warning", "W0001", "zmienna '" + dname + "' jest zadeklarowana, ale nigdy nie uzyta", 0, 0, 1, ""))
+            ]
+            j = j + 1
+        ]
+
+        self.diags.extend(checker.diags)
+    ]
+
+    !!! Sprawdza CALY program - parytet z `Checker.check()`.
+    fun check(self) [
+        end
+    ]
+]
+
+!!! Buduje `imported_names` (suma `details` ze WSZYSTKICH
+!!! `GetImportStmt` w programie) - parytet z petla w
+!!! `Checker.__init__`.
+fun collect_imported_names(prog: Program) -> Dict<Str, Bool> [
+    let out: Dict<Str, Bool> = dict()
+    let i = 0
+    let n = prog.body.len()
+    while i < n [
+        let s = prog.body[i]
+        match s [
+            GetImportStmt(source, name, version, details) -> [
+                let j = 0
+                let dn = details.len()
+                while j < dn [
+                    out.insert(details[j].clone(), true)
+                    j = j + 1
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+!!! Punkt wejscia - parytet z `check_program(program, extra_variant_names)`
+!!! w typecheck.py. `extra_variant_names` to warianty enumow
+!!! ZAIMPORTOWANYCH z innych plikow (`get <selfhost:ast_nodes> import
+!!! <Expr>`) - bez tego konstruktor wariantu z importowanego enuma
+!!! dawalby spurious W0002, bo `Signatures` widzi TYLKO BIEZACY plik
+!!! (parytet z komentarzem przy `extra_variant_names` w typecheck.py).
+fun check_program(prog: Program, extra_variant_names: List<Str>) -> List<Diagnostic> [
+    let sigs = collect_signatures(prog.clone())
+    let imported_names = collect_imported_names(prog.clone())
+    let checker = Checker(sigs, [], imported_names, extra_variant_names.clone())
+
+    let i = 0
+    let n = prog.body.len()
+    while i < n [
+        let s = prog.body[i]
+        match s [
+            GetImportStmt(source, name, version, details) -> [
+                checker.check_get(source, name)
+            ]
+            FunDecl(fname, fparams, fret, fbody, fis_pub, ftype_params) -> [
+                checker.check_fun(prog.body[i], none())
+            ]
+            ImplDecl(struct_name, methods, type_params) -> [
+                let j = 0
+                let mn = methods.len()
+                while j < mn [
+                    checker.check_fun(methods[j], some(TypeRef(struct_name.clone(), none(), none())))
+                    j = j + 1
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+        i = i + 1
+    ]
+
+    end checker.diags
+]
+
+!!! Demonstracyjne uzycie - sprawdza reczne AST dla `fun bad() -> Int [
+!!! let x = 1 ]` (brak `end` -> E0002, `x` nieuzyte -> W0001) i
+!!! `fun ok() -> Int [ end 1 + 2 ]` (czyste).
+fun main() [
+    let bad_body: List<Stmt> = [LetStmt("x", none(), some(NumberLit("1")), false)]
+    let bad_fn = FunDecl("bad", [], some(TypeRef("Int", none(), none())), bad_body, false, [])
+    let ok_body: List<Stmt> = [ReturnStmt(some(BinOp("+", NumberLit("1"), NumberLit("2"))))]
+    let ok_fn = FunDecl("ok", [], some(TypeRef("Int", none(), none())), ok_body, false, [])
+    let prog = Program([bad_fn, ok_fn])
+    let diags = check_program(prog, [])
+    log("liczba diagnostyk:", diags.len())
+]
+
+!!! ## Ograniczenia tej wersji (patrz docs/ROADMAP.md)
+!!!
+!!! - Wszystkie `Diagnostic` maja `line=0, col=0, length=1` - brak
+!!!   pola `line: Int` na wezlach AST (patrz "Ograniczenia" w
+!!!   ast_nodes.hcs) - komunikaty sa poprawne tresciowo, ale bez
+!!!   lokalizacji w zrodle (parser.hcs rowniez tego dzis nie sledzi).
+!!! - `Checker.check()` (bez argumentow, odpowiadajac
+!!!   `Checker.check(self) -> list[Diagnostic]` w Pythonie) jest tu
+!!!   PUSTE - prawdziwa logika zyje w wolnej funkcji `check_program`
+!!!   zamiast metody (matched Python semantycznie identycznie, ale
+!!!   `check_program` MUSI byc funkcja wolna, bo POTRZEBUJE zbudowac
+!!!   `Signatures`/`imported_names` PRZED skonstruowaniem `Checker`,
+!!!   co w Pythonie dzieje sie w `__init__` - HackerScript nie ma
+!!!   konstruktorow z logika, tylko plaskie pozycyjne wywolanie typu).
+!!! - `used`/`imported_names` to `Dict<Str, Bool>` (nie prawdziwy Set -
+!!!   ten bootstrap go nie ma).
+!!! - `declared_names` to `List<Str>` (nie `Dict<Str, LetStmt>` jak w
+!!!   Pythonie) - bez iteracji po Dict (`.items()`) nie dalo by sie
+!!!   tego przejrzec, a i tak nie mamy `line` do pokazania z LetStmt.
+!!! - NIEPRZETESTOWANE na prawdziwym wejsciu w tym srodowisku (brak
+!!!   rustc) - zweryfikowane strukturalnie przez `hackerc check`/
+!!!   `build` i BARDZO dokladna inspekcje wygenerowanego Rusta (patrz
+!!!   docs/ROADMAP.md - uwaga projektowa o `self.pole` + `match`).
