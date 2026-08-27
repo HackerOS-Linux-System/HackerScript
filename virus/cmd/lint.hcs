@@ -1,0 +1,48 @@
+include <cache>
+include <manifest>
+include <check>
+include <hackerc_bridge>
+include <progress>
+get <std:path> import <path_join>
+
+!!! `file` = `some(sciezka wzgledna do project_root)` sprawdza TYLKO
+!!! ten plik; `none()` przechodzi po WSZYSTKICH `.hcs` pod `cmd/`
+!!! (parytet z `Option<&Path>` w oryginale). `true` = udalo sie
+!!! uruchomic `hackerc lint` na kazdym pliku (bez wzgledu na to, czy
+!!! zglosil warningi - `hackerc lint` samo w sobie nigdy nie zwraca
+!!! bledu, patrz hackerc/hackerc/cli.py::cmd_lint).
+fun cmd_lint_run(project_root: Str, file: Option<Str>) -> Bool [
+    let cache = cache_dirs_for_project(project_root.clone())
+    let version = check_resolve_version(project_root.clone())
+    let hackerc_bin = ""
+    match hackerc_resolve(cache, version) [
+        Ok(bin) -> [
+            hackerc_bin = bin
+        ]
+        Err(e) -> [
+            progress_error(e)
+            end false
+        ]
+    ]
+
+    let sources: List<Str> = []
+    match file [
+        Some(f) -> [
+            sources.push(path_join(project_root.clone(), f))
+        ]
+        None -> [
+            sources = manifest_walk_hcs_files(manifest_source_dir(project_root))
+        ]
+    ]
+
+    let i = 0
+    let n = sources.len()
+    while i < n [
+        let out = hackerc_lint_file(hackerc_bin.clone(), sources[i].clone())
+        if out.len() > 0 [
+            log(out)
+        ]
+        i = i + 1
+    ]
+    end true
+]
