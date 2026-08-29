@@ -344,11 +344,11 @@ fun toml_split_top_level(s: Str, sep: Str) -> List<Str> [
     end out
 ]
 
-! ---- pomocnicze operacje na drzewie JsonValue (immutable rebuild) --------
-! HackerScript nie ma latwego sposobu na "mutowalna referencje do
-! zagniezdzonego pola" przez wiele poziomow `List<JsonEntry>`, wiec
-! aktualizacja zagniezdzonej tabeli dziala przez PRZEBUDOWE calej
-! sciezki od korzenia (funkcyjny styl "set", nie mutacja w miejscu).
+!! ---- pomocnicze operacje na drzewie JsonValue (immutable rebuild) --------
+!! HackerScript nie ma latwego sposobu na "mutowalna referencje do
+!! zagniezdzonego pola" przez wiele poziomow `List<JsonEntry>`, wiec
+!! aktualizacja zagniezdzonej tabeli dziala przez PRZEBUDOWE calej
+!! sciezki od korzenia (funkcyjny styl "set", nie mutacja w miejscu).
 
 !! Wyciaga liste par klucz-wartosc z `v`, jesli `v` to `JsonObject` -
 !! w przeciwnym razie zwraca pusta liste (uzywane, gdy sciezka jeszcze
