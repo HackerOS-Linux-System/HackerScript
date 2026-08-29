@@ -13,7 +13,7 @@ fun cmd_fmt_run(project_root: Str, file: Option<Str>, check_only: Bool) -> Bool 
     let cache = cache_dirs_for_project(project_root.clone())
     let version = check_resolve_version(project_root.clone())
     let hackerc_bin = ""
-    match hackerc_resolve(cache, version) [
+    match hackerc_ensure(cache, version) [
         Ok(bin) -> [
             hackerc_bin = bin
         ]
