@@ -1,12 +1,28 @@
-# HackerScript
+= HackerScript
+:toc:
+:toclevels: 3
+:source-highlighter: rouge
+:icons: font
 
 Jezyk programowania ogolnego przeznaczenia. Zwykla `fun` kompiluje sie
-do **prawdziwego Rusta** (statyczne typy, bezpieczenstwo pamieci,
+do *prawdziwego Rusta* (statyczne typy, bezpieczenstwo pamieci,
 zero-cost abstractions). `direct [ ... ]` to ucieczka do czystego
 Pythona, wykonywanego przez wbudowany interpreter (PyO3) - dla tego
 niewielkiego fragmentu kodu, ktory nigdy nie bedzie wymagal wydajnosci.
 
-```hcs
+[cols="1,3"]
+|===
+| Status | *Bootstrap osiagniety* - `hackerc` (transpilator) i `virus`
+(menedzer pakietow/narzedzie budowania) sa dzis w calosci napisane w
+samym HackerScript (`.hcs`), nie w Pythonie/Rust jak w wersji `0.0.1`.
+| Wersja | `0.1` (ta - self-hostujaca sie, wydawana na GitHub
+Releases) - `0.0.1` to *zamrozona* wersja startowa sprzed bootstrapu
+(patrz <<historia-wersji>>).
+| Licencja | MIT (c) 2026 HackerOS Team
+|===
+
+[source,hcs]
+----
 struct Point [
     x: Int,
     y: Int
@@ -25,87 +41,194 @@ fun main() [
     ]
     end
 ]
-```
+----
 
-Zobacz **`examples/showcase.hcs`** - jeden plik demonstrujacy CALA
-dzisiejsza skladnie.
+Zobacz `docs/hello-world/` i `docs/module-demo/` - dzialajace
+przyklady, oraz `docs/SYNTAX.md` - pelny opis skladni.
 
-## Struktura repozytorium
+== Struktura repozytorium
 
-```
+----
 HackerScript/
-  hackerc/          transpilator .hcs -> Rust (Python)
-  virus/            manager pakietow i narzedzie budowania (Rust)
-    cli/              binarka `virus`
-    hk-parser/        parser PRAWDZIWEGO formatu .hk (nie TOML!)
+  hackerc/cmd/          transpilator .hcs -> Rust, W CALOSCI w HackerScript (self-hosted)
+    lexer.hcs              tokenizacja + resolve_escape (\n \t \r \e ...)
+    parser.hcs              recursive-descent parser -> AST
+    ast_nodes.hcs           definicje Expr/Stmt/typow AST
+    typecheck.hcs           diagnostyki (bledy/warningi), builtin-y
+    typeinfer.hcs           inferencja typow, sygnatury projektu
+    codegen.hcs             AST -> tekst Rust (~3700 linii, najwiekszy plik)
+    transpiler.hcs          spina lexer/parser/typecheck/codegen w calosc
+    project.hcs             wielo-plikowe skladanie projektu, Cargo.toml
+    formatter.hcs            formater kodu .hcs
+    diagnostics.hcs          renderowanie bledow w stylu rustc (podkreslona linia)
+    cli.hcs                  CLI: build/check/lint/fmt (kolorowe, z paskiem postepu)
+    playground.hcs           demo/checker uzywany przez playground WASM
+  virus/cmd/             menedzer pakietow i build tool, W CALOSCI w HackerScript
+    main.hcs                 CLI: init/build/check/lint/fmt/install/remove/repair/clean
+    manifest.hcs              parser formatu .hk (Virus.hk - NIE TOML)
+    install.hcs               pobieranie zaleznosci z PyPI/crates.io/npm/JSR
+    hackerc_bridge.hcs         resolve+download hackerc wg `using <wersja>`
+    build.hcs / check.hcs / lint.hcs / fmt.hcs / cache.hcs / cache_cmd.hcs
+    progress.hcs               kolorowy CLI (std:term) - naglowki/pasek postepu
+    remove.hcs / repair.hcs / clean.hcs / init.hcs
   libs/
-    core/lib/memory/  4 alokatory: arena, chained_arena, stack_allocator, pool_allocator
-    std/lib/cybersecurity/  constant_time_eq, shannon_entropy
-  examples/
-    hello-world/       podstawowy przyklad
-    module-demo/        przyklad systemu modulow (get <core:...>)
-    showcase.hcs         WSZYSTKIE funkcje skladni w jednym pliku
+    core/lib/memory/        4 alokatory: arena, chained_arena, stack_allocator, pool_allocator
+    std/lib/                fs, io, string, math, path, json, toml, hk, env,
+                             process, http, term (KOLORY + PASEK POSTEPU - nowe),
+                             result, cybersecurity/ (constant_time_eq, shannon_entropy)
+  playground/             checker HackerScript skompilowany do WASM (przegladarka)
   docs/
-    SYNTAX.md         pelny opis skladni
-    ROADMAP.md        co jeszcze brakuje
-  .github/workflows/  CI (buduje I URUCHAMIA wygenerowany crate) + Release
-```
+    hello-world/            minimalny dzialajacy przyklad (.hk + .hcs)
+    module-demo/            przyklad systemu modulow (get <core:...>)
+    SYNTAX.md                 pelny opis skladni
+    ROADMAP.md                 co jeszcze brakuje (szczegolowo, per-plik)
+  scripts/                install.sh/remove.sh (HackerOS) + skrypty .hl
+  .github/workflows/      CI (buduje I URUCHAMIA wygenerowany crate) + Release
+----
 
-## Jak to dziala
+TIP: Wczesniejsza architektura (`hackerc/` w Pythonie, `virus/cli` +
+`virus/hk-parser` w Rust z `clap`/`reqwest`) zostala calkowicie
+zastapiona kodem HackerScript powyzej - patrz <<historia-wersji>>
+jesli szukasz kontekstu tej zmiany.
 
-1. `fun` -> `hackerc` generuje prawdziwy Rust (struct -> `struct`+`impl
-   new()`, `manual[]` -> `unsafe{}`, `List<T>` -> `Vec<T>`, parametry
-   struct/List/Str automatycznie dostaja `&`/`&mut` zamiast przenoszenia
-   wlasnosci).
-2. `direct [ ... ]` -> surowy Python wykonywany w trakcie dzialania
-   programu przez `Python::with_gil` (PyO3, tryb `auto-initialize`) -
-   Rust jest hostem.
-3. `get <core:memory::arena>` -> realnie importuje kod z
-   `libs/core/lib/memory/arena.hcs` (system modulow: `hackerc/project.py`
-   dwufazowo zbiera sygnatury z calego projektu, zeby wywolania
-   cross-plikowe tez dostaly poprawne `&`/`&mut`).
-4. `get <crates:nazwa>` -> prawdziwa zaleznosc Cargo. `get
-   <pypi/npm/jsr:...>` -> pobierane przez `virus install`
-   (bezposrednio z PyPI/crates.io/npm/JSR API, BEZ `pip`/`cargo add`/
-   `npm install`).
-5. `virus build` -> `hackerc build` (generuje cargo crate) -> `cargo
-   build` (jedyne miejsce gdzie `virus` uzywa cargo - jako kompilator,
-   nie menedzer pakietow).
+== Jak to dziala
 
-## Szybki start
+. `fun` -> `hackerc` generuje prawdziwy Rust (`struct` -> `struct` +
+`impl new()`, `manual[]` -> `unsafe{}`, `List<T>` -> `Vec<T>`,
+parametry `struct`/`List`/`Str` automatycznie dostaja `&`/`&mut`
+zamiast przenoszenia wlasnosci).
+. `direct [ ... ]` -> surowy Python wykonywany w trakcie dzialania
+programu przez `Python::with_gil` (PyO3, tryb `auto-initialize`) -
+Rust jest hostem.
+. `get <core:memory::arena>` -> realnie importuje kod z
+`libs/core/lib/memory/arena.hcs` (system modulow: `project.hcs`
+dwufazowo zbiera sygnatury z calego projektu, zeby wywolania
+cross-plikowe tez dostaly poprawne `&`/`&mut`).
+. `get <crates:nazwa>` -> prawdziwa zaleznosc Cargo. `get
+<pypi/npm/jsr:...>` -> pobierane przez `virus install` (bezposrednio
+z PyPI/crates.io/npm/JSR API, BEZ `pip`/`cargo add`/`npm install`).
+. `using <wersja>` na poczatku pliku (albo `[package] using` w
+`Virus.hk`) -> deklaruje wymagana wersje `hackerc`. Jesli nie jest
+zainstalowana, `virus` pobiera ja *automatycznie* z GitHub Releases:
++
+[source]
+----
+https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v<wersja>/hackerc
+----
++
+(przez `curl`, z natywnym paskiem postepu, cache'owana w
+`cache/env/hackerc-<wersja>/`) - patrz `virus/cmd/hackerc_bridge.hcs`.
+. `virus build` -> `hackerc build` (generuje cargo crate) -> `cargo
+build` (jedyne miejsce, gdzie `virus` uzywa cargo - jako kompilator,
+nie menedzer pakietow).
 
-```bash
-cd hackerc && pip install -e . && cd ..
+== Szybki start
 
-hackerc check examples/showcase.hcs
-hackerc build examples/showcase.hcs -o /tmp/out
+[source,bash]
+----
+# hackerc i virus sa binarkami natywnymi (self-hosted) - najprosciej
+# pobrac gotowe wydanie:
+curl -L --fail -o hackerc \
+  https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v0.1/hackerc
+chmod +x hackerc
+
+./hackerc check docs/hello-world/Virus.hk
+./hackerc build docs/hello-world/cmd/main.hcs -o /tmp/out
 cd /tmp/out && cargo run   # wymaga zainstalowanego Rust
-```
+----
 
-## Status projektu
+Albo, w projekcie zarzadzanym przez `virus` (patrz `Virus.hk`):
 
-**Strona Python (`hackerc/`) jest w calosci przetestowana**: 23/23
-testow (`hackerc/tests/test_hackerc.py`) pokrywajacych transpilacje do
-Rusta, `struct`/`&mut`/`&`, `direct[]`->PyO3, system modulow, formatter,
-diagnostyke. W trakcie tej pracy znaleziono i naprawiono kilka realnych
-bledow (m.in. `!=` mylone z komentarzem, `Vec::len()` zwracajace
-`usize` a nie `i64`, przenoszenie wlasnosci struct/Vec/String przy
-wielokrotnym uzyciu tej samej zmiennej) - patrz `docs/ROADMAP.md`.
+[source,bash]
+----
+virus init --name moj-projekt
+cd moj-projekt
+virus build --release   # pobierze wlasciwy hackerc automatycznie (using <wersja>)
+----
 
-**Strona Rust (`virus/`) jest napisana kompletnie, ale w tym
-srodowisku nadal nie ma `cargo`/`rustc` do jej zbudowania.** CI
-(`.github/workflows/ci.yml`) teraz KOMPILUJE I URUCHAMIA wygenerowany
-crate na prawdziwym runnerze z Rustem - to jedyne miejsce gdzie
-poprawnosc generowanego kodu Rust jest realnie zweryfikowana.
+== Kolorowe CLI i pasek postepu
 
-Pelna, szczera lista tego co jeszcze brakuje: **`docs/ROADMAP.md`**.
+`hackerc build`/`virus build`/`check`/`lint`/`fmt` maja teraz
+kolorowe wyjscie (zielony = sukces, czerwony = blad, cyan =
+nazwy/etykiety) i *realny*, procentowy pasek postepu renderowany w
+miejscu (nie osobna linia per krok) - patrz nowy modul
+`libs/std/lib/term.hcs` (`get <std:term>`).
 
-## Dokumentacja
+* Kolory wylaczaja sie automatycznie gdy ustawiona jest zmienna
+  srodowiskowa `NO_COLOR` (https://no-color.org).
+* Pasek dla `hackerc build`: 4 kroki (parsowanie -> sygnatury projektu
+  -> sprawdzanie typow -> generowanie crate'a Rust).
+* Pobieranie binarek (`virus install`, auto-pobieranie `hackerc` wg
+  `using <wersja>`) uzywa *natywnego* paska `curl --progress-bar`
+  zamiast wlasnego renderowania - `virus` nie ma dostepu do bajtow
+  strumienia w trakcie trwania procesu pobierania (patrz
+  `docs/ROADMAP.md`, sekcja "CLI - kolory i pasek postepu", po
+  wyjasnienie dlaczego).
 
-- [`docs/SYNTAX.md`](docs/SYNTAX.md) - pelny opis skladni
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) - co brakuje
-- [`hackerc/README.md`](hackerc/README.md) - architektura transpilatora
-- Format `.hk`: https://hackeros-linux-system.github.io/HackerOS-Website/tools-docs/hk.html
+[[historia-wersji]]
+== Historia wersji
 
-## Uwaga
+[cols="1,4"]
+|===
+| `0.0.1`
+| *Zamrozona.* Wersja startowa: `hackerc` w Pythonie, `virus`
+(`cli`/`hk-parser`) w Rust z `clap`/`reqwest`. Nie jest juz
+rozwijana - punkt odniesienia "skad zaczelismy".
+
+| `0.1`
+| *Ta wersja.* Bootstrap osiagniety: `hackerc` i `virus` przepisane w
+calosci na sam HackerScript (`.hcs`), kompilowane przez wlasny
+transpilator do Rusta. Pierwsze wydanie publikowane binarnie na
+GitHub Releases pod `v0.1` (stad mechanizm `using <0.1>` opisany
+wyzej pobiera wlasnie ta binarke).
+
+| `0.2` / `0.3`
+| *Planowana.* Niezalezny backend generujacy kod maszynowy
+bezposrednio przez `get <crates:cranelift>`, *bez* zaleznosci od
+`rustc` w trakcie dzialania - zachowujac caly dzisiejszy front jezyka
+(lexer/parser/typecheck/typeinfer, `struct`/`enum`/`match`,
+`direct[...]`, system modulow `get<...>`) bez zmian. Motywacja:
+`rustc` jest ciezka zaleznoscia zewnetrzna i wolny do iteracji
+debugowej - Cranelift jako biblioteka pozwoliby `hackerc`/`virus` byc
+samowystarczalnym. Szczegoly i uzasadnienie: `docs/ROADMAP.md`,
+sekcja "Wersja 0.2/0.3 - niezalezny backend (Cranelift)".
+|===
+
+== Status projektu
+
+*Caly kompilator (`hackerc/cmd/`) i menedzer pakietow (`virus/cmd/`)
+sa dzis napisane w HackerScript* i weryfikowane strukturalnie przez
+`hackerc check` + inspekcje, a *koncowo* przez CI
+(`.github/workflows/ci.yml`), ktore kompiluje i uruchamia
+wygenerowany crate na prawdziwym runnerze z Rustem - to jedyne
+miejsce, gdzie poprawnosc generowanego kodu Rust jest dzis realnie
+zweryfikowana automatycznie przy kazdym PR.
+
+W trakcie przepisywania na self-hosting znaleziono i naprawiono kilka
+realnych bledow odziedziczonych z oryginalnej wersji Pythonowej (m.in.
+`!=` mylone z komentarzem, `Vec::len()` zwracajace `usize` a nie
+`i64`, przenoszenie wlasnosci `struct`/`Vec`/`String` przy
+wielokrotnym uzyciu tej samej zmiennej).
+
+Pelna, szczera lista tego co jeszcze brakuje - braki jezykowe
+bootstrapu (iteracja po `Dict`, `Set`, numery linii w AST, prawdziwe
+`ParseError`, `log()` dla struct/enum), uproszczenia per-plik
+(`codegen.hcs`/`typeinfer.hcs`/`project.hcs`/`cli.hcs`/
+`formatter.hcs`/`parser.hcs`), luki w `libs/std` poza rdzeniem, oraz
+plan backendu Cranelift - jest w *`docs/ROADMAP.md`*.
+
+== Dokumentacja
+
+* `docs/SYNTAX.md` - pelny opis skladni. +
+  *UWAGA*: w tym stanie repozytorium ten plik jest referencjonowany z
+  dziesiatek komentarzy `!!!` w calym kodzie (`lexer.hcs`,
+  `libs/core/lib/mod.hcs`, i inne), ale sam plik jeszcze nie istnieje
+  - patrz `docs/ROADMAP.md`. Do czasu jego napisania jedynym pelnym
+  zrodlem prawdy o skladni jest sam kod `hackerc/cmd/parser.hcs` +
+  przyklady w `docs/hello-world/`/`docs/module-demo/`.
+* `docs/ROADMAP.md` - co brakuje, szczegolowo i per-plik
+* Format `.hk`: https://hackeros-linux-system.github.io/HackerOS-Website/tools-docs/hk.html
+
+== Uwaga
+
 HackerScript osiagnal juz bootstraping.
