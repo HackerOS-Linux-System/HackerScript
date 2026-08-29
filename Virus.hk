@@ -9,8 +9,7 @@
 -> name        => HackerScript
 -> version     => 0.1
 -> using       => 0.1
--> edition     => 2026
--> authors     => ["HackerOS-Linux-System"]
+-> authors     => ["HackerOS-Linux-System <hackeros068@gmail.com>"]
 -> description => virus + hackerc, jedna binarka - menedzer pakietow/projektow i transpilator HackerScript -> Rust, statycznie linkujace libs/core i libs/std.
 
 [workspace]
@@ -22,7 +21,7 @@
 --> fs => "*"
 
 [build]
--> entry => bootstrap/hackerc-self/cli.hcs
+-> entry => hackerc/cmd/cli.hcs
 
 ! ## Stan dzisiaj (przeczytaj przed uzyciem)
 !
