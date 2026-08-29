@@ -1,0 +1,179 @@
+get <std:env> import <env_var_present>
+
+!! -- kody ANSI SGR (Select Graphic Rendition) -------------------------------
+!! (funkcje, NIE consts - patrz uzasadnienie na gorze pliku)
+
+fun ansi_reset() -> Str [ end "\e[0m" ]
+fun ansi_bold() -> Str [ end "\e[1m" ]
+fun ansi_dim() -> Str [ end "\e[2m" ]
+fun ansi_red() -> Str [ end "\e[31m" ]
+fun ansi_green() -> Str [ end "\e[32m" ]
+fun ansi_yellow() -> Str [ end "\e[33m" ]
+fun ansi_blue() -> Str [ end "\e[34m" ]
+fun ansi_magenta() -> Str [ end "\e[35m" ]
+fun ansi_cyan() -> Str [ end "\e[36m" ]
+fun ansi_gray() -> Str [ end "\e[90m" ]
+fun ansi_bold_green() -> Str [ end "\e[1;32m" ]
+fun ansi_bold_red() -> Str [ end "\e[1;31m" ]
+fun ansi_bold_yellow() -> Str [ end "\e[1;33m" ]
+fun ansi_bold_cyan() -> Str [ end "\e[1;36m" ]
+
+!! Kursor o JEDNA linie w gore (`\e[1A`) + czysci CALA biezaca linie
+!! (`\e[2K`) - podstawa "nadpisywanego w miejscu" paska postepu, patrz
+!! `print_progress_line`.
+fun ansi_cursor_up_clear() -> Str [ end "\e[1A\e[2K" ]
+
+!!! `true` jesli terminal MOZE pokazywac kolory - respektuje TYLKO
+!!! `NO_COLOR` (https://no-color.org). Ten bootstrap nie ma dostepu do
+!!! `isatty()`/`termios`, wiec (w odroznieniu od np. `rustc`) NIE
+!!! wykrywa automatycznie przekierowania do pliku/potoku - jesli to
+!!! problem, ustaw `NO_COLOR=1` recznie w skryptach CI.
+fun term_color_enabled() -> Bool [
+    end not env_var_present("NO_COLOR")
+]
+
+!!! Owija `text` kodem `color` + reset, ALBO zwraca `text` bez zmian gdy
+!!! `term_color_enabled()` jest `false` - wszystkie `c_*` ponizej sa
+!!! cienkimi opakowaniami tej funkcji.
+fun colorize(text: Str, color: Str) -> Str [
+    if term_color_enabled() [
+        end color + text + ansi_reset()
+    ]
+    end text
+]
+
+fun c_red(text: Str) -> Str [
+    end colorize(text, ansi_red())
+]
+
+fun c_green(text: Str) -> Str [
+    end colorize(text, ansi_green())
+]
+
+fun c_yellow(text: Str) -> Str [
+    end colorize(text, ansi_yellow())
+]
+
+fun c_blue(text: Str) -> Str [
+    end colorize(text, ansi_blue())
+]
+
+fun c_magenta(text: Str) -> Str [
+    end colorize(text, ansi_magenta())
+]
+
+fun c_cyan(text: Str) -> Str [
+    end colorize(text, ansi_cyan())
+]
+
+fun c_gray(text: Str) -> Str [
+    end colorize(text, ansi_gray())
+]
+
+fun c_bold(text: Str) -> Str [
+    end colorize(text, ansi_bold())
+]
+
+fun c_dim(text: Str) -> Str [
+    end colorize(text, ansi_dim())
+]
+
+fun c_bold_green(text: Str) -> Str [
+    end colorize(text, ansi_bold_green())
+]
+
+fun c_bold_red(text: Str) -> Str [
+    end colorize(text, ansi_bold_red())
+]
+
+fun c_bold_yellow(text: Str) -> Str [
+    end colorize(text, ansi_bold_yellow())
+]
+
+fun c_bold_cyan(text: Str) -> Str [
+    end colorize(text, ansi_bold_cyan())
+]
+
+!! -- pasek postepu -----------------------------------------------------------
+
+!!! Procent `current/total` jako `Int` w zakresie `[0, 100]` -
+!!! `total <= 0` daje `0` zamiast dzielenia przez zero.
+fun progress_percent(current: Int, total: Int) -> Int [
+    if total <= 0 [
+        end 0
+    ]
+    let pct = (current * 100) / total
+    if pct > 100 [
+        end 100
+    ]
+    if pct < 0 [
+        end 0
+    ]
+    end pct
+]
+
+!!! Buduje SAM pasek (bez etykiety/procentu) szerokosci `width` znakow,
+!!! np. `"██████████░░░░░░░░░░"` dla 50% przy `width = 20` - pelne bloki
+!!! `█` (U+2588) dla ukonczonej czesci, puste `░` (U+2591) dla reszty.
+fun render_bar_fill(current: Int, total: Int, width: Int) -> Str [
+    let pct = progress_percent(current, total)
+    let filled = (width * pct) / 100
+    let bar = ""
+    let i = 0
+    while i < width [
+        if i < filled [
+            bar = bar + "█"
+        ] else [
+            bar = bar + "░"
+        ]
+        i = i + 1
+    ]
+    end bar
+]
+
+!!! `render_bar_fill` + kolor zalezny od postepu (zolty < 50%, cyan
+!!! 50-99%, zielony przy 100%) + nawiasy kwadratowe + procent, np.
+!!! `"[████████████░░░░░░░░░░░░] 50%"`.
+fun render_bar(current: Int, total: Int, width: Int) -> Str [
+    let pct = progress_percent(current, total)
+    let fill = render_bar_fill(current, total, width)
+    let colored = fill
+    if pct >= 100 [
+        colored = c_green(fill)
+    ] elif pct >= 50 [
+        colored = c_cyan(fill)
+    ] else [
+        colored = c_yellow(fill)
+    ]
+    end "[" + colored + "] " + (pct as Str) + "%"
+]
+
+!!! Cala linia paska postepu z etykieta krokow (`==>` na zielono),
+!!! samym paskiem (szerokosc 24 znakow) i licznikiem `(current/total)`,
+!!! np. `"==> Kompilacja  [████████░░░░░░░░░░░░░░░░] 33%  (1/3) lexer.hcs"`.
+fun render_progress_line(label: Str, current: Int, total: Int, item: Str) -> Str [
+    let counter = "(" + (current as Str) + "/" + (total as Str) + ")"
+    let prefix = c_bold_green("==>")
+    if label.len() > 0 [
+        prefix = prefix + " " + label
+    ]
+    end prefix + "  " + render_bar(current, total, 24) + "  " + c_gray(counter) + " " + item
+]
+
+!!! Wypisuje `render_progress_line` - dla `is_first = true` po prostu
+!!! `log()`-uje (pierwsza linia sekwencji, nic do nadpisania), dla
+!!! kolejnych wywolan dokleja wynik `ansi_cursor_up_clear()` PRZED
+!!! tresc, wiec terminal wyswietla to jako JEDNA aktualizowana w
+!!! miejscu linie zamiast serii nowych linii - dziala WYLACZNIE bo
+!!! `log()` zawsze konczy `println!` (patrz
+!!! hackerc/cmd/codegen.hcs::gen_log): kody ANSI wewnatrz tresci linii
+!!! sa interpretowane przez terminal niezaleznie od tego skad
+!!! pochodza w strumieniu wyjscia.
+fun print_progress_line(label: Str, current: Int, total: Int, item: Str, is_first: Bool) [
+    let line = render_progress_line(label, current, total, item)
+    if is_first [
+        log(line)
+    ] else [
+        log(ansi_cursor_up_clear() + line)
+    ]
+]
