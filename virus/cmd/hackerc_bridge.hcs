@@ -1,15 +1,20 @@
 get <std:path> import <path_join>
 get <std:string> import <str_trim>
 get <std:process> import <run_command_checked::command_succeeds>
+get <std:fs> import <create_dir_ok>
 include <cache>
+include <progress>
 
-const DEFAULT_HACKERC_VERSION: Str = "1.2"
+const DEFAULT_HACKERC_VERSION: Str = "0.1"
 
-!!! Nazwa assetu wydania GitHub - UPROSZCZONE wzgledem oryginalu: TYLKO
-!!! Linux x86_64 (jak reszta tego stdlib - `virus`/`HackerScript`
-!!! celuja w HackerOS-Linux-System, patrz uwagi w innych modulach).
+!!! Nazwa assetu wydania GitHub - dokladnie `hackerc` (BEZ przyrostka
+!!! platformy) - te wydania sa dzis buildowane TYLKO dla Linux x86_64
+!!! (jak reszta tego stdlib - `virus`/`HackerScript` celuja w
+!!! HackerOS-Linux-System, patrz uwagi w innych modulach), wiec jeden
+!!! plik na wydanie wystarcza. Przyklad dla wersji "0.0.1":
+!!! https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v0.0.1/hackerc
 fun hackerc_asset_name() -> Str [
-    end "hackerc-linux-x86_64"
+    end "hackerc"
 ]
 
 fun hackerc_release_url(version: Str) -> Str [
@@ -20,6 +25,9 @@ fun hackerc_release_url(version: Str) -> Str [
 !!! 1. zmienna srodowiskowa `HACKERC_BIN`
 !!! 2. `cache/env/hackerc-<wersja>/hackerc` (pobrana wczesniej)
 !!! 3. `hackerc` w PATH (np. zainstalowany przez `pip install -e ./hackerc`)
+!!! Zwykle NIE wywoluj tego bezposrednio - `hackerc_ensure` ponizej robi
+!!! to samo, ale przy niepowodzeniu automatycznie POBIERA wersje
+!!! zadeklarowana przez `using <wersja>` (patrz tam).
 fun hackerc_resolve(cache: CacheDirs, version: Str) -> Result<Str, Str> [
     match env_var("HACKERC_BIN") [
         Some(p) -> [
@@ -45,12 +53,82 @@ fun hackerc_resolve(cache: CacheDirs, version: Str) -> Result<Str, Str> [
         ]
     ]
 
-    end err("nie znaleziono hackerc (wersja " + version + "). Uruchom `virus cache` aby pobrac narzedzia, ustaw HACKERC_BIN, lub zainstaluj `hackerc` z PATH (patrz " + hackerc_release_url(version) + ")")
+    end err("nie znaleziono hackerc (wersja " + version + ")")
 ]
 
-!!! Patrz uwaga o ograniczeniu na gorze pliku - NIE zaimplementowane.
+!!! Pobiera binarke `hackerc` dla `version` z wydania GitHub (patrz
+!!! `hackerc_release_url`) do `cache/env/hackerc-<wersja>/hackerc` -
+!!! DOKLADNIE to, co plik zrodlowy zaczynajacy sie od `using <wersja>`
+!!! deklaruje jako wymagana wersje kompilatora (patrz
+!!! `parser.hcs::parse_using`, `manifest.hcs::lang_using`) - to jest
+!!! mechanizm ODPOWIADAJACY `rustup toolchain install` w ekosystemie
+!!! Rust, tylko zamiast wielu kanalow jest jedna, dokladna wersja per
+!!! plik/manifest.
+!!!
+!!! Uzywa `curl` (jak `virus install`, patrz install.hcs) zamiast
+!!! wbudowanego `http_get` - `http_get`/`std:http` obsluguja TYLKO
+!!! odpowiedzi tekstowe UTF-8 (patrz libs/std/lib/http.hcs), a binarka
+!!! ELF `hackerc` oczywiscie nie jest tekstem. Flaga `--progress-bar`
+!!! (`-#`) to WLASNY, NATYWNY pasek postepu `curla` - `run_command`
+!!! (builtin) zwraca wynik dopiero PO zakonczeniu procesu, wiec `virus`
+!!! sam nie ma dostepu do bajtow strumienia w trakcie pobierania i nie
+!!! moze wyrenderowac WLASNEGO paska (`std:term`) dla tej operacji -
+!!! patrz "Ograniczenia" w docs/ROADMAP.md.
 fun hackerc_download(cache: CacheDirs, version: Str) -> Result<Str, Str> [
-    end err("virus (HackerScript): automatyczne pobieranie skompilowanej binarki hackerc nie jest jeszcze wspierane (std:http obsluguje tylko odpowiedzi tekstowe UTF-8, nie surowe dane binarne - patrz libs/std/lib/http.hcs). Obejscie: ustaw HACKERC_BIN na sciezke do juz zainstalowanego hackerc, albo 'pip install -e ./hackerc' (trafi do PATH). Wersja " + version + " bylaby pobrana z: " + hackerc_release_url(version))
+    if not command_succeeds("curl", ["--version"]) [
+        end err("automatyczne pobieranie hackerc " + version + " wymaga zainstalowanego `curl`. Pobierz recznie: " + hackerc_release_url(version))
+    ]
+
+    let dest_dir = path_join(cache.env, "hackerc-" + version)
+    if not create_dir_ok(dest_dir) [
+        end err("nie mozna utworzyc katalogu " + dest_dir)
+    ]
+    let dest_bin = cache_hackerc_binary(cache, version.clone())
+    let url = hackerc_release_url(version.clone())
+
+    progress_header("using <" + version + "> - hackerc nie znaleziony, pobieram z " + url)
+    let user_agent = "virus-hackerscript/0.0.1 (+https://github.com/HackerOS-Linux-System/HackerScript)"
+    let curl_args: List<Str> = ["-L", "--fail", "--progress-bar", "-A", user_agent, "-o", dest_bin.clone(), url.clone()]
+    match run_command_checked("curl", curl_args) [
+        Ok(_out) -> [
+        ]
+        Err(e) -> [
+            end err("nie udalo sie pobrac hackerc " + version + " z " + url + ": " + e)
+        ]
+    ]
+
+    match run_command("chmod", ["+x", dest_bin.clone()]) [
+        Ok(_v) -> [
+        ]
+        Err(e) -> [
+            end err("pobrano hackerc " + version + ", ale nie udalo sie nadac praw wykonywania (chmod +x " + dest_bin + "): " + e)
+        ]
+    ]
+
+    if not path_exists(dest_bin.clone()) [
+        end err("pobrano plik, ale " + dest_bin + " nie istnieje - sprawdz nazwe assetu wydania (`" + hackerc_asset_name() + "`) pod " + url)
+    ]
+    progress_success("hackerc " + version + " gotowy: " + dest_bin)
+    end ok(dest_bin)
+]
+
+!!! `hackerc_resolve`, ale przy niepowodzeniu automatycznie WYWOLUJE
+!!! `hackerc_download` - to jest funkcja, ktorej powinny uzywac WSZYSTKIE
+!!! podkomendy `virus` potrzebujace `hackerc` (`build`/`check`/`lint`/
+!!! `fmt`) - wczesniej TYLKO `virus build` probowalo pobierac (patrz
+!!! `build_ensure_hackerc` - USUNIETE, przeniesione tutaj), a `check`/
+!!! `lint`/`fmt` po prostu sie poddawaly z bledem. Teraz `using <0.1>`
+!!! (albo `[package] using` w Virus.hk) NAPRAWDE wystarcza, zeby caly
+!!! projekt "po prostu dzialal" na czystej maszynie z samym `curl`.
+fun hackerc_ensure(cache: CacheDirs, version: Str) -> Result<Str, Str> [
+    match hackerc_resolve(cache.clone(), version.clone()) [
+        Ok(path) -> [
+            end ok(path)
+        ]
+        Err(_e) -> [
+            end hackerc_download(cache, version)
+        ]
+    ]
 ]
 
 !!! `hackerc build <entry> -o <crate_dir> --crate-name <nazwa>` -
