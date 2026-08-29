@@ -15,7 +15,7 @@ fun cmd_lint_run(project_root: Str, file: Option<Str>) -> Bool [
     let cache = cache_dirs_for_project(project_root.clone())
     let version = check_resolve_version(project_root.clone())
     let hackerc_bin = ""
-    match hackerc_resolve(cache, version) [
+    match hackerc_ensure(cache, version) [
         Ok(bin) -> [
             hackerc_bin = bin
         ]
