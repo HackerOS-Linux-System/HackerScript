@@ -1,30 +1,43 @@
+get <std:term> import <c_bold_green::c_bold_red::c_red::c_yellow::c_cyan::c_gray::print_progress_line>
+
+!!! ROZBUDOWANE w tej rundzie (patrz docs/ROADMAP.md) - poprzednia
+!!! wersja tego pliku byla plaskim `log("[i/n]", tekst)` bez kolorow.
+!!! Teraz `progress_header`/`progress_success`/... sa kolorowane przez
+!!! `std:term` (wylaczane automatycznie przez `NO_COLOR`), a
+!!! `progress_step` renderuje PRAWDZIWY, wypelniany procentowo pasek
+!!! (patrz `render_bar`/`print_progress_line` w libs/std/lib/term.hcs)
+!!! zamiast samego licznika tekstowego.
+
 fun progress_header(text: Str) [
-    log("==>", text)
+    log(c_bold_green("==>") + " " + text)
 ]
 
 fun progress_info(text: Str) [
-    log("info:", text)
+    log(c_cyan("info:") + " " + text)
 ]
 
 fun progress_warn(text: Str) [
-    log("uwaga:", text)
+    log(c_yellow("uwaga:") + " " + text)
 ]
 
 !!! Na stderr (parytet z `eprintln!` w oryginalnym Rust).
 fun progress_error(text: Str) [
-    elog("blad:", text)
+    elog(c_red("blad:") + " " + text)
 ]
 
 fun progress_success(text: Str) [
-    log("ok:", text)
+    log(c_bold_green("ok:") + " " + text)
 ]
 
-!!! Prosty licznik krokow "[obecny/razem] wiadomosc" - zastepuje pasek
-!!! postepu `indicatif` (patrz uwaga na gorze pliku). `total <= 0`
-!!! pomija licznik i drukuje sama wiadomosc.
+!!! Realny, kolorowy pasek postepu "[####----] NN%  (i/total) wiadomosc"
+!!! - kazde wywolanie z tym samym total > 1 NADPISUJE poprzednia linie
+!!! w miejscu (patrz print_progress_line), wiec petla po plikach
+!!! wyglada jak JEDEN animowany pasek, nie seria osobnych linii.
+!!! total <= 0 pomija pasek i drukuje sama wiadomosc (parytet ze starym
+!!! zachowaniem - uzywane tam, gdzie liczba krokow nie jest z gory znana).
 fun progress_step(current: Int, total: Int, message: Str) [
     if total > 0 [
-        log("[" + (current as Str) + "/" + (total as Str) + "]", message)
+        print_progress_line("", current, total, message, current <= 1)
     ] else [
         log(message)
     ]
