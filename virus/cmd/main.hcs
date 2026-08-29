@@ -12,9 +12,28 @@ include <repair>
 include <clean>
 include <cache>
 get <std:string> import <str_starts_with>
+get <std:term> import <c_bold_green::c_bold_cyan::c_red::c_gray>
 
+!!! DODANE w tej rundzie (patrz docs/ROADMAP.md) - baner kolorowany
+!!! przez `std:term` (naglowek na zielono, nazwy podkomend na cyan) -
+!!! wylaczane automatycznie przez `NO_COLOR`, tak jak reszta wyjscia
+!!! `virus` (patrz progress.hcs).
 fun cmd_usage() -> Str [
-    end "virus - menedzer pakietow i narzedzie budowania dla HackerScript\n\nUzycie:\n  virus <polecenie> [argumenty]\n\nPolecenia:\n  init [--name NAZWA]                              tworzy szkielet nowego projektu\n  build [plik] [--release|--library|--wasm|--jar]  buduje projekt (domyslnie: debug)\n  cache                                             tworzy/odswieza katalog cache/\n  check                                             sprawdza poprawnosc kodu bez budowania\n  lint [plik]                                       pokazuje tylko warningi\n  fmt [plik] [--check]                              formatuje kod .hcs\n  install <zrodlo> <nazwa> [--version WERSJA]      instaluje zaleznosc (pypi/crates/npm/jsr/std/core)\n  remove <zrodlo> <nazwa>                           usuwa zaleznosc\n  repair <kod>                                      wyjasnia kod diagnostyczny (np. E0001)\n  clean                                             usuwa caly katalog cache/\n"
+    let title = c_bold_green("virus") + " - menedzer pakietow i narzedzie budowania dla HackerScript"
+    let usage_line = c_gray("Uzycie:") + "\n  virus <polecenie> [argumenty]"
+    let cmds = c_gray("Polecenia:") + "\n"
+    cmds = cmds + "  " + c_bold_cyan("init") + " [--name NAZWA]                              tworzy szkielet nowego projektu\n"
+    cmds = cmds + "  " + c_bold_cyan("build") + " [plik] [--release|--library|--wasm|--jar]  buduje projekt (domyslnie: debug)\n"
+    cmds = cmds + "  " + c_bold_cyan("cache") + "                                             tworzy/odswieza katalog cache/\n"
+    cmds = cmds + "  " + c_bold_cyan("check") + "                                             sprawdza poprawnosc kodu bez budowania\n"
+    cmds = cmds + "  " + c_bold_cyan("lint") + " [plik]                                       pokazuje tylko warningi\n"
+    cmds = cmds + "  " + c_bold_cyan("fmt") + " [plik] [--check]                              formatuje kod .hcs\n"
+    cmds = cmds + "  " + c_bold_cyan("install") + " <zrodlo> <nazwa> [--version WERSJA]      instaluje zaleznosc (pypi/crates/npm/jsr/std/core)\n"
+    cmds = cmds + "  " + c_bold_cyan("remove") + " <zrodlo> <nazwa>                           usuwa zaleznosc\n"
+    cmds = cmds + "  " + c_bold_cyan("repair") + " <kod>                                      wyjasnia kod diagnostyczny (np. E0001)\n"
+    cmds = cmds + "  " + c_bold_cyan("clean") + "                                             usuwa caly katalog cache/\n"
+    let result = title + "\n\n" + usage_line + "\n\n" + cmds
+    end result
 ]
 
 !!! Czy `flag` (np. `"--release"`) wystepuje GDZIEKOLWIEK w `args`.
@@ -90,7 +109,7 @@ fun require_project_root() -> Str [
             cwd = c
         ]
         Err(e) -> [
-            elog("nie mozna odczytac biezacego katalogu: " + e)
+            elog(c_red("blad:") + " nie mozna odczytac biezacego katalogu: " + e)
             exit(1)
         ]
     ]
@@ -99,7 +118,7 @@ fun require_project_root() -> Str [
             end root
         ]
         None -> [
-            elog("nie znaleziono Virus.hk (ani w biezacym katalogu, ani w nadrzednych) - uzyj `virus init` aby utworzyc nowy projekt")
+            elog(c_red("blad:") + " nie znaleziono Virus.hk (ani w biezacym katalogu, ani w nadrzednych) - uzyj `virus init` aby utworzyc nowy projekt")
             exit(1)
         ]
     ]
@@ -130,7 +149,7 @@ fun main() [
                 ]
             ]
             Err(e) -> [
-                elog("nie mozna odczytac biezacego katalogu: " + e)
+                elog(c_red("blad:") + " nie mozna odczytac biezacego katalogu: " + e)
                 exit(1)
             ]
         ]
@@ -149,10 +168,10 @@ fun main() [
         let file_opt = first_positional(rest)
         match cmd_build_run(root, BuildOptions(target, file_opt)) [
             Ok(path) -> [
-                log("zbudowano:", path)
+                log(c_bold_green("zbudowano:") + " " + path)
             ]
             Err(e) -> [
-                elog(e)
+                elog(c_red("blad:") + " " + e)
                 exit(1)
             ]
         ]
@@ -180,16 +199,16 @@ fun main() [
         let root = require_project_root()
         let pos = positional_args(rest.clone())
         if pos.len() < 2 [
-            elog("uzycie: virus install <zrodlo> <nazwa> [--version WERSJA]")
+            elog(c_red("blad:") + " uzycie: virus install <zrodlo> <nazwa> [--version WERSJA]")
             exit(1)
         ]
         let version_opt = find_option_value(rest, "--version")
         match cmd_install_run(root, pos[0].clone(), pos[1].clone(), version_opt) [
             Ok(dest) -> [
-                log("zainstalowano do:", dest)
+                log(c_bold_green("zainstalowano do:") + " " + dest)
             ]
             Err(e) -> [
-                elog(e)
+                elog(c_red("blad:") + " " + e)
                 exit(1)
             ]
         ]
@@ -197,7 +216,7 @@ fun main() [
         let root = require_project_root()
         let pos2 = positional_args(rest)
         if pos2.len() < 2 [
-            elog("uzycie: virus remove <zrodlo> <nazwa>")
+            elog(c_red("blad:") + " uzycie: virus remove <zrodlo> <nazwa>")
             exit(1)
         ]
         if not cmd_remove_run(root, pos2[0].clone(), pos2[1].clone()) [
@@ -206,7 +225,7 @@ fun main() [
     ] elif cmd == "repair" [
         let pos3 = positional_args(rest)
         if pos3.len() < 1 [
-            elog("uzycie: virus repair <kod>")
+            elog(c_red("blad:") + " uzycie: virus repair <kod>")
             exit(1)
         ]
         if not cmd_repair_run(pos3[0].clone()) [
@@ -220,7 +239,7 @@ fun main() [
     ] elif cmd == "--help" or cmd == "-h" or cmd == "help" [
         log(cmd_usage())
     ] else [
-        elog("nieznane polecenie: " + cmd)
+        elog(c_red("blad:") + " nieznane polecenie: " + cmd)
         log(cmd_usage())
         exit(1)
     ]
