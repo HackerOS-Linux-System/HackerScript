@@ -345,9 +345,9 @@ fun hk_parse(source: Str) -> Result<JsonValue, Str> [
         line_no = line_no + 1
         let trimmed = str_trim(lines[i].clone())
         if trimmed.len() == 0 or trimmed.char_at(0) == "!" [
-            ! pusta linia/komentarz - nic (pojedynczy '!' = zwykly
-            ! komentarz, nie doc-comment '!!' - unika osieroconego
-            ! `///` bez nastepujacej deklaracji w Rust)
+            !! pusta linia/komentarz - nic (pojedynczy '!' = zwykly
+            !! komentarz, nie doc-comment '!!' - unika osieroconego
+            !! `///` bez nastepujacej deklaracji w Rust)
         ] elif trimmed.char_at(0) == "[" [
             match str_index_of(trimmed, "]") [
                 Some(end_idx) -> [
