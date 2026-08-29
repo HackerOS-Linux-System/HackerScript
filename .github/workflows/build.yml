@@ -1,0 +1,262 @@
+name: Build (self-hosted, stage0 bootstrap)
+
+# Buduje `hackerc` i `virus` W CALOSCI ZE ZRODEL HackerScript
+# (hackerc/cmd/*.hcs, virus/cmd/*.hcs) - NIE z Pythona/PyInstallera jak
+# `.github/workflows/release.yml` (ktory jest dzis STARY, patrz uwaga
+# na dole tego pliku).
+#
+# Kluczowy problem samo-hostowania: zeby SKOMPILOWAC hackerc napisany
+# w HackerScript, potrzeba JUZ DZIALAJACEGO hackerc ("stage0") -
+# pobieranego z GitHub Releases (dokladnie ten sam mechanizm co
+# `using <wersja>` w virus/cmd/hackerc_bridge.hcs, patrz tam).
+#
+# Zasada wyboru wersji stage0 (patrz job `resolve-versions` ponizej):
+#   - Virus.hk "using => 0.1"  -> stage0 = 0.0.1  (SPECJALNY przypadek:
+#     0.1 to PIERWSZE self-hostujace sie wydanie, wiec jedynym istnie-
+#     jacym wczesniejszym kompilatorem jest zamrozona wersja startowa
+#     0.0.1 - nie ma "0.0" jako osobnego wydania)
+#   - Virus.hk "using => 0.N" (N > 1) -> stage0 = 0.(N-1), np. 0.5 -> 0.4
+#
+# Lancuch budowania (DWIE osobne kompilacje, KAZDA innym kompilatorem):
+#   stage0 (pobrany, wersja N-1)
+#     -> kompiluje hackerc/cmd/cli.hcs   -> `hackerc` (wersja N, SWIEZO zbudowany)
+#   swiezo zbudowany hackerc (wersja N, NIE stage0!)
+#     -> kompiluje virus/cmd/main.hcs    -> `virus` (wersja N)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "hackerc/**"
+      - "virus/**"
+      - "libs/**"
+      - "Virus.hk"
+      - ".github/workflows/build.yml"
+  pull_request:
+    paths:
+      - "hackerc/**"
+      - "virus/**"
+      - "libs/**"
+      - "Virus.hk"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+    inputs:
+      version_override:
+        description: "Wymus wersje docelowa (pomija odczyt '-> using => ...' z Virus.hk), np. 0.5"
+        required: false
+        default: ""
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------
+  # 0. Ustal wersje docelowa (z Virus.hk albo z recznego wymuszenia) i
+  #    wyprowadz z niej wersje stage0 wg zasady opisanej na gorze pliku.
+  # ---------------------------------------------------------------------
+  resolve-versions:
+    name: Ustal wersje docelowa + stage0
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      stage0_version: ${{ steps.resolve.outputs.stage0_version }}
+      stage0_url: ${{ steps.resolve.outputs.stage0_url }}
+      is_root_bootstrap: ${{ steps.resolve.outputs.is_root_bootstrap }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Odczytaj wersje i wylicz stage0
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -n "${{ github.event.inputs.version_override }}" ]; then
+            VERSION="${{ github.event.inputs.version_override }}"
+            echo "Wersja wymuszona recznie (workflow_dispatch): $VERSION"
+          else
+            # Pole "-> using => X.Y" w [package] (patrz Virus.hk) deklaruje
+            # wersje hackerc, ktora MA POWSTAC z tego builda - dokladnie
+            # ten sam format, ktory czyta virus/cmd/hackerc_bridge.hcs.
+            VERSION="$(grep -E '^\s*->\s*using\s*=>' Virus.hk \
+              | head -n1 \
+              | sed -E 's/^\s*->\s*using\s*=>\s*//' \
+              | tr -d '[:space:]')"
+            echo "Wersja odczytana z Virus.hk ('-> using => ...'): $VERSION"
+          fi
+
+          if [ -z "$VERSION" ]; then
+            echo "::error::nie udalo sie ustalic wersji (brak '-> using => ...' w Virus.hk i brak version_override)"
+            exit 1
+          fi
+
+          # 0.0.1 to ZAMROZONA wersja startowa sprzed bootstrapu (Python,
+          # patrz README.adoc, sekcja "Historia wersji") - nie jest
+          # budowana przez TEN pipeline (self-hosted), tylko historyczna
+          # PyInstaller-owa sciezke z release.yml. Nic dalej do zrobienia.
+          if [ "$VERSION" = "0.0.1" ]; then
+            echo "Wersja docelowa to 0.0.1 (korzen bootstrapu, Python) - nie ma stage0, nic do zbudowania w tym workflow."
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "stage0_version=" >> "$GITHUB_OUTPUT"
+            echo "stage0_url=" >> "$GITHUB_OUTPUT"
+            echo "is_root_bootstrap=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$VERSION" = "0.1" ]; then
+            # Jedyny przypadek specjalny - patrz uzasadnienie na gorze pliku.
+            STAGE0="0.0.1"
+          else
+            if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::nieobslugiwany format wersji '$VERSION' (oczekiwano MAJOR.MINOR, np. 0.5, albo dokladnie '0.0.1')"
+              exit 1
+            fi
+            MAJOR="${VERSION%%.*}"
+            MINOR="${VERSION#*.}"
+            if [ "$MINOR" -le 0 ]; then
+              echo "::error::nie umiem wyliczyc stage0 dla '$VERSION' (MINOR musi byc > 0, chyba ze VERSION = 0.1 - patrz przypadek specjalny wyzej)"
+              exit 1
+            fi
+            PREV_MINOR=$((MINOR - 1))
+            if [ "$MAJOR" = "0" ] && [ "$PREV_MINOR" -eq 0 ]; then
+              # Nieosiagalne w praktyce (VERSION="0.1" jest juz zlapane
+              # wyzej), zostawione jako siatka bezpieczenstwa.
+              STAGE0="0.0.1"
+            else
+              STAGE0="${MAJOR}.${PREV_MINOR}"
+            fi
+          fi
+
+          STAGE0_URL="https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v${STAGE0}/hackerc"
+
+          echo "Wersja docelowa: $VERSION"
+          echo "Stage0 (kompilator uzyty do zbudowania $VERSION): $STAGE0"
+          echo "URL stage0: $STAGE0_URL"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "stage0_version=$STAGE0" >> "$GITHUB_OUTPUT"
+          echo "stage0_url=$STAGE0_URL" >> "$GITHUB_OUTPUT"
+          echo "is_root_bootstrap=false" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------
+  # 1. stage0 (pobrany) kompiluje hackerc/cmd/cli.hcs -> nowa binarka
+  #    `hackerc` w wersji docelowej.
+  # ---------------------------------------------------------------------
+  build-hackerc:
+    name: "Etap 1/2: stage0 (${{ needs.resolve-versions.outputs.stage0_version }}) buduje hackerc ${{ needs.resolve-versions.outputs.version }}"
+    needs: resolve-versions
+    if: needs.resolve-versions.outputs.is_root_bootstrap == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Pobierz stage0 (hackerc ${{ needs.resolve-versions.outputs.stage0_version }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --progress-bar \
+            -A "hackerscript-build-yml/1.0 (+https://github.com/HackerOS-Linux-System/HackerScript)" \
+            -o stage0-hackerc \
+            "${{ needs.resolve-versions.outputs.stage0_url }}"
+          chmod +x stage0-hackerc
+          ./stage0-hackerc --version || echo "(stage0 nie obsluguje --version - kontynuuje)"
+
+      - name: "stage0 -> transpiluje hackerc/cmd/cli.hcs do crate'a Rust"
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./stage0-hackerc build hackerc/cmd/cli.hcs \
+            -o hackerc/cmd/target-hcs \
+            --crate-name hackerc
+
+      - name: cargo build --release (crate wygenerowany przez stage0)
+        working-directory: hackerc/cmd/target-hcs
+        run: cargo build --release
+
+      - name: Sanity - swiezo zbudowany hackerc dziala
+        run: |
+          ./hackerc/cmd/target-hcs/target/release/hackerc --version || true
+          ./hackerc/cmd/target-hcs/target/release/hackerc check docs/hello-world/cmd/main.hcs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hackerc-${{ needs.resolve-versions.outputs.version }}
+          path: hackerc/cmd/target-hcs/target/release/hackerc
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # 2. Swiezo zbudowany hackerc (NIE stage0!) kompiluje virus/cmd/main.hcs
+  #    -> binarka `virus` w tej samej wersji docelowej.
+  # ---------------------------------------------------------------------
+  build-virus:
+    name: "Etap 2/2: hackerc ${{ needs.resolve-versions.outputs.version }} (swiezy) buduje virus"
+    needs: [resolve-versions, build-hackerc]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: hackerc-${{ needs.resolve-versions.outputs.version }}
+          path: fresh-hackerc
+
+      - name: Nadaj prawa wykonywania swiezo zbudowanemu hackerc
+        run: chmod +x fresh-hackerc/hackerc
+
+      - name: "hackerc ${{ needs.resolve-versions.outputs.version }} -> transpiluje virus/cmd/main.hcs do crate'a Rust"
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./fresh-hackerc/hackerc build virus/cmd/main.hcs \
+            -o virus/cmd/target-hcs \
+            --crate-name virus
+
+      - name: cargo build --release (crate wygenerowany przez hackerc ${{ needs.resolve-versions.outputs.version }})
+        working-directory: virus/cmd/target-hcs
+        run: cargo build --release
+
+      - name: Sanity - swiezo zbudowany virus dziala
+        run: ./virus/cmd/target-hcs/target/release/virus --help || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: virus-${{ needs.resolve-versions.outputs.version }}
+          path: virus/cmd/target-hcs/target/release/virus
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # 3. Podsumowanie widoczne w zakladce Summary danego uruchomienia.
+  # ---------------------------------------------------------------------
+  summary:
+    name: Podsumowanie
+    needs: [resolve-versions, build-hackerc, build-virus]
+    if: always() && needs.resolve-versions.outputs.is_root_bootstrap == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wypisz lancuch bootstrapu
+        run: |
+          {
+            echo "### Lancuch bootstrapu"
+            echo ""
+            echo "| Etap | Kompilator | Zrodlo | Wynik |"
+            echo "|---|---|---|---|"
+            echo "| 1 | stage0 \`${{ needs.resolve-versions.outputs.stage0_version }}\` (pobrany z Releases) | \`hackerc/cmd/cli.hcs\` | \`hackerc\` \`${{ needs.resolve-versions.outputs.version }}\` |"
+            echo "| 2 | \`hackerc\` \`${{ needs.resolve-versions.outputs.version }}\` (etap 1, swiezy) | \`virus/cmd/main.hcs\` | \`virus\` \`${{ needs.resolve-versions.outputs.version }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+# UWAGA: `.github/workflows/ci.yml` i `.github/workflows/release.yml` sa
+# DZIS NIEAKTUALNE - odwoluja sie do architektury sprzed bootstrapu
+# (`hackerc/entrypoint.py` przez PyInstaller, `virus/Cargo.toml` jako
+# osobny workspace Rust, `examples/hello-world/`) - zadna z tych sciezek
+# juz nie istnieje w tym drzewie (patrz `docs/ROADMAP.md`). Ten plik
+# (`build.yml`) jest ich naturalnym, samo-hostujacym sie zastepstwem dla
+# BUDOWANIA - `release.yml` (PUBLIKOWANIE na GitHub Releases) powinien
+# zostac zaktualizowany osobno, zeby uzywac tego samego lancucha stage0
+# zamiast PyInstaller/cargo-workspace, i publikowac wynikowa binarke
+# `hackerc` pod nazwa assetu dokladnie `hackerc` (bez przyrostka
+# platformy) - patrz `virus/cmd/hackerc_bridge.hcs::hackerc_asset_name`.
