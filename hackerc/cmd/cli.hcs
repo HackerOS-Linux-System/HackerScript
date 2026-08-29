@@ -6,8 +6,17 @@ include <formatter>
 include <transpiler>
 include <project>
 get <std:io> import <file_readable>
+get <std:term> import <c_bold_green::c_bold_red::c_bold_cyan::c_red::c_gray::print_progress_line>
 
 const VERSION: Str = "0.1"
+
+!!! DODANE w tej rundzie (patrz docs/ROADMAP.md) - `hackerc` byl do tej
+!!! pory calkowicie monochromatyczny (`log("hackerc: ...", ...)`).
+!!! `cmd_build` ma teraz 4 kroki zliczane wprost (parsowanie, sygnatury
+!!! projektu, sprawdzanie typow, generowanie crate'a Rust) - ta stala
+!!! jest jedynym miejscem, ktore trzeba zmienic, gdyby kroki sie
+!!! zmienily.
+const BUILD_STEP_COUNT: Int = 4
 
 !!! `parse()` ale z tym samym preprocessingiem `direct [ ... ]` co
 !!! transpilacja - inaczej pliki z `direct[...]` psulyby `check`/`lint`
@@ -55,7 +64,7 @@ fun print_diagnostics(source: Str, filename: Str, diags: List<Diagnostic>, only_
 !!! zapisu. Zwraca kod wyjscia (0 = sukces). Parytet z `cmd_check`.
 fun cmd_check(src_path: Str) -> Int [
     if not file_readable(src_path.clone()) [
-        log("hackerc: nie znaleziono pliku " + src_path)
+        elog(c_red("hackerc:") + " nie znaleziono pliku " + src_path)
         end 1
     ]
     match read_file(src_path.clone()) [
@@ -64,14 +73,14 @@ fun cmd_check(src_path: Str) -> Int [
             let diags = check_program(program, [])
             let errors = print_diagnostics(source, src_path.clone(), diags.clone(), "")
             if errors > 0 [
-                log("hackerc check: " + (errors as Str) + " blad(ow)")
+                elog(c_bold_red("hackerc check:") + " " + (errors as Str) + " blad(ow)")
                 end 1
             ]
-            log("hackerc check: " + src_path + " OK (" + (diags.len() as Str) + " warning(ow))")
+            log(c_bold_green("hackerc check:") + " " + src_path + " OK (" + (diags.len() as Str) + " warning(ow))")
             end 0
         ]
         Err(e) -> [
-            log("hackerc: " + src_path + ": " + e)
+            elog(c_red("hackerc:") + " " + src_path + ": " + e)
             end 1
         ]
     ]
@@ -81,7 +90,7 @@ fun cmd_check(src_path: Str) -> Int [
 !!! z `cmd_lint`.
 fun cmd_lint(src_path: Str) -> Int [
     if not file_readable(src_path.clone()) [
-        log("hackerc: nie znaleziono pliku " + src_path)
+        elog(c_red("hackerc:") + " nie znaleziono pliku " + src_path)
         end 1
     ]
     match read_file(src_path.clone()) [
@@ -98,14 +107,14 @@ fun cmd_lint(src_path: Str) -> Int [
                 i = i + 1
             ]
             if warnings.len() == 0 [
-                log("hackerc lint: " + src_path + " - brak uwag")
+                log(c_bold_green("hackerc lint:") + " " + src_path + " - brak uwag")
                 end 0
             ]
             log(render_many(source, src_path, warnings))
             end 0
         ]
         Err(e) -> [
-            log("hackerc: " + src_path + ": " + e)
+            elog(c_red("hackerc:") + " " + src_path + ": " + e)
             end 1
         ]
     ]
@@ -119,11 +128,12 @@ fun cmd_lint(src_path: Str) -> Int [
 !!! project.hcs.
 fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>) -> Int [
     if not file_readable(src_path.clone()) [
-        log("hackerc: nie znaleziono pliku " + src_path)
+        elog(c_red("hackerc:") + " nie znaleziono pliku " + src_path)
         end 1
     ]
     match read_file(src_path.clone()) [
         Ok(source) -> [
+            print_progress_line("Kompilacja " + src_path, 1, BUILD_STEP_COUNT, "parsowanie", true)
             let program = parse_with_direct(source.clone())
 
             !!! Sygnatury calego projektu PRZED check_program - inaczej
@@ -132,6 +142,7 @@ fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<St
             !!! dawalby spurious ostrzezenie "nieznana funkcja", bo
             !!! `check_program` widzi domyslnie tylko JEDEN plik -
             !!! parytet z komentarzem w cmd_build (Python).
+            print_progress_line("Kompilacja " + src_path, 2, BUILD_STEP_COUNT, "zbieranie sygnatur projektu", false)
             let ps = collect_project_signatures(src_path.clone(), libs_root.clone(), bootstrap_root.clone())
             let extra_variants: List<Str> = []
             let ei = 0
@@ -158,40 +169,42 @@ fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<St
                 ei = ei + 1
             ]
 
+            print_progress_line("Kompilacja " + src_path, 3, BUILD_STEP_COUNT, "sprawdzanie typow", false)
             let diags = check_program(program, extra_variants)
             let errors = print_diagnostics(source, src_path.clone(), diags.clone(), "")
             if errors > 0 [
-                log("hackerc build: przerwano - " + (errors as Str) + " blad(ow) w " + src_path)
+                elog(c_bold_red("hackerc build:") + " przerwano - " + (errors as Str) + " blad(ow) w " + src_path)
                 end 1
             ]
 
+            print_progress_line("Kompilacja " + src_path, 4, BUILD_STEP_COUNT, "generowanie crate'a Rust", false)
             let result = build_project(src_path, out_dir, libs_root, bootstrap_root, crate_name)
 
             let wi = 0
             let wn = result.warnings.len()
             while wi < wn [
-                log("hackerc build: uwaga: " + result.warnings[wi])
+                log(c_bold_red("hackerc build: uwaga:") + " " + result.warnings[wi])
                 wi = wi + 1
             ]
 
-            log("hackerc build: crate gotowy w " + result.crate_dir + " (uruchom `cargo build --release` tam)")
-            log("hackerc build: " + result.main_rs_path)
+            log(c_bold_green("hackerc build:") + " crate gotowy w " + c_bold_cyan(result.crate_dir) + " (uruchom `cargo build --release` tam)")
+            log(c_gray("  -> ") + result.main_rs_path)
             let mi = 0
             let mn = result.module_files.len()
             while mi < mn [
-                log("hackerc build: modul -> " + result.module_files[mi])
+                log(c_gray("  -> modul: ") + result.module_files[mi])
                 mi = mi + 1
             ]
             if result.needs_pyo3 [
-                log("hackerc build: wykryto direct[ ... ] -> Cargo.toml zawiera zaleznosc pyo3 (auto-initialize)")
+                log(c_bold_cyan("hackerc build:") + " wykryto direct[ ... ] -> Cargo.toml zawiera zaleznosc pyo3 (auto-initialize)")
             ]
             if result.crates_deps_names.len() > 0 [
-                log("hackerc build: zaleznosci Cargo z get<crates:...>: " + join_str_list(result.crates_deps_names, ", "))
+                log(c_bold_cyan("hackerc build:") + " zaleznosci Cargo z get<crates:...>: " + join_str_list(result.crates_deps_names, ", "))
             ]
             end 0
         ]
         Err(e) -> [
-            log("hackerc: " + src_path + ": " + e)
+            elog(c_red("hackerc:") + " " + src_path + ": " + e)
             end 1
         ]
     ]
@@ -250,7 +263,7 @@ fun default_build_out_dir(src: Str) -> Str [
 !!! gdy `args.output` brak).
 fun cmd_fmt(src_path: Str, dest_path: Str, check_only: Bool) -> Int [
     if not file_readable(src_path.clone()) [
-        log("hackerc: nie znaleziono pliku " + src_path)
+        elog(c_red("hackerc:") + " nie znaleziono pliku " + src_path)
         end 1
     ]
     match read_file(src_path.clone()) [
@@ -258,10 +271,10 @@ fun cmd_fmt(src_path: Str, dest_path: Str, check_only: Bool) -> Int [
             let formatted = format_source(source.clone(), src_path.clone())
             if check_only [
                 if formatted != source [
-                    log("hackerc fmt --check: " + src_path + " NIE jest sformatowany")
+                    elog(c_bold_red("hackerc fmt --check:") + " " + src_path + " NIE jest sformatowany")
                     end 1
                 ]
-                log("hackerc fmt --check: " + src_path + " OK")
+                log(c_bold_green("hackerc fmt --check:") + " " + src_path + " OK")
                 end 0
             ]
             let dest = src_path.clone()
@@ -270,17 +283,17 @@ fun cmd_fmt(src_path: Str, dest_path: Str, check_only: Bool) -> Int [
             ]
             match write_file(dest.clone(), formatted) [
                 Ok(_v) -> [
-                    log("hackerc fmt: sformatowano " + dest)
+                    log(c_bold_green("hackerc fmt:") + " sformatowano " + dest)
                     end 0
                 ]
                 Err(e) -> [
-                    log("hackerc: " + dest + ": " + e)
+                    elog(c_red("hackerc:") + " " + dest + ": " + e)
                     end 1
                 ]
             ]
         ]
         Err(e) -> [
-            log("hackerc: " + src_path + ": " + e)
+            elog(c_red("hackerc:") + " " + src_path + ": " + e)
             end 1
         ]
     ]
@@ -293,7 +306,7 @@ fun cmd_fmt(src_path: Str, dest_path: Str, check_only: Bool) -> Int [
 !!! result.rust_code)` gdy `args.output` brak).
 fun cmd_transpile_legacy(src_path: Str, out_path: Str) -> Int [
     if not file_readable(src_path.clone()) [
-        log("hackerc: nie znaleziono pliku " + src_path)
+        elog(c_red("hackerc:") + " nie znaleziono pliku " + src_path)
         end 1
     ]
     if out_path != "" [
