@@ -43,21 +43,6 @@ fun build_target_name(t: BuildTarget) -> Str [
     ]
 ]
 
-!!! Jak `hackerc_resolve`, ale przy niepowodzeniu probuje
-!!! `hackerc_download` (ktore dzis ZAWSZE zwraca Err - patrz
-!!! hackerc_bridge.hcs) - parytet z `ensure_hackerc` w oryginale.
-fun build_ensure_hackerc(cache: CacheDirs, version: Str) -> Result<Str, Str> [
-    match hackerc_resolve(cache.clone(), version.clone()) [
-        Ok(path) -> [
-            end ok(path)
-        ]
-        Err(_e) -> [
-            progress_info("pobieranie hackerc " + version.clone() + "...")
-            end hackerc_download(cache, version)
-        ]
-    ]
-]
-
 !!! Ostrzega (NIE blokuje builda) o zaleznosciach z `[dependencies]`,
 !!! ktore nie sa jeszcze pobrane do `cache/libs/` - `std`/`core`/`crates`
 !!! nie wymagaja `virus install` (odpowiednio: wbudowane w kompilator,
@@ -113,7 +98,7 @@ fun cmd_build_run(project_root: Str, opts: BuildOptions) -> Result<Str, Str> [
 
     progress_header("Budowanie " + manifest.package.name.clone() + " v" + manifest.package.version.clone() + " (" + build_target_name(opts.target.clone()) + ")")
 
-    let hackerc_bin = build_ensure_hackerc(cache.clone(), version)?
+    let hackerc_bin = hackerc_ensure(cache.clone(), version)?
 
     let entry = ""
     match opts.single_file.clone() [
