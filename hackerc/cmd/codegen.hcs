@@ -1456,6 +1456,28 @@ fun rust_string_literal(s: Str) -> Str [
             out = out + "\\t"
         ] elif c == "\r" [
             out = out + "\\r"
+        ] elif c == "\e" [
+            !! DODANE (parytet z `\e` w resolve_escape/lexer.hcs) - Rust
+            !! nie ma `\e` w literalach `&str`, wiec ESC (0x1B) MUSI byc
+            !! wyemitowany jako `\x1b` - inaczej surowy bajt kontrolny w
+            !! pliku `.rs` przechodziLby przez kompilacje (Rust go
+            !! technicznie dopuszcza), ale byLby niewidoczny/kruchy w
+            !! diffach i edytorach (patrz std:term - kody ANSI).
+            !!
+            !! UWAGA (naprawiony blad E0658): ten komentarz MUSI byc `!!`
+            !! (LineComment, w calosci usuwany przez lexer), NIE `!!!`
+            !! (DocComment) - `!!!` zawsze staje sie w AST wezlem
+            !! `StringLit(is_doc=true)`, ktory `codegen.hcs` bezwarunkowo
+            !! emituje jako Rustowy `/// ...`. To jest bezpieczne TYLKO
+            !! bezposrednio przed deklaracja (`fun`/`struct`/...) albo
+            !! przed `end WYRAZENIE` (samo `end` zdaje sie byc
+            !! traktowane bezpiecznie - patrz liczne przyklady w
+            !! `codegen.hcs::gen_call`) - przed ZWYKLYM PRZYPISANIEM
+            !! (jak `out = out + ...` ponizej) `///` w Rust ląduje przed
+            !! wyrazeniem, ktore NIE jest itemem - `error[E0658]:
+            !! attributes on expressions are experimental`. Patrz
+            !! docs/ROADMAP.md, sekcja 0.5.3.
+            out = out + "\\x1b"
         ] else [
             out = out + c
         ]
