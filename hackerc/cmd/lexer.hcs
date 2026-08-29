@@ -218,6 +218,16 @@ fun resolve_escape(c: Str) -> Str [
     if c == "\\" [
         end "\\"
     ]
+    !! DODANE: `\e` -> ESC (0x1B, 27) - potrzebne do kodow ANSI
+    !! (kolory/kursor w std:term, patrz libs/std/lib/term.hcs). Ponizej
+    !! miedzy cudzyslowami jest DOSLOWNY bajt 0x1B (nie sekwencja
+    !! `\x1b`/`\u{1b}` - ten bootstrap ich jeszcze nie ma, patrz
+    !! reszta tej funkcji) - `codegen.hcs::rust_string_literal` wypisze
+    !! go dalej jako `\x1b` w wygenerowanym Rust (patrz tam). Komentarz
+    !! celowo `!!` (nie `!!!`) - patrz docs/ROADMAP.md, sekcja 0.5.3.
+    if c == "e" [
+        end ""
+    ]
     if c == "\"" [
         end "\""
     ]
