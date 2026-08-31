@@ -1,0 +1,237 @@
+get <std:json> import <JsonValue::json_parse>
+get <std:http> import <http_get_checked>
+get <std:process> import <run_command_checked::command_succeeds>
+get <std:path> import <path_join>
+get <std:string> import <str_contains::str_index_of::str_split::str_replace::str_join>
+include <manifest>
+include <net_helpers>
+include <progress>
+
+const VIRA_REPO_LIST_URL: Str = "https://raw.githubusercontent.com/vira-io/repository/main/repo-list.json"
+
+!!! Pobiera i parsuje centralna liste bibliotek Vira (JSON, patrz gora
+!!! pliku).
+fun vira_fetch_repo_list() -> Result<JsonValue, Str> [
+    let body = http_get_checked(VIRA_REPO_LIST_URL.to_string())?
+    end json_parse(body)
+]
+
+!!! Szuka biblioteki `name` w polu "libraries" listy Vira - `none()`
+!!! jesli nie znaleziono albo JSON ma nieoczekiwany ksztalt.
+fun vira_find_library(repo_list: JsonValue, name: Str) -> Option<JsonValue> [
+    match jv_field(repo_list, "libraries") [
+        Some(libs_val) -> [
+            match manifest_as_array(libs_val) [
+                Some(items) -> [
+                    let i = 0
+                    let n = items.len()
+                    while i < n [
+                        let item = items[i].clone()
+                        match jv_field_str(item.clone(), "name") [
+                            Some(item_name) -> [
+                                if item_name == name [
+                                    end some(item)
+                                ]
+                            ]
+                            None -> [
+                            ]
+                        ]
+                        i = i + 1
+                    ]
+                    end none()
+                ]
+                None -> [
+                    end none()
+                ]
+            ]
+        ]
+        None -> [
+            end none()
+        ]
+    ]
+]
+
+!!! Wyciaga "org/repo" z URL-a github.com (dowolnej sciezki dalej) -
+!!! `none()` jesli URL nie zawiera "github.com/".
+fun vira_extract_github_org_repo(url: Str) -> Option<Str> [
+    let marker = "github.com/"
+    match str_index_of(url.clone(), marker) [
+        Some(pos) -> [
+            let after = url.slice(pos + marker.len(), url.len())
+            let parts = str_split(after, "/")
+            if parts.len() >= 2 [
+                end some(parts[0] + "/" + parts[1])
+            ]
+            end none()
+        ]
+        None -> [
+            end none()
+        ]
+    ]
+]
+
+!!! Najnowszy tag wydania (`tag_name`) repo `org/repo` z GitHub API -
+!!! parytet z `install_crates`/`install_npm` (jawna wersja wygrywa,
+!!! inaczej "najnowsza" z API zrodla).
+fun vira_latest_github_release(org_repo: Str) -> Result<Str, Str> [
+    let api_url = "https://api.github.com/repos/" + org_repo + "/releases/latest"
+    let body = http_get_checked(api_url)?
+    let parsed = json_parse(body)?
+    match jv_field_str(parsed, "tag_name") [
+        Some(tag) -> [
+            end ok(tag)
+        ]
+        None -> [
+            end err("GitHub API: brak 'tag_name' w odpowiedzi dla " + org_repo + " (repo bez wydan?)")
+        ]
+    ]
+]
+
+!!! Podstawia `{version}` w szablonie URL-a (pole "lib" z listy Vira)
+!!! na rozwiazana wersje - jawna (przekazana), albo (gdy brak)
+!!! najnowszy tag wydania GitHub tego samego repo co URL.
+fun vira_resolve_url(template: Str, version: Option<Str>) -> Result<Str, Str> [
+    if not str_contains(template.clone(), "{version}") [
+        end ok(template)
+    ]
+    let resolved = ""
+    match version [
+        Some(v) -> [
+            resolved = v
+        ]
+        None -> [
+            match vira_extract_github_org_repo(template.clone()) [
+                Some(org_repo) -> [
+                    resolved = vira_latest_github_release(org_repo)?
+                ]
+                None -> [
+                    end err("nie umiem ustalic 'org/repo' z URL-a '" + template + "', zeby znalezc najnowsza wersje - podaj jawnie --version")
+                ]
+            ]
+        ]
+    ]
+    end ok(str_replace(template, "{version}", resolved))
+]
+
+!!! Klonuje repo git do `dest` - `git_url` puste => domyslny konwenans
+!!! `https://github.com/vira-io/<name>`, niepuste => jawny URL z listy
+!!! Vira. Plytkie klonowanie (`--depth 1`); `version`, jesli podana,
+!!! jest uzyta jako `--branch` (tag/galaz - commit SHA wymagalby
+!!! pelnego klonu, poza zakresem tej rundy).
+fun vira_install_git(dest: Str, name: Str, git_url: Str, version: Option<Str>) -> Result<Str, Str> [
+    if not command_succeeds("git", ["--version"]) [
+        end err("`virus install vira` (typ 'git') wymaga zainstalowanego `git`")
+    ]
+    let url = git_url
+    if url.len() == 0 [
+        url = "https://github.com/vira-io/" + name
+    ]
+    let args: List<Str> = ["clone", "--depth", "1"]
+    match version [
+        Some(v) -> [
+            args.push("--branch")
+            args.push(v)
+        ]
+        None -> [
+        ]
+    ]
+    args.push(url.clone())
+    args.push(dest.clone())
+    run_command_checked("git", args)?
+    end ok(dest)
+]
+
+!!! `static-lib`/`shared-lib`/`rust-lib` - pobiera PLIK POD URL-em
+!!! WPROST (to gotowy `.a`/`.so`/`.rlib`, nie archiwum do
+!!! rozpakowania) do `dest/<nazwa-pliku-z-URL>` przez `curl`
+!!! (binarno-bezpieczny, patrz `curl_download` w install.hcs).
+fun vira_install_binary_file(dest: Str, url: Str) -> Result<Str, Str> [
+    let clean_url = url
+    match str_index_of(url.clone(), "?") [
+        Some(qpos) -> [
+            clean_url = url.slice(0, qpos)
+        ]
+        None -> [
+        ]
+    ]
+    let parts = str_split(clean_url, "/")
+    let base = "lib"
+    if parts.len() > 0 [
+        base = parts[parts.len() - 1]
+    ]
+    let dest_file = path_join(dest, base)
+    curl_download(url, dest_file.clone())?
+    end ok(dest_file)
+]
+
+!!! Zapisuje `dest/.vira-meta.txt` (format prosty, dwie linie
+!!! `type=...`/`file=...`) - odczytywane pozniej przez
+!!! `build.hcs::build_wire_vira_dependencies`, zeby wiedziec JAK
+!!! podpiac pobrany plik do `cargo build` BEZ ponownego odpytywania
+!!! sieci przy kazdym `virus build`.
+fun vira_write_meta(dest: Str, lib_type: Str, file_path: Str) -> Result<Str, Str> [
+    let meta_path = path_join(dest, ".vira-meta.txt")
+    let content = "type=" + lib_type + "\nfile=" + file_path + "\n"
+    write_file(meta_path.clone(), content)?
+    end ok(meta_path)
+]
+
+!! ---- glowny punkt wejscia dla zrodla "vira" --------------------------------
+
+!!! `virus install vira <nazwa> [--version WERSJA]` - patrz naglowek
+!!! pliku po pelny opis typow. Zwraca sciezke docelowa (plik dla
+!!! static-lib/shared-lib/rust-lib, katalog klonu dla git) - ten sam
+!!! ksztalt zwracany co `install_pypi`/`install_crates`/itp., uzywane
+!!! identycznie przez `cmd_install_run` w install.hcs.
+fun install_vira(dest: Str, name: Str, version: Option<Str>) -> Result<Str, Str> [
+    progress_info("vira: szukam '" + name + "' w " + VIRA_REPO_LIST_URL)
+    let repo_list = vira_fetch_repo_list()?
+
+    match vira_find_library(repo_list, name.clone()) [
+        Some(entry) -> [
+            let lib_type = ""
+            match jv_field_str(entry.clone(), "type") [
+                Some(t) -> [
+                    lib_type = t
+                ]
+                None -> [
+                    end err("vira: biblioteka '" + name + "' nie ma pola 'type' na liscie")
+                ]
+            ]
+            let lib_url = ""
+            match jv_field_str(entry.clone(), "lib") [
+                Some(l) -> [
+                    lib_url = l
+                ]
+                None -> [
+                ]
+            ]
+
+            if lib_type == "git" [
+                end vira_install_git(dest, name, lib_url, version)
+            ] elif lib_type == "static-lib" [
+                let resolved_url = vira_resolve_url(lib_url, version)?
+                let file_path = vira_install_binary_file(dest.clone(), resolved_url)?
+                vira_write_meta(dest, lib_type, file_path.clone())?
+                end ok(file_path)
+            ] elif lib_type == "shared-lib" [
+                let resolved_url2 = vira_resolve_url(lib_url, version)?
+                let file_path2 = vira_install_binary_file(dest.clone(), resolved_url2)?
+                vira_write_meta(dest, lib_type, file_path2.clone())?
+                end ok(file_path2)
+            ] elif lib_type == "rust-lib" [
+                let resolved_url3 = vira_resolve_url(lib_url, version)?
+                let file_path3 = vira_install_binary_file(dest.clone(), resolved_url3)?
+                vira_write_meta(dest, lib_type, file_path3.clone())?
+                end ok(file_path3)
+            ] elif lib_type == "hlib" [
+                end err("vira: format '.hlib' (HackerOS lib) nie jest jeszcze wspierany - zaplanowane na przyszlosc, patrz docs/ROADMAP.md")
+            ] else [
+                end err("vira: nieznany typ biblioteki '" + lib_type + "' dla '" + name + "' (oczekiwano git/static-lib/shared-lib/rust-lib/hlib)")
+            ]
+        ]
+        None -> [
+            end err("vira: nie znaleziono biblioteki '" + name + "' na liscie " + VIRA_REPO_LIST_URL)
+        ]
+    ]
+]
