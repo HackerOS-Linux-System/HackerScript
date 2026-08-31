@@ -1,6 +1,6 @@
 [package]
 -> name        => hackerc
--> version     => 0.1
+-> version     => 0.2
 -> using       => 0.1
 -> edition     => 2026
 -> description => Samo-hostowany transpilator HackerScript -> Rust (bootstrap/hackerc-self/, 11 plikow .hcs) - CLI: check/lint/build/fmt.
