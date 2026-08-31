@@ -3,6 +3,8 @@ include <manifest>
 include <hackerc_bridge>
 include <progress>
 get <std:path> import <path_join::path_basename>
+get <std:string> import <str_contains::str_starts_with::str_split::str_join::str_index_of>
+get <std:fs> import <create_dir_ok>
 
 !!! Warianty nazwane z prefiksem `Target*`, zeby nie kolidowaly z
 !!! nazwami wariantow innych modulow (patrz uwaga w json.hcs o
@@ -79,6 +81,286 @@ fun build_compile_and_copy(cache: CacheDirs, crate_dir: Str, name: Str, release:
     end ok(dest)
 ]
 
+!!! Sciezka do pliku wejsciowego DANEGO CZLONKA workspace, TYLKO jesli
+!!! jest naprawde budowalny jako osobna binarka - `none()` gdy: brak
+!!! wlasnego `Virus.hk`, manifest sie nie parsuje, `[build].entry` nie
+!!! istnieje na dysku, ALBO plik entry nie zawiera `fun main(` (czyli
+!!! to biblioteka do importowania przez `get<...>`/`include<...>`, jak
+!!! `libs/core`/`libs/std` - NIE osobno budowalny projekt). Parytet z
+!!! tym, jak `cargo build` w workspace kompiluje biblioteki (.rlib) bez
+!!! [[bin]], ale nie probuje ich "uruchamiac" jako binarki - u nas
+!!! `--library` (patrz `TargetLibrary`) nie jest jeszcze
+!!! zaimplementowane, wiec takich czlonkow NIE DA SIE dzis w ogole
+!!! skompilowac - sa wiec pomijane, nie budowane wcale.
+fun workspace_member_buildable_entry(member_root: Str) -> Option<Str> [
+    let manifest_path = path_join(member_root.clone(), "Virus.hk")
+    if not path_exists(manifest_path.clone()) [
+        end none()
+    ]
+    match parse_manifest_file(manifest_path) [
+        Ok(m) -> [
+            let entry = path_join(member_root, m.build.entry)
+            if not path_exists(entry.clone()) [
+                end none()
+            ]
+            match read_file(entry.clone()) [
+                Ok(src) -> [
+                    if str_contains(src, "fun main(") [
+                        end some(entry)
+                    ]
+                    end none()
+                ]
+                Err(_e) -> [
+                    end none()
+                ]
+            ]
+        ]
+        Err(_e) -> [
+            end none()
+        ]
+    ]
+]
+
+!!! `virus build` na korzeniu workspace (`[workspace] -> members`
+!!! niepuste w Virus.hk) - buduje KAZDEGO czlonka majacego wlasny,
+!!! uruchamialny `fun main()` (patrz `workspace_member_buildable_entry`),
+!!! wywolujac dla kazdego z nich TEN SAM `cmd_build_run` z JEGO
+!!! WLASNYM katalogiem (wlasny Virus.hk -> wlasna wersja `using`,
+!!! wlasny `[build].entry`) - dokladnie tak, jak `cargo build` w
+!!! workspace kompiluje kazdego czlonka wg jego wlasnego Cargo.toml.
+!!! Czlonkowie BEZ budowalnego entry (biblioteki, np. `libs/core`/
+!!! `libs/std`) sa pomijani z komunikatem informacyjnym, nie bledem -
+!!! workspace z samymi bibliotekami + jednym buildowalnym czlonkiem
+!!! wciaz powinien sie powiesc. Zwraca Str-owe podsumowanie (lista
+!!! sciezek do zbudowanych binarek, po jednej w linii) zamiast
+!!! pojedynczej sciezki - zeby zachowac ten sam typ zwracany
+!!! `Result<Str, Str>` co pojedynczy projekt (patrz wywolanie w
+!!! `main.hcs`, ktore nie musi wiedziec, czy budowany byl workspace
+!!! czy pojedynczy projekt).
+fun cmd_build_workspace_run(project_root: Str, manifest: Manifest, opts: BuildOptions) -> Result<Str, Str> [
+    progress_header("Workspace " + manifest.package.name.clone() + " - " + (manifest.workspace.members.len() as Str) + " czlonkow (" + build_target_name(opts.target.clone()) + ")")
+
+    let built: List<Str> = []
+    let skipped: List<Str> = []
+    let i = 0
+    let n = manifest.workspace.members.len()
+    while i < n [
+        let member = manifest.workspace.members[i].clone()
+        let member_root = path_join(project_root.clone(), member.clone())
+        match workspace_member_buildable_entry(member_root.clone()) [
+            Some(_entry) -> [
+                progress_step(i + 1, n, "czlonek: " + member.clone())
+                match cmd_build_run(member_root, opts.clone()) [
+                    Ok(bin_path) -> [
+                        built.push(member.clone() + " -> " + bin_path)
+                    ]
+                    Err(e) -> [
+                        end err("workspace: budowanie czlonka '" + member + "' nie powiodlo sie: " + e)
+                    ]
+                ]
+            ]
+            None -> [
+                progress_info("pomijam '" + member + "' - biblioteka bez wlasnego binarnego entry point (brak fun main())")
+                skipped.push(member.clone())
+            ]
+        ]
+        i = i + 1
+    ]
+
+    if built.len() == 0 [
+        end err("workspace: zaden czlonek nie mial budowalnego entry point (fun main()) - sprawdz [workspace].members w Virus.hk")
+    ]
+
+    progress_success("workspace gotowy - zbudowano " + (built.len() as Str) + "/" + (n as Str) + " czlonkow (" + (skipped.len() as Str) + " pominietych bibliotek)")
+    let summary = ""
+    let j = 0
+    let bn = built.len()
+    while j < bn [
+        if j > 0 [
+            summary = summary + "\n"
+        ]
+        summary = summary + built[j]
+        j = j + 1
+    ]
+    end ok(summary)
+]
+
+!! ---- podpiecie zaleznosci "vira" do wygenerowanego crate'a ---------------
+
+struct ViraMeta [
+    lib_type: Str,
+    file: Str
+]
+
+!!! Wczytuje `.vira-meta.txt` zapisany przez `vira.hcs::vira_write_meta`
+!!! przy `virus install vira ...` (format: dwie linie `type=...`/
+!!! `file=...`) - `none()` gdy plik nie istnieje albo jest niekompletny
+!!! (np. zaleznosc typu "git", dla ktorej meta nigdy nie jest pisany -
+!!! git nie jest dzis podpinany automatycznie, patrz nizej).
+fun vira_read_meta(meta_path: Str) -> Option<ViraMeta> [
+    if not path_exists(meta_path.clone()) [
+        end none()
+    ]
+    match read_file(meta_path.clone()) [
+        Ok(text) -> [
+            let lines = str_split(text, "\n")
+            let lib_type = ""
+            let file_path = ""
+            let i = 0
+            let n = lines.len()
+            while i < n [
+                let line: Str = lines[i].clone()
+                if str_starts_with(line.clone(), "type=") [
+                    lib_type = line.slice(5, line.len())
+                ]
+                if str_starts_with(line.clone(), "file=") [
+                    file_path = line.slice(5, line.len())
+                ]
+                i = i + 1
+            ]
+            if lib_type.len() == 0 or file_path.len() == 0 [
+                end none()
+            ]
+            end some(ViraMeta(lib_type, file_path))
+        ]
+        Err(_e) -> [
+            end none()
+        ]
+    ]
+]
+
+struct VLibName [
+    dir: Str,
+    libname: Str
+]
+
+!!! Rozbija sciezke pliku na (katalog, "nazwa" dla `rustc-link-lib` -
+!!! bez prefiksu `lib` i bez rozszerzenia), np.
+!!! `/a/b/libhk_parser.a` -> dir="/a/b", libname="hk_parser". `none()`
+!!! gdy sciezka nie ma separatora katalogu (nie powinno sie zdarzyc -
+!!! pliki Vira sa zawsze pod `cache/libs/vira/...`).
+fun vira_split_dir_libname(path: Str) -> Option<VLibName> [
+    let parts = str_split(path.clone(), "/")
+    if parts.len() < 2 [
+        end none()
+    ]
+    let filename: Str = parts[parts.len() - 1].clone()
+    let dir_parts: List<Str> = []
+    let i = 0
+    while i < parts.len() - 1 [
+        dir_parts.push(parts[i].clone())
+        i = i + 1
+    ]
+    let dir = str_join(dir_parts, "/")
+    let name: Str = filename
+    if str_starts_with(name.clone(), "lib") [
+        name = name.slice(3, name.len())
+    ]
+    match str_index_of(name.clone(), ".") [
+        Some(dot) -> [
+            name = name.slice(0, dot)
+        ]
+        None -> [
+        ]
+    ]
+    end some(VLibName(dir, name))
+]
+
+!!! Dokleja `.cargo/config.toml` w `crate_dir`, ktory podpina `.rlib`
+!!! (`rust-lib` z Vira) do linkowania (`--extern nazwa=sciezka.rlib`
+!!! przez `rustflags`) - jedyny sposob na wpiecie SUROWEGO `.rlib` bez
+!!! pelnej struktury crate'a (Cargo nie ma pola na to w
+!!! `[dependencies]`). NIE nadpisuje istniejacego pliku - dokleja,
+!!! pomijajac cicho jesli ten sam `--extern` juz tam jest.
+fun vira_wire_rust_lib(crate_dir: Str, name: Str, rlib_path: Str) -> Result<Str, Str> [
+    let cargo_dir = path_join(crate_dir.clone(), ".cargo")
+    if not create_dir_ok(cargo_dir.clone()) [
+        end err("nie mozna utworzyc " + cargo_dir)
+    ]
+    let config_path = path_join(cargo_dir, "config.toml")
+    let extern_flag = "--extern=" + name + "=" + rlib_path
+    let search_dir = ""
+    match vira_split_dir_libname(rlib_path.clone()) [
+        Some(vln) -> [
+            search_dir = vln.dir
+        ]
+        None -> [
+        ]
+    ]
+    let existing = ""
+    if path_exists(config_path.clone()) [
+        match read_file(config_path.clone()) [
+            Ok(t) -> [
+                existing = t
+            ]
+            Err(_e) -> [
+            ]
+        ]
+    ]
+    if str_contains(existing.clone(), extern_flag.clone()) [
+        end ok(config_path)
+    ]
+    let addition = "[build]\nrustflags = [\"-L\", \"" + search_dir + "\", \"" + extern_flag + "\"]\n"
+    write_file(config_path.clone(), existing + addition)?
+    end ok(config_path)
+]
+
+!!! Po `hackerc build` (crate juz wygenerowany), PRZED `cargo build` -
+!!! podpina kazda zaleznosc `[dependencies] -> vira.<nazwa>` z
+!!! manifestu, ktora zostala juz pobrana przez `virus install vira`
+!!! (patrz `.vira-meta.txt`, `vira.hcs::vira_write_meta`):
+!!!   - `static-lib`/`shared-lib` -> dopisuje linie do WYGENEROWANEGO
+!!!     `build.rs` w korzeniu crate'a (Cargo automatycznie kompiluje i
+!!!     uruchamia `build.rs`, jesli istnieje - NIE trzeba niczego
+!!!     dopisywac do Cargo.toml, to domyslne zachowanie Cargo);
+!!!   - `rust-lib` -> `.cargo/config.toml` (patrz `vira_wire_rust_lib`).
+!!! Zaleznosci typu "git" NIE sa tu podpinane - pelne wpiecie przez
+!!! `get <vira:...>` (analogiczne do `get <std:...>`) to osobna,
+!!! wieksza funkcja kompilatora, nie zaimplementowana w tej rundzie
+!!! (patrz docs/ROADMAP.md). Brak zaleznosci "vira" w manifescie = nic
+!!! do zrobienia, zwraca `Ok` natychmiast.
+fun build_wire_vira_dependencies(cache: CacheDirs, manifest: Manifest, crate_dir: Str) -> Result<Str, Str> [
+    let link_lines: List<Str> = []
+    let i = 0
+    let n = manifest.dependencies.len()
+    while i < n [
+        let dep = manifest.dependencies[i].clone()
+        if dep.source == "vira" [
+            let dest = cache_lib_path(cache.clone(), "vira", dep.name.clone())
+            let meta_path = path_join(dest, ".vira-meta.txt")
+            match vira_read_meta(meta_path) [
+                Some(meta) -> [
+                    if meta.lib_type == "static-lib" or meta.lib_type == "shared-lib" [
+                        match vira_split_dir_libname(meta.file.clone()) [
+                            Some(vln) -> [
+                                let kind = "static"
+                                if meta.lib_type == "shared-lib" [
+                                    kind = "dylib"
+                                ]
+                                link_lines.push("    println!(\"cargo:rustc-link-search=native=" + vln.dir + "\");")
+                                link_lines.push("    println!(\"cargo:rustc-link-lib=" + kind + "=" + vln.libname + "\");")
+                            ]
+                            None -> [
+                                progress_warn("vira: nie umiem ustalic nazwy biblioteki z '" + meta.file + "' dla " + dep.name.clone())
+                            ]
+                        ]
+                    ] elif meta.lib_type == "rust-lib" [
+                        vira_wire_rust_lib(crate_dir.clone(), dep.name.clone(), meta.file.clone())?
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        i = i + 1
+    ]
+    if link_lines.len() > 0 [
+        let build_rs = "fn main() {\n" + str_join(link_lines, "\n") + "\n}\n"
+        write_file(path_join(crate_dir, "build.rs"), build_rs)?
+    ]
+    end ok("ok")
+]
+
 !!! Caly potok - zwraca sciezke do finalnej binarki (`cache/build/...`),
 !!! albo `Err` z opisem bledu (parytet z `run` w oryginale, ale
 !!! zwracajace wynik zamiast tylko `Ok(())`/wyjatku).
@@ -87,6 +369,19 @@ fun cmd_build_run(project_root: Str, opts: BuildOptions) -> Result<Str, Str> [
     cache_ensure_all(cache.clone())
 
     let manifest = parse_manifest_file(path_join(project_root.clone(), "Virus.hk"))?
+
+    let is_single_file = false
+    match opts.single_file.clone() [
+        Some(_f) -> [
+            is_single_file = true
+        ]
+        None -> [
+        ]
+    ]
+    if not is_single_file and manifest.workspace.members.len() > 0 [
+        end cmd_build_workspace_run(project_root, manifest, opts)
+    ]
+
     let version = DEFAULT_HACKERC_VERSION.to_string()
     match manifest.package.lang_using.clone() [
         Some(u) -> [
@@ -122,6 +417,7 @@ fun cmd_build_run(project_root: Str, opts: BuildOptions) -> Result<Str, Str> [
 
     progress_step(1, 2, "generowanie crate'a Rust (hackerc build)")
     hackerc_build_crate(hackerc_bin, entry, crate_dir.clone(), manifest.package.name.clone())?
+    build_wire_vira_dependencies(cache.clone(), manifest.clone(), crate_dir.clone())?
 
     match opts.target [
         TargetDefault -> [
