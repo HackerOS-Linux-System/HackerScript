@@ -3,7 +3,7 @@ include <diagnostics>
 include <typeinfer>
 
 fun is_known_get_source(s: Str) -> Bool [
-    end s == "pypi" or s == "crates" or s == "std" or s == "core" or s == "selfhost" or s == "virus"
+    end s == "pypi" or s == "crates" or s == "std" or s == "core" or s == "selfhost" or s == "virus" or s == "vira"
 ]
 
 fun is_builtin_func(name: Str) -> Bool [
@@ -380,7 +380,7 @@ impl Checker [
     !!! E0003 - parytet z `_check_get`.
     fun check_get(self, source: Str, name: Str) [
         if not is_known_get_source(source) [
-            self.diags.push(Diagnostic("error", "E0003", "nieznane zrodlo '" + source + "' w 'get <" + source + ":" + name + ">' (dozwolone: core, crates, pypi, selfhost, std, virus)", 0, 0, 1, ""))
+            self.diags.push(Diagnostic("error", "E0003", "nieznane zrodlo '" + source + "' w 'get <" + source + ":" + name + ">' (dozwolone: core, crates, pypi, selfhost, std, vira, virus)", 0, 0, 1, ""))
         ]
     ]
 
