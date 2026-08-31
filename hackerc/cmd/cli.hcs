@@ -8,7 +8,7 @@ include <project>
 get <std:io> import <file_readable>
 get <std:term> import <c_bold_green::c_bold_red::c_bold_cyan::c_red::c_gray::print_progress_line>
 
-const VERSION: Str = "0.1"
+const VERSION: Str = "0.2"
 
 !!! DODANE w tej rundzie (patrz docs/ROADMAP.md) - `hackerc` byl do tej
 !!! pory calkowicie monochromatyczny (`log("hackerc: ...", ...)`).
@@ -125,8 +125,9 @@ fun cmd_lint(src_path: Str) -> Int [
 !!! `out_dir`/`crate_name` juz rozpakowane (patrz uwaga na gorze pliku
 !!! o braku argv) - `out_dir`/`out_dir + "/src"` MUSZA JUZ ISTNIEC,
 !!! patrz to samo ograniczenie udokumentowane przy `build_project` w
-!!! project.hcs.
-fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>) -> Int [
+!!! project.hcs. `vira_root` DODANE w tej rundzie (patrz
+!!! `project.hcs::find_vira_cache_root`) - `none()` = auto-wykrywanie.
+fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, vira_root: Option<Str>) -> Int [
     if not file_readable(src_path.clone()) [
         elog(c_red("hackerc:") + " nie znaleziono pliku " + src_path)
         end 1
@@ -143,7 +144,7 @@ fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<St
             !!! `check_program` widzi domyslnie tylko JEDEN plik -
             !!! parytet z komentarzem w cmd_build (Python).
             print_progress_line("Kompilacja " + src_path, 2, BUILD_STEP_COUNT, "zbieranie sygnatur projektu", false)
-            let ps = collect_project_signatures(src_path.clone(), libs_root.clone(), bootstrap_root.clone())
+            let ps = collect_project_signatures(src_path.clone(), libs_root.clone(), bootstrap_root.clone(), vira_root.clone())
             let extra_variants: List<Str> = []
             let ei = 0
             let en = ps.sigs.enum_names.len()
@@ -178,7 +179,7 @@ fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<St
             ]
 
             print_progress_line("Kompilacja " + src_path, 4, BUILD_STEP_COUNT, "generowanie crate'a Rust", false)
-            let result = build_project(src_path, out_dir, libs_root, bootstrap_root, crate_name)
+            let result = build_project(src_path, out_dir, libs_root, bootstrap_root, vira_root, crate_name)
 
             let wi = 0
             let wn = result.warnings.len()
@@ -505,7 +506,17 @@ fun main() [
             None -> [
             ]
         ]
-        exit(cmd_build(src, out_dir, crate_name, libs_root, bootstrap_root))
+        !! DODANE w tej rundzie (patrz project.hcs::find_vira_cache_root) -
+        !! analogiczne do --libs-root/--bootstrap-root, none() = auto-wykrywanie.
+        let vira_root: Option<Str> = none()
+        match find_flag_value(argv, "", "--vira-root") [
+            Some(v) -> [
+                vira_root = some(v)
+            ]
+            None -> [
+            ]
+        ]
+        exit(cmd_build(src, out_dir, crate_name, libs_root, bootstrap_root, vira_root))
     ]
 
     !!! Tryb kompatybilnosci wstecznej (parytet z `legacy` ArgumentParser
