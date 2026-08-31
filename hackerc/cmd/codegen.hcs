@@ -3331,7 +3331,7 @@ impl CodeGen [
     ]
 
     fun gen_get_import(self, source: Str, name: Str, version: Option<Str>, details: List<Str>) [
-        if source == "std" or source == "core" or source == "selfhost" or source == "virus" [
+        if source == "std" or source == "core" or source == "selfhost" or source == "virus" or source == "vira" [
             let module = flat_module_name(source, name.clone(), version)
             if details.len() > 0 [
                 self.emit("use crate::" + module + "::{" + self.join_binds(details) + "};")
