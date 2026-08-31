@@ -7,75 +7,8 @@ get <std:string> import <str_contains::str_ends_with::str_starts_with::str_index
 include <cache>
 include <manifest>
 include <progress>
-
-!!! `v.klucz` dla `v: JsonValue` bedace `JsonObject` (skrot laczacy
-!!! `manifest_as_map` + `manifest_find_entry` - te dwie funkcje operuja
-!!! generycznie na `JsonValue`, mimo ze zyja w `virus:manifest`).
-fun jv_field(v: JsonValue, key: Str) -> Option<JsonValue> [
-    match manifest_as_map(v) [
-        Some(entries) -> [
-            end manifest_find_entry(entries, key)
-        ]
-        None -> [
-            end none()
-        ]
-    ]
-]
-
-!!! `v.klucz` jako `Str`, jednym wywolaniem.
-fun jv_field_str(v: JsonValue, key: Str) -> Option<Str> [
-    match jv_field(v, key) [
-        Some(fv) -> [
-            end manifest_as_string(fv)
-        ]
-        None -> [
-            end none()
-        ]
-    ]
-]
-
-!!! Pobiera CALY tekst pod `url` przez `curl` (podproces) i zapisuje pod
-!!! `dest_file` - BINARNY-BEZPIECZNY odpowiednik `http_get` (ktore
-!!! obsluguje tylko UTF-8) - patrz uwaga na gorze pliku. Wysyla
-!!! opisowy `User-Agent` - crates.io (i inne rejestry) ODRZUCAJA (403)
-!!! zadania bez niego - udokumentowana polityka tych API, nie kaprys.
-fun curl_download(url: Str, dest_file: Str) -> Result<Str, Str> [
-    if not command_succeeds("curl", ["--version"]) [
-        end err("`virus install` wymaga zainstalowanego `curl` (pobieranie archiwow binarnych - patrz uwaga w install.hcs)")
-    ]
-    end run_command_checked("curl", ["-sL", "--fail", "-A", "virus-hackerscript/0.0.1 (+https://github.com/HackerOS-Linux-System/HackerScript)", "-o", dest_file.clone(), url.clone()])
-]
-
-!!! Rozpakowuje archiwum pobrane do `archive_file` do katalogu `dest`
-!!! (juz istniejacego) - `.tar.gz`/`.tgz` przez `tar`, `.zip`/`.whl`
-!!! przez `unzip`.
-fun extract_archive(archive_file: Str, dest: Str) -> Result<Str, Str> [
-    if str_ends_with(archive_file.clone(), ".zip") or str_ends_with(archive_file.clone(), ".whl") [
-        if not command_succeeds("unzip", ["-v"]) [
-            end err("`virus install` wymaga zainstalowanego `unzip` (rozpakowywanie .whl/.zip)")
-        ]
-        end run_command_checked("unzip", ["-o", "-q", archive_file.clone(), "-d", dest.clone()])
-    ]
-    if not command_succeeds("tar", ["--version"]) [
-        end err("`virus install` wymaga zainstalowanego `tar` (rozpakowywanie .tar.gz/.tgz/.crate)")
-    ]
-    end run_command_checked("tar", ["-xzf", archive_file.clone(), "-C", dest.clone()])
-]
-
-!!! `curl_download` + `extract_archive` + sprzatanie pliku tymczasowego
-!!! - wspolny ostatni krok kazdego `install_*`.
-fun download_and_extract(url: Str, dest: Str, archive_ext: Str) -> Result<Str, Str> [
-    let tmp_file = dest.clone() + "/.download" + archive_ext
-    curl_download(url, tmp_file.clone())?
-    let result = extract_archive(tmp_file.clone(), dest)
-    match run_command("rm", ["-f", tmp_file]) [
-        Ok(_v) -> [
-        ]
-        Err(_e) -> [
-        ]
-    ]
-    end result
-]
+include <net_helpers>
+include <vira>
 
 !! ---- pypi: bezposrednio przez PyPI JSON API, bez `pip` --------------------
 
@@ -457,8 +390,10 @@ fun cmd_install_run(project_root: Str, source: Str, name: Str, version: Option<S
         install_npm(dest.clone(), name.clone(), version.clone())?
     ] elif source == "jsr" [
         install_jsr(dest.clone(), name.clone(), version.clone())?
+    ] elif source == "vira" [
+        install_vira(dest.clone(), name.clone(), version.clone())?
     ] else [
-        end err("nieznane zrodlo zaleznosci '" + source + "' (oczekiwano pypi/crates/npm/jsr/std/core)")
+        end err("nieznane zrodlo zaleznosci '" + source + "' (oczekiwano pypi/crates/npm/jsr/vira/std/core)")
     ]
 
     progress_success("zainstalowano " + source.clone() + ":" + name.clone() + " -> " + dest)
