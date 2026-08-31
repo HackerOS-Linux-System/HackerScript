@@ -5,7 +5,7 @@ get <std:fs> import <create_dir_ok>
 include <cache>
 include <progress>
 
-const DEFAULT_HACKERC_VERSION: Str = "0.1"
+const DEFAULT_HACKERC_VERSION: Str = "1.2"
 
 !!! Nazwa assetu wydania GitHub - dokladnie `hackerc` (BEZ przyrostka
 !!! platformy) - te wydania sa dzis buildowane TYLKO dla Linux x86_64
