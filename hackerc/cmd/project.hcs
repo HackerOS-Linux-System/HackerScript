@@ -157,7 +157,55 @@ fun find_bootstrap_root(start: Str) -> Option<Str> [
     end none()
 ]
 
-!!! Element kolejki BFS discovery - `Stmt` (GetImportStmt/IncludeStmt) +
+!!! Jak `find_libs_root`, ale szuka `cache/libs/vira/` - katalog
+!!! tworzony przez `virus install vira <nazwa>` (patrz
+!!! `virus/cmd/vira.hcs`/`virus/cmd/cache.hcs::cache_lib_path`).
+!!! DODANE w tej rundzie - odblokowuje `get <vira:nazwa[::plik]>` dla
+!!! bibliotek Vira typu "git" (kod zrodlowy .hcs) - `static-lib`/
+!!! `shared-lib`/`rust-lib` sa uzywane INACZEJ, przez `extern "nazwa"
+!!! fun ...` (patrz `gen_extern`/`ExternFunDecl`) PO automatycznym
+!!! podlinkowaniu przez `virus build` (patrz
+!!! `virus/cmd/build.hcs::build_wire_vira_dependencies`), NIE przez
+!!! `get<...>` - `git`-type to jedyny typ Vira bedacy prawdziwym
+!!! zrodlem .hcs do wspolnego skompilowania z projektem.
+fun find_vira_cache_root(start: Str) -> Option<Str> [
+    let d = to_absolute_dir(start)
+    let prev_d = "\0no-such-dir"
+    while d != prev_d [
+        let candidate = path_join_safe(d.clone(), "cache/libs/vira")
+        if dir_exists(candidate.clone()) [
+            end some(candidate)
+        ]
+        prev_d = d.clone()
+        d = path_parent(d)
+    ]
+    end none()
+]
+
+!!! `<vira_root>/<name>/<wersja-jako-plik>.hcs`, gdzie `wersja` (z
+!!! `get <vira:nazwa::plik>`) to sciezka DO KONKRETNEGO pliku WEWNATRZ
+!!! sklonowanego repo `<vira_root>/<nazwa>/` - brak `::` (samo `get
+!!! <vira:nazwa>`) domyslnie szuka `<vira_root>/<nazwa>/mod.hcs`,
+!!! DOKLADNIE tak jak `get <std:nazwa>` bez `::` laduje w
+!!! `libs/std/lib/nazwa.hcs`, a `get <std:nazwa>` na CALY PAKIET (bez
+!!! podsciezki) odpowiadaloby `libs/std/lib/mod.hcs` - biblioteki Vira
+!!! typu "git" MUSZA wiec miec `mod.hcs` w korzeniu repo, zeby byly
+!!! importowalne jako `get <vira:nazwa>` bez `::` (udokumentowana
+!!! konwencja, patrz docs/ROADMAP.md i naglowek vira.hcs).
+fun vira_module_file_path(vira_root: Str, name: Str, version: Option<Str>) -> Str [
+    let path = vira_root + "/" + name + "/"
+    match version [
+        Some(v) -> [
+            path = path + v
+        ]
+        None -> [
+            path = path + "mod"
+        ]
+    ]
+    end path + ".hcs"
+]
+
+
 !!! katalog PLIKU, w ktorym sie znajduje (potrzebny WYLACZNIE dla
 !!! `IncludeStmt`, rozwiazywanego wzgledem tego katalogu - `GetImportStmt`
 !!! ignoruje `base_dir`, zawsze szuka od libs_root/bootstrap_root).
@@ -280,9 +328,10 @@ impl Discovery [
     ]
 
     !!! Faza 1 (discovery): parsuje `entry` + rekurencyjnie kazdy
-    !!! zaimportowany modul `std`/`core`/`selfhost` - BFS po
+    !!! zaimportowany modul `std`/`core`/`selfhost`/`vira` - BFS po
     !!! `GetImportStmt`. Parytet z `_resolve_project_files`.
-    fun resolve(self, entry: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>) [
+    !!! `vira_root` DODANE w tej rundzie (patrz `find_vira_cache_root`).
+    fun resolve(self, entry: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, vira_root: Option<Str>) [
         let added = self.parse_and_add(entry.clone(), "main", "main")
         if not added [
             end
@@ -312,6 +361,16 @@ impl Discovery [
                                 ]
                                 None -> [
                                     self.warnings.push("get <selfhost:" + iname.clone() + "> - nie znaleziono katalogu bootstrap/hackerc-self/ - modul " + flat.clone() + " nie zostanie zbudowany")
+                                ]
+                            ]
+                        ] elif isource == "vira" [
+                            match vira_root.clone() [
+                                Some(vr) -> [
+                                    mod_file = vira_module_file_path(vr, iname.clone(), iversion.clone())
+                                    have_root = true
+                                ]
+                                None -> [
+                                    self.warnings.push("get <vira:" + iname.clone() + "> - nie znaleziono katalogu cache/libs/vira/ - uruchom `virus install vira " + iname.clone() + "` (modul " + flat.clone() + " nie zostanie zbudowany)")
                                 ]
                             ]
                         ] else [
@@ -365,10 +424,15 @@ impl Discovery [
 ]
 
 !!! Dopisuje do `queue` kazdy `GetImportStmt` (dla `std`/`core`/
-!!! `selfhost`) i kazdy `IncludeStmt` na najwyzszym poziomie `prog` -
-!!! parytet z `module_stmts()` (project.py). `base_dir` (katalog pliku
-!!! `prog` pochodzi z) jest doczepiany do kazdego elementu - potrzebny
-!!! pozniej WYLACZNIE dla `IncludeStmt`.
+!!! `selfhost`/`virus`/`vira`) i kazdy `IncludeStmt` na najwyzszym
+!!! poziomie `prog` - parytet z `module_stmts()` (project.py).
+!!! `base_dir` (katalog pliku `prog` pochodzi z) jest doczepiany do
+!!! kazdego elementu - potrzebny pozniej WYLACZNIE dla `IncludeStmt`.
+!!! `vira` DODANE w tej rundzie - TYLKO dla bibliotek Vira typu "git"
+!!! (patrz `find_vira_cache_root`) - `static-lib`/`shared-lib`/
+!!! `rust-lib` nie sa .hcs zrodlem, wiec nigdy nie trafiaja tutaj (nie
+!!! ma dla nich zadnego pliku do sparsowania - sa uzywane przez
+!!! `extern "nazwa" fun ...` po podlinkowaniu).
 fun collect_module_imports(prog: Program, base_dir: Str, queue: List<QueueItem>) [
     let i = 0
     let n = prog.body.len()
@@ -376,7 +440,7 @@ fun collect_module_imports(prog: Program, base_dir: Str, queue: List<QueueItem>)
         let s = prog.body[i].clone()
         match s.clone() [
             GetImportStmt(source, name, version, details) -> [
-                if source == "std" or source == "core" or source == "selfhost" or source == "virus" [
+                if source == "std" or source == "core" or source == "selfhost" or source == "virus" or source == "vira" [
                     queue.push(QueueItem(s, base_dir.clone()))
                 ]
             ]
@@ -401,10 +465,11 @@ struct ProjectSignatures [
 
 !!! Faza 1 z `build_project` (discovery + globalny rejestr sygnatur),
 !!! wydzielona do samodzielnego uzycia - parytet z
-!!! `collect_project_signatures`. `libs_root`/`bootstrap_root` `none()`
-!!! -> auto-wykrywanie przez `find_libs_root`/`find_bootstrap_root`
+!!! `collect_project_signatures`. `libs_root`/`bootstrap_root`/
+!!! `vira_root` `none()` -> auto-wykrywanie przez
+!!! `find_libs_root`/`find_bootstrap_root`/`find_vira_cache_root`
 !!! zaczynajac od `entry`.
-fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>) -> ProjectSignatures [
+fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, vira_root: Option<Str>) -> ProjectSignatures [
     let lr = libs_root
     match lr.clone() [
         Some(_v) -> [
@@ -421,9 +486,17 @@ fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_roo
             br = find_bootstrap_root(entry.clone())
         ]
     ]
+    let vr = vira_root
+    match vr.clone() [
+        Some(_v) -> [
+        ]
+        None -> [
+            vr = find_vira_cache_root(entry.clone())
+        ]
+    ]
 
     let disc = Discovery([], dict(), [])
-    disc.resolve(entry, lr, br)
+    disc.resolve(entry, lr, br, vr)
 
     let functions: Dict<Str, Stmt> = dict()
     let function_names: List<Str> = []
@@ -623,7 +696,7 @@ fun trim_str(s: Str) -> Str [
 !!! sie nie uda (np. brak uprawnien), zapis kazdego pliku i tak
 !!! sprobuje samodzielnie i doda `Err` do `warnings`, wiec brak
 !!! twardego przerwania calej budowy.
-fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, crate_name: Str) -> ProjectResult [
+fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, vira_root: Option<Str>, crate_name: Str) -> ProjectResult [
     let src_dir = out_dir + "/src"
     let main_rs_path = src_dir + "/main.rs"
     let warnings: List<Str> = []
@@ -652,9 +725,17 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
             br = find_bootstrap_root(entry.clone())
         ]
     ]
+    let vr = vira_root
+    match vr.clone() [
+        Some(_v) -> [
+        ]
+        None -> [
+            vr = find_vira_cache_root(entry.clone())
+        ]
+    ]
 
     let disc = Discovery([], dict(), [])
-    disc.resolve(entry.clone(), lr.clone(), br.clone())
+    disc.resolve(entry.clone(), lr.clone(), br.clone(), vr.clone())
     let i = 0
     let wn = disc.warnings.len()
     while i < wn [
@@ -662,7 +743,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
         i = i + 1
     ]
 
-    let ps = collect_project_signatures(entry, lr, br)
+    let ps = collect_project_signatures(entry, lr, br, vr)
     let extra = ps.sigs
 
     let needs_pyo3 = false
