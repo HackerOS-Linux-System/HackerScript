@@ -107,6 +107,18 @@ cross-plikowe tez dostaly poprawne `&`/`&mut`).
 . `get <crates:nazwa>` -> prawdziwa zaleznosc Cargo. `get
 <pypi/npm/jsr:...>` -> pobierane przez `virus install` (bezposrednio
 z PyPI/crates.io/npm/JSR API, BEZ `pip`/`cargo add`/`npm install`).
+. `virus install vira <nazwa>` -> szuka biblioteki w oficjalnym
+rejestrze https://vira.io (JSON publikowany pod
+`github.com/vira-io/repository`) i pobiera ja wg zadeklarowanego typu.
+Dla typu `git` kod trafia do `cache/libs/vira/<nazwa>/` i jest
+importowalny wprost przez `get <vira:nazwa[::plik]>` (jak `get
+<std:...>`/`get <core:...>` - biblioteka MUSI miec `mod.hcs` w
+korzeniu, jesli ma byc importowana bez `::`). Dla
+`static-lib`/`shared-lib`/`rust-lib` linkowanie do wygenerowanego
+crate'a dzieje sie *automatycznie* przy `virus build` (wygenerowany
+`build.rs`/`.cargo/config.toml`), a uzycie w kodzie to `extern
+"nazwa" fun ...` (`.hlib` zaplanowane na przyszlosc) - patrz
+`docs/ROADMAP.md`, sekcja "Ekosystem bibliotek Vira".
 . `using <wersja>` na poczatku pliku (albo `[package] using` w
 `Virus.hk`) -> deklaruje wymagana wersje `hackerc`. Jesli nie jest
 zainstalowana, `virus` pobiera ja *automatycznie* z GitHub Releases:
@@ -120,7 +132,10 @@ https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v<wersja
 `cache/env/hackerc-<wersja>/`) - patrz `virus/cmd/hackerc_bridge.hcs`.
 . `virus build` -> `hackerc build` (generuje cargo crate) -> `cargo
 build` (jedyne miejsce, gdzie `virus` uzywa cargo - jako kompilator,
-nie menedzer pakietow).
+nie menedzer pakietow). Uruchomiony na korzeniu z `[workspace]` w
+`Virus.hk` (patrz glowny `/Virus.hk` tego repo) buduje KAZDEGO
+czlonka majacego wlasny, uruchamialny plik wejsciowy - analogicznie
+do `cargo build` w workspace Cargo.
 
 == Szybki start
 
