@@ -1,1 +1,18 @@
+package {
+  name        = "hackerscript"
+  version     = "0.1.0"
+  arch        = ["x86_64"]
+  description = "HackerScript -- hackerc (transpilator HackerScript -> Rust) i virus (menedzer pakietow/projektow), budowane samo-hostujacym sie lancuchem stage0"
+  depends_on  = []
+}
 
+recipe {
+  file = "recipe.janet"
+  lang = "janet"
+}
+
+release {
+  repo       = "https://github.com/Zenit-Linux/own-repository"
+  repo_file  = "repo/own-repository.json"
+  asset_name = "hackerscript"
+}
