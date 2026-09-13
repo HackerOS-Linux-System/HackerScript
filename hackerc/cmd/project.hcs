@@ -283,7 +283,12 @@ struct DiscoveredFile [
     path: Str,
     flat_name: Str,
     source: Str,
-    program: Program
+    program: Program,
+    blocks: List<Str>,
+    native_blocks: List<Str>,
+    native_engines: List<Str>,
+    sandbox_blocks: List<Str>,
+    hot_reload_names: List<Str>
 ]
 
 struct ProjectResult [
@@ -292,6 +297,9 @@ struct ProjectResult [
     module_files: List<Str>,
     cargo_toml_path: Str,
     needs_pyo3: Bool,
+    needs_native_js: Bool,
+    needs_sandbox: Bool,
+    needs_hot_reload: Bool,
     crates_deps_names: List<Str>,
     crates_deps_versions: List<Str>,
     warnings: List<Str>
@@ -316,8 +324,11 @@ impl Discovery [
         match read_file(path.clone()) [
             Ok(source) -> [
                 let extraction = extract_direct_blocks(source.clone())
-                let prog = parse(extraction.stripped_source)
-                self.files.push(DiscoveredFile(path, flat_name, source_tag, prog))
+                let native_extraction = extract_native_blocks(extraction.stripped_source, native_dirname(path))
+                let sandbox_extraction = extract_sandbox_blocks(native_extraction.stripped_source)
+                let hot_extraction = extract_hot_reload_markers(sandbox_extraction.stripped_source)
+                let prog = parse(hot_extraction.stripped_source)
+                self.files.push(DiscoveredFile(path, flat_name, source_tag, prog, extraction.blocks, native_extraction.blocks, native_extraction.engines, sandbox_extraction.blocks, hot_extraction.names))
                 end true
             ]
             Err(e) -> [
@@ -589,10 +600,19 @@ fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_roo
     end ProjectSignatures(sigs, disc.warnings)
 ]
 
-fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, deps_names: List<Str>, deps_versions: List<Str>) -> Str [
+fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, needs_sandbox: Bool, needs_hot_reload: Bool, deps_names: List<Str>, deps_versions: List<Str>) -> Str [
     let deps_lines = ""
     if needs_pyo3 [
         deps_lines = deps_lines + "pyo3 = { version = \"0.22\", features = [\"auto-initialize\"] }\n"
+    ]
+    if needs_native_js [
+        deps_lines = deps_lines + "rquickjs = \"0.6\"\n"
+    ]
+    if needs_sandbox [
+        deps_lines = deps_lines + "libc = \"0.2\"\n"
+    ]
+    if needs_hot_reload [
+        deps_lines = deps_lines + "libloading = \"0.8\"\n"
     ]
     let i = 0
     let n = deps_names.len()
@@ -747,6 +767,12 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     let extra = ps.sigs
 
     let needs_pyo3 = false
+    let needs_native_js = false
+    let needs_sandbox = false
+    let needs_hot_reload = false
+    let hot_reload_bodies: Dict<Str, Str> = dict()
+    let hot_reload_order: List<Str> = []
+    let hot_reload_source_path = ""
     let module_files: List<Str> = []
     let mod_names: List<Str> = []
     let crates_names: List<Str> = []
@@ -757,10 +783,36 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     let fn_ = disc.files.len()
     while fi < fn_ [
         let df = disc.files[fi].clone()
-        let r = transpile_program_with_extra(df.program.clone(), [], extra)
+        let r = transpile_program_with_extra(df.program.clone(), df.blocks.clone(), df.native_blocks.clone(), df.native_engines.clone(), df.sandbox_blocks.clone(), df.hot_reload_names.clone(), df.path.clone(), extra)
 
         if r.needs_pyo3 [
             needs_pyo3 = true
+        ]
+        if r.needs_native_js [
+            needs_native_js = true
+        ]
+        if r.needs_sandbox [
+            needs_sandbox = true
+        ]
+        if r.needs_hot_reload [
+            needs_hot_reload = true
+            if hot_reload_source_path == "" [
+                hot_reload_source_path = df.path.clone()
+            ]
+            let hri = 0
+            let hrn = r.hot_reload_order.len()
+            while hri < hrn [
+                let hrname = r.hot_reload_order[hri].clone()
+                match r.hot_reload_bodies.fetch(hrname.clone()) [
+                    Some(hrbody) -> [
+                        hot_reload_bodies.insert(hrname.clone(), hrbody)
+                        hot_reload_order.push(hrname)
+                    ]
+                    None -> [
+                    ]
+                ]
+                hri = hri + 1
+            ]
         ]
 
         let si = 0
@@ -813,7 +865,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     ]
 
     let cargo_toml_path = out_dir + "/Cargo.toml"
-    let cargo_text = cargo_toml_text(crate_name, needs_pyo3, crates_names.clone(), crates_versions.clone())
+    let cargo_text = cargo_toml_text(crate_name, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, crates_names.clone(), crates_versions.clone())
     match write_file(cargo_toml_path.clone(), cargo_text) [
         Ok(_v) -> [
         ]
@@ -822,7 +874,48 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
         ]
     ]
 
-    end ProjectResult(out_dir, main_rs_path, module_files, cargo_toml_path, needs_pyo3, crates_names, crates_versions, warnings)
+    if needs_hot_reload [
+        let hotlib_dir = out_dir + "/hotlib"
+        let hotlib_src_dir = hotlib_dir + "/src"
+        match create_dir(hotlib_src_dir.clone()) [
+            Ok(_v) -> [
+            ]
+            Err(e) -> [
+                warnings.push(hotlib_src_dir + ": " + e)
+            ]
+        ]
+        let hotlib_cargo_text = "[package]\nname = \"hotlib\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n"
+        match write_file(hotlib_dir + "/Cargo.toml", hotlib_cargo_text) [
+            Ok(_v) -> [
+            ]
+            Err(e) -> [
+                warnings.push(hotlib_dir + "/Cargo.toml: " + e)
+            ]
+        ]
+        let hotlib_lib_rs = "// Plik wygenerowany automatycznie przez hackerc - funkcje @hot_reload.\n// NIE EDYTUJ RECZNIE.\n#![allow(non_snake_case, unused_mut, dead_code)]\n\n"
+        let hoi = 0
+        let hon = hot_reload_order.len()
+        while hoi < hon [
+            let hname = hot_reload_order[hoi].clone()
+            match hot_reload_bodies.fetch(hname.clone()) [
+                Some(hbody) -> [
+                    hotlib_lib_rs = hotlib_lib_rs + hbody + "\n"
+                ]
+                None -> [
+                ]
+            ]
+            hoi = hoi + 1
+        ]
+        match write_file(hotlib_src_dir + "/lib.rs", hotlib_lib_rs) [
+            Ok(_v) -> [
+            ]
+            Err(e) -> [
+                warnings.push(hotlib_src_dir + "/lib.rs: " + e)
+            ]
+        ]
+    ]
+
+    end ProjectResult(out_dir, main_rs_path, module_files, cargo_toml_path, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, crates_names, crates_versions, warnings)
 ]
 
 !!! Demonstracyjne uzycie - `flat_module_name`/`module_file_path` na
