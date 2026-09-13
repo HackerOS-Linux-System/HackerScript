@@ -1554,6 +1554,15 @@ struct CodeGen [
     no_default_structs: Dict<Str, Bool>,
     needs_pyo3: Bool,
     direct_blocks: Dict<Str, Str>,
+    needs_native_js: Bool,
+    native_blocks: Dict<Str, Str>,
+    native_engines: Dict<Str, Str>,
+    needs_sandbox: Bool,
+    sandbox_blocks: Dict<Str, Str>,
+    hot_reload_input_names: Dict<Str, Bool>,
+    needs_hot_reload: Bool,
+    hot_reload_bodies: Dict<Str, Str>,
+    hot_reload_order: List<Str>,
     seen_real_toplevel_item: Bool,
     char_cache_params: Dict<Str, Bool>
 ]
@@ -2713,13 +2722,15 @@ impl CodeGen [
     !!! - Rust jest hostem. `direct_blocks: Dict<Str,Str>` (klucz = indeks
     !!! jako Str) jest DANE WEJSCIOWE - populowane PRZEZ WYCIAGANIE
     !!! surowego tekstu Pythona ZE ZRODLA `.hcs` PRZED tokenizacja
-    !!! (parytet z `_extract_direct_blocks` w transpiler.py) - TA
-    !!! EKSTRAKCJA nie jest przepisana w tej sesji (patrz "Ograniczenia"
-    !!! - `parser.hcs::parse_direct` juz to dokumentuje jako "siec
-    !!! bezpieczenstwa"), wiec `direct_blocks` bedzie PUSTY dopoki
-    !!! `transpiler.hcs` (przyszly krok) nie zacznie go wypelniac -
-    !!! `gen_direct` samo w sobie jest jednak KOMPLETNE i gotowe na TEN
-    !!! moment.
+    !!! (`transpiler.hcs::extract_direct_blocks`). STATUS (ta sesja):
+    !!! ekstrakcja BYLA juz zaimplementowana, ale `project.hcs`
+    !!! (sciezka wieloplikowa uzywana przez `hackerc build`/`virus
+    !!! build`) gubila jej wynik - `DiscoveredFile` nie mial pola na
+    !!! `blocks`, a `transpile_program_with_extra` bylo wolane z `[]`
+    !!! na sztywno. Naprawione + zweryfikowane end-to-end (patrz
+    !!! docs/ROADMAP.md) - `py.run` tez zamienione na `py.run_bound`,
+    !!! bo `py.run` wymaga cechy `gil-refs`, ktorej Cargo.toml nie
+    !!! wlacza (tylko `auto-initialize`).
     fun gen_direct(self, idx_text: Str) [
         self.needs_pyo3 = true
         let raw = ""
@@ -2734,10 +2745,141 @@ impl CodeGen [
         self.indent = self.indent + 1
         self.emit("Python::with_gil(|py| -> PyResult<()> {")
         self.indent = self.indent + 1
-        self.emit("py.run(" + python_raw_string(raw) + ", None, None)?;")
+        self.emit("py.run_bound(" + python_raw_string(raw) + ", None, None)?;")
         self.emit("Ok(())")
         self.indent = self.indent - 1
         self.emit("}).expect(\"direct[ ... ] (Python) block failed\");")
+        self.indent = self.indent - 1
+        self.emit("}")
+    ]
+
+    !!! `native {Silnik} [ ... ]` - analog `gen_direct`, ale dla
+    !!! surowego kodu w innym jezyku niz Python. Dzis: TYLKO
+    !!! `JavaScript` (silnik: QuickJS przez `rquickjs`, statycznie
+    !!! linkowany - `rquickjs-sys` kompiluje C QuickJS przez `cc`, wiec
+    !!! wymaga kompilatora C w srodowisku budujacym, ale NIE wymaga
+    !!! nowego toolchaina Rusta jak wiele czysto-Rustowych silnikow JS
+    !!! - patrz docs/ROADMAP.md, gdzie to zweryfikowano realna
+    !!! kompilacja). `console.log` jest doklejane recznie jako
+    !!! polyfill (surowy QuickJS nie ma globalnego `console`) -
+    !!! wypisuje przez Rustowe `println!`, wiec dziala tak samo jak
+    !!! `log()` w HackerScript. Nieznany `engine` (inny niz
+    !!! "JavaScript") -> tylko komentarz w wygenerowanym Ruscie, bez
+    !!! polamanego kodu (parytet z fallbackiem `gen_get_import` dla
+    !!! nieznanego `source`).
+    fun gen_native(self, idx_text: Str) [
+        let raw = ""
+        match self.native_blocks.fetch(idx_text) [
+            Some(r) -> [
+                raw = r
+            ]
+            None -> [
+            ]
+        ]
+        let engine = ""
+        match self.native_engines.fetch(idx_text) [
+            Some(e) -> [
+                engine = e
+            ]
+            None -> [
+            ]
+        ]
+        if engine != "JavaScript" [
+            self.emit("// native {" + engine + "} [ ... ] - nieobslugiwany silnik (dzis dostepne: \"JavaScript\"), pomijam blok")
+            end
+        ]
+        self.needs_native_js = true
+        self.emit("{")
+        self.indent = self.indent + 1
+        self.emit("let __hks_native_rt = rquickjs::Runtime::new().expect(\"native{JavaScript} blok: nie udalo sie utworzyc srodowiska QuickJS\");")
+        self.emit("let __hks_native_ctx = rquickjs::Context::full(&__hks_native_rt).expect(\"native{JavaScript} blok: nie udalo sie utworzyc kontekstu QuickJS\");")
+        self.emit("__hks_native_ctx.with(|ctx| {")
+        self.indent = self.indent + 1
+        self.emit("let __hks_global = ctx.globals();")
+        self.emit("fn __hks_js_value_to_string(v: &rquickjs::Value) -> String {")
+        self.indent = self.indent + 1
+        self.emit("if v.is_string() { return v.as_string().unwrap().to_string().unwrap_or_default(); }")
+        self.emit("if v.is_number() { return v.as_number().unwrap().to_string(); }")
+        self.emit("if v.is_bool() { return v.as_bool().unwrap().to_string(); }")
+        self.emit("if v.is_null() { return \"null\".to_string(); }")
+        self.emit("if v.is_undefined() { return \"undefined\".to_string(); }")
+        self.emit("format!(\"{:?}\", v)")
+        self.indent = self.indent - 1
+        self.emit("}")
+        self.emit("let __hks_console_log = rquickjs::Function::new(ctx.clone(), |args: rquickjs::function::Rest<rquickjs::Value>| { let parts: Vec<String> = args.0.iter().map(__hks_js_value_to_string).collect(); println!(\"{}\", parts.join(\" \")); }).expect(\"native{JavaScript} blok: nie udalo sie zarejestrowac console.log\");")
+        self.emit("let __hks_console = rquickjs::Object::new(ctx.clone()).expect(\"native{JavaScript} blok: nie udalo sie utworzyc obiektu console\");")
+        self.emit("__hks_console.set(\"log\", __hks_console_log).expect(\"native{JavaScript} blok: nie udalo sie ustawic console.log\");")
+        self.emit("__hks_global.set(\"console\", __hks_console).expect(\"native{JavaScript} blok: nie udalo sie ustawic console\");")
+        self.emit("let _: () = ctx.eval(" + python_raw_string(raw) + ").expect(\"native{JavaScript} blok: blad wykonania JS\");")
+        self.indent = self.indent - 1
+        self.emit("});")
+        self.indent = self.indent - 1
+        self.emit("}")
+    ]
+
+    !!! `$ polecenie $` - Zero-Cost Sandbox. Generuje
+    !!! `std::process::Command` z `pre_exec` (dziala w DZIECKU po
+    !!! `fork()`, przed `exec()`) wolajacym `libc::unshare()`:
+    !!! `CLONE_NEWNET` (izolacja sieci - proces widzi TYLKO `lo`) i
+    !!! `CLONE_NEWNS` (izolacja mount-namespace), po czym bind-remount
+    !!! `/` na read-only (`mount(MS_BIND)` + `mount(MS_REMOUNT|
+    !!! MS_BIND|MS_RDONLY)` - klasyczny trik, bez zadnych zewnetrznych
+    !!! narzedzi typu firejail/bwrap). Bezpieczna degradacja: brak
+    !!! uprawnien (np. brak CAP_SYS_ADMIN) -> `libc::write` NA STDERR
+    !!! (nie `eprintln!` - `pre_exec` dziala tuz po `fork()`, gdzie
+    !!! tylko funkcje async-signal-safe sa gwarantowanie bezpieczne;
+    !!! `libc::write` jest, alokujacy `println!` niekoniecznie) +
+    !!! polecenie i tak sie wykonuje, BEZ izolacji - ostrzezenie
+    !!! zamiast cichego fejla, zgodnie ze specyfikacja. Zweryfikowane
+    !!! w tej sesji w izolowanym teście PRZED wpisaniem tutaj (patrz
+    !!! docs/ROADMAP.md): proces w `CLONE_NEWNET` widzi tylko `lo`
+    !!! (bez `eth0`), zapis do `/` po bind-remount-ro konczy sie
+    !!! realnym "Read-only file system". Izoluje TYLKO podproces
+    !!! (`sh -c ...`), NIE kod HackerScript/Rust dzialajacy w tym
+    !!! samym procesie - patrz docs/ROADMAP.md.
+    fun gen_sandbox(self, idx_text: Str) [
+        let raw = ""
+        match self.sandbox_blocks.fetch(idx_text) [
+            Some(r) -> [
+                raw = r
+            ]
+            None -> [
+            ]
+        ]
+        self.needs_sandbox = true
+        self.emit("{")
+        self.indent = self.indent + 1
+        self.emit("let mut __hks_sandbox_cmd = std::process::Command::new(\"sh\");")
+        self.emit("__hks_sandbox_cmd.arg(\"-c\").arg(" + python_raw_string(raw) + ");")
+        self.emit("unsafe {")
+        self.indent = self.indent + 1
+        self.emit("use std::os::unix::process::CommandExt;")
+        self.emit("__hks_sandbox_cmd.pre_exec(|| {")
+        self.indent = self.indent + 1
+        self.emit("if libc::unshare(libc::CLONE_NEWNET) != 0 {")
+        self.indent = self.indent + 1
+        self.emit("let __m = b\"[hackerc-sandbox] OSTRZEZENIE: brak uprawnien do izolacji sieci (CLONE_NEWNET) - uruchamiam BEZ izolacji sieciowej\\n\";")
+        self.emit("libc::write(2, __m.as_ptr() as *const libc::c_void, __m.len());")
+        self.indent = self.indent - 1
+        self.emit("}")
+        self.emit("if libc::unshare(libc::CLONE_NEWNS) == 0 {")
+        self.indent = self.indent + 1
+        self.emit("let __root = std::ffi::CString::new(\"/\").unwrap();")
+        self.emit("libc::mount(__root.as_ptr(), __root.as_ptr(), std::ptr::null(), libc::MS_BIND | libc::MS_REC, std::ptr::null());")
+        self.emit("libc::mount(std::ptr::null(), __root.as_ptr(), std::ptr::null(), libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY, std::ptr::null());")
+        self.indent = self.indent - 1
+        self.emit("} else {")
+        self.indent = self.indent + 1
+        self.emit("let __m = b\"[hackerc-sandbox] OSTRZEZENIE: brak uprawnien do izolacji systemu plikow (CLONE_NEWNS) - uruchamiam BEZ izolacji fs\\n\";")
+        self.emit("libc::write(2, __m.as_ptr() as *const libc::c_void, __m.len());")
+        self.indent = self.indent - 1
+        self.emit("}")
+        self.emit("Ok(())")
+        self.indent = self.indent - 1
+        self.emit("});")
+        self.indent = self.indent - 1
+        self.emit("}")
+        self.emit("__hks_sandbox_cmd.status().expect(\"$ ... $ (Zero-Cost Sandbox) blok: nie udalo sie uruchomic polecenia\");")
         self.indent = self.indent - 1
         self.emit("}")
     ]
@@ -2751,6 +2893,16 @@ impl CodeGen [
         if shape.is_call and shape.ident_name == "__direct__" and shape.args.len() == 1 [
             let idx_text = self.expr_number_lit_value(shape.args[0].clone())
             self.gen_direct(idx_text)
+            end
+        ]
+        if shape.is_call and shape.ident_name == "__native__" and shape.args.len() == 1 [
+            let idx_text = self.expr_number_lit_value(shape.args[0].clone())
+            self.gen_native(idx_text)
+            end
+        ]
+        if shape.is_call and shape.ident_name == "__sandbox__" and shape.args.len() == 1 [
+            let idx_text = self.expr_number_lit_value(shape.args[0].clone())
+            self.gen_sandbox(idx_text)
             end
         ]
         if shape.is_call and shape.ident_name == "log" [
@@ -3160,7 +3312,96 @@ impl CodeGen [
     !!! funkcja = nowy zasieg zmiennych, patrz uwaga o `env_vars` przy
     !!! `CodeGen` wyzej), deklaruje parametry, i emituje sygnature z
     !!! auto-`&`/`&mut` (`param_type_str`) + cialo (`gen_stmts`).
+    !!! `@hot_reload fun nazwa() [ ... ]` (v1: bez parametrow, Void) -
+    !!! cialo NIE trafia do glownego crate'a jako zwykla `fn`. Zamiast
+    !!! tego: (1) przekierowanie `self.output`/`self.indent` na chwile
+    !!! do swiezego bufora (ten sam mechanizm co normalny `gen_stmts`,
+    !!! zero duplikacji logiki generowania wyrazen/instrukcji), (2)
+    !!! wyemitowanie `#[no_mangle] pub extern "C" fn` do tego bufora,
+    !!! (3) zapisanie zawartosci bufora do `self.hot_reload_bodies`
+    !!! (trafi do `hotlib/src/lib.rs` przez `project.hcs`), (4)
+    !!! przywrocenie oryginalnego `self.output`, (5) wyemitowanie DO
+    !!! GLOWNEGO crate'a tylko `static AtomicPtr` + cienkiego
+    !!! wrappera, ktory laduje `__hks_hot_reload` (patrz
+    !!! `transpiler.hcs::hot_reload_runtime_block`) i skacze przez
+    !!! wskaznik. Zweryfikowany mechanizm (nie tylko deklaracja) -
+    !!! patrz docs/ROADMAP.md.
+    fun gen_hot_reload_fun(self, name: Str, body: List<Stmt>) [
+        let saved_output = self.output.clone()
+        let saved_indent = self.indent
+        self.output = []
+        self.indent = 0
+        self.current_type_params = []
+        self.current_ret_type = none()
+        self.env_vars = dict()
+        self.emit("#[no_mangle]")
+        self.emit("pub extern \"C\" fn " + name + "() {")
+        self.indent = self.indent + 1
+        self.gen_stmts(body)
+        self.indent = self.indent - 1
+        self.emit("}")
+        self.emit("")
+        let captured = self.output.clone()
+        let joined = ""
+        let ci = 0
+        let cn = captured.len()
+        while ci < cn [
+            joined = joined + captured[ci]
+            if ci < cn - 1 [
+                joined = joined + "\n"
+            ]
+            ci = ci + 1
+        ]
+        self.hot_reload_bodies.insert(name.clone(), joined)
+        self.hot_reload_order.push(name.clone())
+        self.needs_hot_reload = true
+
+        self.output = saved_output
+        self.indent = saved_indent
+
+        self.emit("static HKS_HOT_PTR_" + name + ": std::sync::atomic::AtomicPtr<()> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());")
+        self.emit("pub fn " + name + "() {")
+        self.indent = self.indent + 1
+        self.emit("__hks_hot_reload::ensure_started();")
+        self.emit("let __hks_ptr = HKS_HOT_PTR_" + name + ".load(std::sync::atomic::Ordering::Acquire);")
+        self.emit("if __hks_ptr.is_null() {")
+        self.indent = self.indent + 1
+        self.emit("eprintln!(\"[hackerc-hot-reload] " + name + ": hotlib jeszcze nie zaladowany\");")
+        self.emit("return;")
+        self.indent = self.indent - 1
+        self.emit("}")
+        self.emit("let __hks_f: extern \"C\" fn() = unsafe { std::mem::transmute(__hks_ptr) };")
+        self.emit("__hks_f();")
+        self.indent = self.indent - 1
+        self.emit("}")
+        self.emit("")
+    ]
+
     fun gen_fun(self, name: Str, params: List<Param>, ret_type: Option<TypeRef>, body: List<Stmt>, type_params: List<Str>) [
+        let is_marked_hot = false
+        match self.hot_reload_input_names.fetch(name.clone()) [
+            Some(_v) -> [
+                is_marked_hot = true
+            ]
+            None -> [
+            ]
+        ]
+        if is_marked_hot [
+            let v1_ok = params.len() == 0
+            match ret_type.clone() [
+                Some(_rt) -> [
+                    v1_ok = false
+                ]
+                None -> [
+                ]
+            ]
+            if v1_ok [
+                self.gen_hot_reload_fun(name, body)
+                end
+            ] else [
+                self.emit("// @hot_reload \"" + name + "\" zignorowane: v1 wspiera TYLKO funkcje bez parametrow i bez wartosci zwracanej (Void) - kompiluje sie normalnie, bez hot-reloadu")
+            ]
+        ]
         self.current_type_params = type_params.clone()
         let gen_head = self.generic_head(type_params)
         self.env_vars = dict()
@@ -3557,9 +3798,10 @@ impl CodeGen [
 !!! konstruktora bylo by niezgodnoscia typow (`&Signatures` vs
 !!! `Signatures`) - **bug znaleziony i naprawiony w TEJ sesji**, ten sam
 !!! rodzaj co `extra_variant_names.clone()` w typecheck.hcs (krok 5/N).
-fun new_codegen(sigs: Signatures, boxed_fields: Dict<Str, Str>, mut_params: Dict<Str, Bool>, method_mut_params: Dict<Str, Bool>, variant_arity: Dict<Str, Int>, no_default_structs: Dict<Str, Bool>, direct_blocks: Dict<Str, Str>) -> CodeGen [
+fun new_codegen(sigs: Signatures, boxed_fields: Dict<Str, Str>, mut_params: Dict<Str, Bool>, method_mut_params: Dict<Str, Bool>, variant_arity: Dict<Str, Int>, no_default_structs: Dict<Str, Bool>, direct_blocks: Dict<Str, Str>, native_blocks: Dict<Str, Str>, native_engines: Dict<Str, Str>, sandbox_blocks: Dict<Str, Str>, hot_reload_names: Dict<Str, Bool>) -> CodeGen [
     let env_vars: Dict<Str, Option<TypeRef>> = dict()
-    end CodeGen(sigs.clone(), env_vars, variant_arity, boxed_fields, method_mut_params, mut_params, [], none(), [], 0, no_default_structs, false, direct_blocks, false, dict())
+    let empty_hr_bodies: Dict<Str, Str> = dict()
+    end CodeGen(sigs.clone(), env_vars, variant_arity, boxed_fields, method_mut_params, mut_params, [], none(), [], 0, no_default_structs, false, direct_blocks, false, native_blocks, native_engines, false, sandbox_blocks, hot_reload_names, false, empty_hr_bodies, [], false, dict())
 ]
 
 !!! Punkt wejscia - parytet z `CodeGen.gen_program()`. Liczy WSZYSTKIE
@@ -3588,7 +3830,11 @@ fun gen_program(prog: Program) -> List<Str> [
     let varity = build_variant_arity(sigs.clone())
     let ndstructs = compute_no_default_structs(sigs.clone(), info.boxed_fields.clone())
     let empty_direct_blocks: Dict<Str, Str> = dict()
-    let gen = new_codegen(sigs, info.boxed_fields, mparams, mmparams, varity, ndstructs, empty_direct_blocks)
+    let empty_native_blocks: Dict<Str, Str> = dict()
+    let empty_native_engines: Dict<Str, Str> = dict()
+    let empty_sandbox_blocks: Dict<Str, Str> = dict()
+    let empty_hot_reload_names: Dict<Str, Bool> = dict()
+    let gen = new_codegen(sigs, info.boxed_fields, mparams, mmparams, varity, ndstructs, empty_direct_blocks, empty_native_blocks, empty_native_engines, empty_sandbox_blocks, empty_hot_reload_names)
 
     let i = 0
     let n = prog.body.len()
@@ -3653,7 +3899,10 @@ fun main() [
     let empty_vars: Dict<Str, Option<TypeRef>> = dict()
     let empty_dict5: Dict<Str, Bool> = dict()
     let empty_dict6: Dict<Str, Str> = dict()
-    let gen = CodeGen(empty_sigs, empty_vars, empty_dict1, empty_dict2, empty_dict3, empty_dict4, [], some(TypeRef("Str", none(), none())), [], 0, empty_dict5, false, empty_dict6, false, dict())
+    let empty_dict7: Dict<Str, Str> = dict()
+    let empty_hr_names: Dict<Str, Bool> = dict()
+    let empty_hr_bodies2: Dict<Str, Str> = dict()
+    let gen = CodeGen(empty_sigs, empty_vars, empty_dict1, empty_dict2, empty_dict3, empty_dict4, [], some(TypeRef("Str", none(), none())), [], 0, empty_dict5, false, empty_dict6, false, empty_dict7, empty_dict7, false, empty_dict7, empty_hr_names, false, empty_hr_bodies2, [], false, dict())
     gen.gen_stmts(body)
 
     let i = 0
