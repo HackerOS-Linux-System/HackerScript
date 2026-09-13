@@ -18,14 +18,18 @@ const VERSION: Str = "0.2"
 !!! zmienily.
 const BUILD_STEP_COUNT: Int = 4
 
-!!! `parse()` ale z tym samym preprocessingiem `direct [ ... ]` co
-!!! transpilacja - inaczej pliki z `direct[...]` psulyby `check`/`lint`
-!!! mylacym bledem parsera (`direct` jest normalnym slowem kluczowym
-!!! TYLKO na etapie preprocessingu, patrz transpiler.hcs). Parytet z
-!!! `_parse_with_direct`.
-fun parse_with_direct(source: Str) -> Program [
+!!! `parse()` ale z tym samym preprocessingiem `direct [ ... ]` I
+!!! `native {Silnik} [ ... ]` co transpilacja - inaczej pliki z
+!!! `direct[...]`/`native{...}[...]` psulyby `check`/`lint` mylacym
+!!! bledem parsera (`direct`/`native` sa normalnymi slowami
+!!! kluczowymi TYLKO na etapie preprocessingu, patrz transpiler.hcs).
+!!! Parytet z `_parse_with_direct`.
+fun parse_with_direct(source: Str, src_path: Str) -> Program [
     let extraction = extract_direct_blocks(source)
-    end parse(extraction.stripped_source)
+    let native_extraction = extract_native_blocks(extraction.stripped_source, native_dirname(src_path))
+    let sandbox_extraction = extract_sandbox_blocks(native_extraction.stripped_source)
+    let hot_extraction = extract_hot_reload_markers(sandbox_extraction.stripped_source)
+    end parse(hot_extraction.stripped_source)
 ]
 
 !!! Wypisuje diagnostyki (opcjonalnie przefiltrowane po `severity`) i
@@ -69,7 +73,7 @@ fun cmd_check(src_path: Str) -> Int [
     ]
     match read_file(src_path.clone()) [
         Ok(source) -> [
-            let program = parse_with_direct(source.clone())
+            let program = parse_with_direct(source.clone(), src_path.clone())
             let diags = check_program(program, [])
             let errors = print_diagnostics(source, src_path.clone(), diags.clone(), "")
             if errors > 0 [
@@ -95,7 +99,7 @@ fun cmd_lint(src_path: Str) -> Int [
     ]
     match read_file(src_path.clone()) [
         Ok(source) -> [
-            let program = parse_with_direct(source.clone())
+            let program = parse_with_direct(source.clone(), src_path.clone())
             let diags = check_program(program, [])
             let warnings: List<Diagnostic> = []
             let i = 0
@@ -135,7 +139,7 @@ fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<St
     match read_file(src_path.clone()) [
         Ok(source) -> [
             print_progress_line("Kompilacja " + src_path, 1, BUILD_STEP_COUNT, "parsowanie", true)
-            let program = parse_with_direct(source.clone())
+            let program = parse_with_direct(source.clone(), src_path.clone())
 
             !!! Sygnatury calego projektu PRZED check_program - inaczej
             !!! konstruktor wariantu z zaimportowanego 'enum' (np.
@@ -198,6 +202,15 @@ fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<St
             ]
             if result.needs_pyo3 [
                 log(c_bold_cyan("hackerc build:") + " wykryto direct[ ... ] -> Cargo.toml zawiera zaleznosc pyo3 (auto-initialize)")
+            ]
+            if result.needs_native_js [
+                log(c_bold_cyan("hackerc build:") + " wykryto native{JavaScript} [ ... ] -> Cargo.toml zawiera zaleznosc rquickjs")
+            ]
+            if result.needs_sandbox [
+                log(c_bold_cyan("hackerc build:") + " wykryto $ ... $ (Zero-Cost Sandbox) -> Cargo.toml zawiera zaleznosc libc")
+            ]
+            if result.needs_hot_reload [
+                log(c_bold_cyan("hackerc build:") + " wykryto @hot_reload -> utworzono " + out_dir + "/hotlib/ (zbuduj osobno: cargo build --release --manifest-path " + out_dir + "/hotlib/Cargo.toml), ustaw HKS_HOT_OUT_DIR=" + out_dir + " przed uruchomieniem")
             ]
             if result.crates_deps_names.len() > 0 [
                 log(c_bold_cyan("hackerc build:") + " zaleznosci Cargo z get<crates:...>: " + join_str_list(result.crates_deps_names, ", "))
