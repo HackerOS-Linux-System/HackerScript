@@ -49,7 +49,7 @@ fun is_keyword(w: Str) -> Bool [
                "return", "end", "get", "import", "using", "direct", "manual",
                "true", "false", "null", "struct", "enum", "match", "break",
                "continue", "gc", "pub", "self", "and", "or", "not", "extern", "as",
-               "impl", "include"]
+               "impl", "include", "native"]
     let i = 0
     while i < kws.len() [
         if kws[i] == w [
