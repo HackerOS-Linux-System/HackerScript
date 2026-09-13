@@ -6,7 +6,12 @@ include <codegen>
 !!! Wynik transpilacji - parytet z `@dataclass TranspileResult`.
 struct TranspileResult [
     rust_code: Str,
-    needs_pyo3: Bool
+    needs_pyo3: Bool,
+    needs_native_js: Bool,
+    needs_sandbox: Bool,
+    needs_hot_reload: Bool,
+    hot_reload_bodies: Dict<Str, Str>,
+    hot_reload_order: List<Str>
 ]
 
 !!! Sygnatury/mut-maps "z zewnatrz" (z INNYCH plikow .hcs, zaimportowanych
@@ -209,6 +214,34 @@ fun direct_blocks_to_dict(blocks: List<Str>) -> Dict<Str, Str> [
         i = i + 1
     ]
     end out
+]
+
+fun names_to_bool_dict(names: List<Str>) -> Dict<Str, Bool> [
+    let out: Dict<Str, Bool> = dict()
+    let i = 0
+    let n = names.len()
+    while i < n [
+        out.insert(names[i].clone(), true)
+        i = i + 1
+    ]
+    end out
+]
+
+!!! Lokalny odpowiednik `lexer.hcs::trim_str` - NIE Rustowego
+!!! `.trim()` (ktory zwraca `&str`, niezgodne z `Str` w wygenerowanym
+!!! kodzie) - ten sam wzorzec duplikacji malych helperow per-plik co
+!!! reszta bootstrapu (patrz `lexer.hcs`/`project.hcs`).
+fun trim_str_local(s: Str) -> Str [
+    let n = s.len()
+    let start = 0
+    while start < n and (s.char_at(start) == " " or s.char_at(start) == "\t" or s.char_at(start) == "\r" or s.char_at(start) == "\n") [
+        start = start + 1
+    ]
+    let stop = n
+    while stop > start and (s.char_at(stop - 1) == " " or s.char_at(stop - 1) == "\t" or s.char_at(stop - 1) == "\r" or s.char_at(stop - 1) == "\n") [
+        stop = stop - 1
+    ]
+    end s.slice(start, stop)
 ]
 
 fun is_direct_ident_char(c: Str) -> Bool [
@@ -421,11 +454,529 @@ fun extract_direct_blocks(source: Str) -> DirectExtraction [
     end DirectExtraction(out, blocks)
 ]
 
+!!! Wynik `extract_native_blocks` - analogicznie do `DirectExtraction`,
+!!! ale kazdy blok ma tez `engine` (tresc `{Engine}` przed `[...]`),
+!!! wiec dwie rownolegle listy (`blocks[i]` <-> `engines[i]`) zamiast
+!!! jednej - HackerScript nie ma generycznych tupli (patrz komentarz
+!!! przy `DirectExtraction`).
+!!! Lokalny join/dirname dla importu plikow w `native {X} <sciezka>` -
+!!! ten sam wzorzec duplikacji co `trim_str_local` (patrz tam) zamiast
+!!! ciagnac `get <std:path>` do samego bootstrapu kompilatora.
+fun native_join_path(base_dir: Str, rel: Str) -> Str [
+    if rel.len() > 0 and rel.char_at(0) == "/" [
+        end rel
+    ]
+    if base_dir.len() == 0 [
+        end rel
+    ]
+    if base_dir.char_at(base_dir.len() - 1) == "/" [
+        end base_dir + rel
+    ]
+    end base_dir + "/" + rel
+]
+
+struct NativeExtraction [
+    stripped_source: Str,
+    blocks: List<Str>,
+    engines: List<Str>
+]
+
+!!! Analog `extract_direct_blocks` dla `native {Silnik} [ ... ]`.
+!!! Roznica: po slowie kluczowym `native` oczekiwany jest `{nazwa}`
+!!! (silnik wykonawczy - dzis: `JavaScript`) PRZED blokiem `[ ... ]`.
+!!! Dwie formy:
+!!!   native {JavaScript} [ ... ]              - inline
+!!!   native {JavaScript} <sciezka/do/pliku.js> - import calego pliku
+!!!   native {JavaScript} <sciezka.js> [ ... ]  - import + inline PO
+!!!     nim (inline moze wywolywac funkcje zdefiniowane w pliku)
+!!! `base_dir` to katalog pliku .hcs (dla wzglednych sciezek importu)
+!!! - `project.hcs::parse_and_add` przekazuje katalog `path`, a
+!!! `transpile_source_full` (pojedynczy plik bez projektu) katalog
+!!! `filename`. Zamienia caly blok na `__native__(N)`, tak samo jak
+!!! `direct [ ... ]` na `__direct__(N)` - `codegen.hcs::gen_native`
+!!! odczytuje `engines[N]` zeby wybrac silnik (dzis: tylko QuickJS
+!!! przez `rquickjs`, statycznie linkowany - patrz docs/ROADMAP.md).
+fun extract_native_blocks(source: Str, base_dir: Str) -> NativeExtraction [
+    let blocks: List<Str> = []
+    let engines: List<Str> = []
+    let out = ""
+    let i = 0
+    let n = source.len()
+    while i < n [
+        let found_at = -1
+        let scan = i
+        while scan < n and found_at == -1 [
+            if scan + 6 <= n and source.slice(scan, scan + 6) == "native" [
+                let before_ok = scan == 0 or not is_direct_ident_char(source.char_at(scan - 1))
+                let after_ok = scan + 6 >= n or not is_direct_ident_char(source.char_at(scan + 6))
+                if before_ok and after_ok [
+                    found_at = scan
+                ]
+            ]
+            scan = scan + 1
+        ]
+        if found_at == -1 [
+            out = out + source.slice(i, n)
+            i = n
+        ] else [
+            let start = found_at
+            out = out + source.slice(i, start)
+            let j = start + 6
+            while j < n and (source.char_at(j) == " " or source.char_at(j) == "\t") [
+                j = j + 1
+            ]
+            if j >= n or source.char_at(j) != "{" [
+                !! Brak `{Silnik}` po `native` - nie nasz blok, zostaw
+                !! tekst jak jest, parser go i tak odrzuci.
+                out = out + source.slice(start, j)
+                i = j
+            ] else [
+                let brace_start = j + 1
+                let brace_end = -1
+                let bk = brace_start
+                while bk < n and brace_end == -1 [
+                    if source.char_at(bk) == "}" [
+                        brace_end = bk
+                    ]
+                    bk = bk + 1
+                ]
+                if brace_end == -1 [
+                    log("[transpiler.hcs] niezamkniety '{' po 'native' (brak '}')")
+                    i = n
+                ] else [
+                    let engine = trim_str_local(source.slice(brace_start, brace_end))
+                    let k2 = brace_end + 1
+                    while k2 < n and (source.char_at(k2) == " " or source.char_at(k2) == "\t") [
+                        k2 = k2 + 1
+                    ]
+                    let imported = ""
+                    let has_import = false
+                    let bail = false
+                    if k2 < n and source.char_at(k2) == "<" [
+                        has_import = true
+                        let path_start = k2 + 1
+                        let gt_at = -1
+                        let gk = path_start
+                        while gk < n and gt_at == -1 [
+                            if source.char_at(gk) == ">" [
+                                gt_at = gk
+                            ]
+                            gk = gk + 1
+                        ]
+                        if gt_at == -1 [
+                            log("[transpiler.hcs] niezamkniety '<' po native {" + engine + "} (brak '>')")
+                            i = n
+                            bail = true
+                        ] else [
+                            let rel_path = trim_str_local(source.slice(path_start, gt_at))
+                            let full_path = native_join_path(base_dir, rel_path)
+                            match read_file(full_path) [
+                                Ok(content) -> [
+                                    imported = content
+                                ]
+                                Err(e) -> [
+                                    log("[transpiler.hcs] native {" + engine + "} <" + rel_path + "> - nie udalo sie wczytac (" + full_path + "): " + e)
+                                    imported = "// [hackerc] BLAD IMPORTU: " + full_path
+                                ]
+                            ]
+                            k2 = gt_at + 1
+                            while k2 < n and (source.char_at(k2) == " " or source.char_at(k2) == "\t" or source.char_at(k2) == "\n" or source.char_at(k2) == "\r") [
+                                k2 = k2 + 1
+                            ]
+                        ]
+                    ]
+                    if bail [
+                        !! juz obsluzone wyzej (niezamkniety '<') - petla
+                        !! glowna konczy sie po tej iteracji (i = n)
+                    ] elif k2 >= n or source.char_at(k2) != "[" [
+                        if has_import [
+                            !! sam import, bez bloku inline - koniec
+                            !! bloku `native` konczy sie zaraz po '>'
+                            let idx = blocks.len()
+                            blocks.push(imported)
+                            engines.push(engine)
+                            out = out + "__native__(" + (idx as Str) + ")"
+                            i = k2
+                        ] else [
+                            out = out + source.slice(start, k2)
+                            i = k2
+                        ]
+                    ] else [
+                        let depth = 0
+                        let k = k2
+                        let closed_at = -1
+                        while k < n and closed_at == -1 [
+                            let c = source.char_at(k)
+                            if c == "[" [
+                                depth = depth + 1
+                            ] elif c == "]" [
+                                depth = depth - 1
+                                if depth == 0 [
+                                    closed_at = k
+                                ]
+                            ]
+                            k = k + 1
+                        ]
+                        if closed_at == -1 [
+                            log("[transpiler.hcs] niezamkniety blok native {...} [ ... ]")
+                            i = n
+                        ] else [
+                            let raw = source.slice(k2 + 1, closed_at)
+                            let dedented = dedent_text(raw)
+                            let combined = dedented
+                            if has_import [
+                                combined = imported + "\n" + dedented
+                            ]
+                            let idx = blocks.len()
+                            blocks.push(combined)
+                            engines.push(engine)
+                            out = out + "__native__(" + (idx as Str) + ")"
+                            i = closed_at + 1
+                        ]
+                    ]
+                ]
+            ]
+        ]
+    ]
+    end NativeExtraction(out, blocks, engines)
+]
+
+struct HotReloadExtraction [
+    stripped_source: Str,
+    names: List<Str>
+]
+
+!!! `@hot_reload` przed `fun nazwa() [ ... ]` na najwyzszym poziomie.
+!!! CELOWO NIE dotyka `FunDecl` w AST (arnosc uzywana w 25+ miejscach
+!!! dopasowan w calym kompilatorze - patrz docs/ROADMAP.md) - zamiast
+!!! tego, tak jak `direct`/`native`/`$`, dziala na surowym tekscie
+!!! PRZED tokenizacja: usuwa `@hot_reload` ze zrodla i osobno
+!!! zapamietuje NAZWE funkcji ktora po nim nastepuje (skanujac do
+!!! najblizszego `fun <ident>(`). `codegen.hcs::gen_fun` dostaje ta
+!!! liste jako zwykly `Dict<Str,Bool>` (parytet ze sposobem w jaki
+!!! `direct_blocks`/`native_blocks` sa przekazywane) i sam decyduje
+!!! jak wyemitowac cialo - AST FunDecl pozostaje CALKOWICIE
+!!! nieswiadome hot-reloadu.
+!!! v1 OGRANICZENIE (jawne): tylko funkcje BEZ parametrow i BEZ
+!!! wartosci zwracanej (`Void`) na najwyzszym poziomie - patrz
+!!! `codegen.hcs::gen_fun` gdzie to jest wymuszane z fallbackiem
+!!! (normalna kompilacja + komentarz ostrzegawczy), NIE cichym
+!!! zignorowaniem.
+!!! Ogolny skaner markera (slowo z granica) POMIJAJACY `"..."` i
+!!! `!!`/`!!!` - wyciagniety z `sandbox_dollar_scan` po tym, jak
+!!! (w TEJ SESJI) dokladnie ten sam brak swiadomosci komentarzy dwa
+!!! razy z rzedu popsul WLASNY kod kompilatora przy self-hostingu:
+!!! najpierw `$ ... $` w komentarzu o Zero-Cost Sandbox, potem
+!!! `@hot_reload` we WLASNYM komunikacie logu ponizej ("wykryto
+!!! @hot_reload -> ...") zostalo zjedzone jako fantomowy marker.
+!!! Uzywany teraz przez `extract_hot_reload_markers` - `direct`/
+!!! `native`/`$` maja WLASNE, starsze skanowanie (dzialajace, bo byly
+!!! pisane PRZED odkryciem tego wzorca bledu) - nieujednolicone
+!!! celowo, zeby nie ryzykowac zmiany czegos co juz dziala i jest
+!!! zweryfikowane, w pospiechu koncowki sesji.
+fun text_marker_scan(source: Str, from: Int, marker: Str) -> Int [
+    let n = source.len()
+    let mlen = marker.len()
+    let in_string = false
+    let escape_next = false
+    let k = from
+    while k < n [
+        let c = source.char_at(k)
+        if in_string [
+            if escape_next [
+                escape_next = false
+            ] elif c == "\\" [
+                escape_next = true
+            ] elif c == "\"" [
+                in_string = false
+            ]
+        ] else [
+            if c == "\"" [
+                in_string = true
+            ] elif c == "!" and k + 1 < n and source.char_at(k + 1) == "!" [
+                let eol = k
+                while eol < n and source.char_at(eol) != "\n" [
+                    eol = eol + 1
+                ]
+                k = eol
+            ] elif k + mlen <= n and source.slice(k, k + mlen) == marker [
+                let before_ok = k == 0 or not is_direct_ident_char(source.char_at(k - 1))
+                let after_ok = k + mlen >= n or not is_direct_ident_char(source.char_at(k + mlen))
+                if before_ok and after_ok [
+                    end k
+                ]
+            ]
+        ]
+        k = k + 1
+    ]
+    end -1
+]
+
+fun extract_hot_reload_markers(source: Str) -> HotReloadExtraction [
+    let names: List<Str> = []
+    let out = ""
+    let i = 0
+    let n = source.len()
+    let marker = "@hot_reload"
+    let mlen = marker.len()
+    while i < n [
+        let found_at = text_marker_scan(source, i, marker)
+        if found_at == -1 [
+            out = out + source.slice(i, n)
+            i = n
+        ] else [
+            out = out + source.slice(i, found_at)
+            let after = found_at + mlen
+            !! Szukamy "fun <ident>(" zaraz po markerze (pomijajac
+            !! biale znaki/nowe linie) - to jest NAZWA funkcji ktora
+            !! ma byc hot-reloadowalna. Sam marker jest usuwany ze
+            !! zrodla (parser go nie zna).
+            let fk = after
+            while fk < n and (source.char_at(fk) == " " or source.char_at(fk) == "\t" or source.char_at(fk) == "\n" or source.char_at(fk) == "\r") [
+                fk = fk + 1
+            ]
+            if fk + 3 <= n and source.slice(fk, fk + 3) == "fun" and (fk + 3 >= n or not is_direct_ident_char(source.char_at(fk + 3))) [
+                let nk = fk + 3
+                while nk < n and (source.char_at(nk) == " " or source.char_at(nk) == "\t") [
+                    nk = nk + 1
+                ]
+                let name_start = nk
+                while nk < n and is_direct_ident_char(source.char_at(nk)) [
+                    nk = nk + 1
+                ]
+                if nk > name_start [
+                    names.push(source.slice(name_start, nk))
+                ] else [
+                    log("[transpiler.hcs] @hot_reload: nie znaleziono nazwy funkcji po 'fun'")
+                ]
+            ] else [
+                log("[transpiler.hcs] @hot_reload: oczekiwano 'fun <nazwa>(...)' zaraz po markerze")
+            ]
+            i = after
+        ]
+    ]
+    end HotReloadExtraction(out, names)
+]
+
+struct SandboxExtraction [
+    stripped_source: Str,
+    blocks: List<Str>
+]
+
+!!! `$ polecenie powloki $` - Zero-Cost Sandbox. `$` nie jest uzywany
+!!! NIGDZIE indziej w gramatyce (sprawdzone - brak w lexer.hcs/
+!!! parser.hcs), wiec skanowanie jest prostsze niz `direct`/`native`
+!!! (brak potrzeby sprawdzania granicy slowa - `$` to symbol, nie
+!!! identyfikator). Szuka NAJBLIZSZEGO kolejnego `$` jako zamkniecia -
+!!! ZNANE OGRANICZENIE: samo polecenie powloki nie moze zawierac `$`
+!!! (np. `$HOME`, `$(...)`) bez przedwczesnego zamkniecia bloku -
+!!! patrz docs/ROADMAP.md. Zamienia na `__sandbox__(N)`, tak samo jak
+!!! `direct`/`native` - `codegen.hcs::gen_sandbox` generuje
+!!! `std::process::Command` z `pre_exec` wolajacym `libc::unshare()`
+!!! (CLONE_NEWNET + CLONE_NEWNS) + bind-remount-ro na `/`, z
+!!! bezpieczna degradacja (ostrzezenie na stderr, NIE cichy fejl) gdy
+!!! brak uprawnien - zweryfikowane w tej sesji realnym testem izolacji
+!!! sieci (proces w izolacji widzi TYLKO `lo`, bez `eth0`) i systemu
+!!! plikow (zapis do `/` konczy sie "Read-only file system").
+!!! Znaleziony samoistnie w tej sesji: bez swiadomosci cudzyslowow,
+!!! `$` wewnatrz zwyklego stringu HackerScript (np. w tresci LOGA -
+!!! "wykryto $ ... $ (...)") jest mylony z delimiterem sandboxa,
+!!! psujac string. Naprawione ponizej: skanowanie `dollar_at` pomija
+!!! `$` wewnatrz `"..."` (ze swiadomoscia `\"` escape) - NIE chroni
+!!! przed `$` w komentarzach `!!`/`!!!` (waskopasmowe, rzadsze ryzyko,
+!!! wciaz warte odnotowania - patrz docs/ROADMAP.md).
+!!! Rozszerzone PO realnym, samoistnie znalezionym bledzie w tej
+!!! sesji: pierwsza wersja chronila TYLKO `"..."` (cudzyslowy), ale
+!!! NIE komentarze `!!`/`!!!` - a doc-komentarze W TYM SAMYM PLIKU
+!!! opisujace skladnie `$ ... $` (jak ten tutaj) same zawieraja pare
+!!! `$`, wiec przy self-hostingu zostaly potraktowane jako blok
+!!! sandboxa i pozarly `struct SandboxExtraction` w calosci. Teraz
+!!! skanowanie pomija TEZ `!!`/`!!!` do konca linii (tak jak prawdziwy
+!!! lexer.hcs), nie tylko `"..."`.
+fun sandbox_dollar_scan(source: Str, from: Int) -> Int [
+    let n = source.len()
+    let in_string = false
+    let escape_next = false
+    let k = from
+    while k < n [
+        let c = source.char_at(k)
+        if in_string [
+            if escape_next [
+                escape_next = false
+            ] elif c == "\\" [
+                escape_next = true
+            ] elif c == "\"" [
+                in_string = false
+            ]
+        ] else [
+            if c == "\"" [
+                in_string = true
+            ] elif c == "!" and k + 1 < n and source.char_at(k + 1) == "!" [
+                !! Komentarz !!/!!! - pomijamy do konca linii (albo
+                !! do konca zrodla, jesli to ostatnia linia).
+                let eol = k
+                while eol < n and source.char_at(eol) != "\n" [
+                    eol = eol + 1
+                ]
+                k = eol
+            ] elif c == "$" [
+                end k
+            ]
+        ]
+        k = k + 1
+    ]
+    end -1
+]
+
+fun extract_sandbox_blocks(source: Str) -> SandboxExtraction [
+    let blocks: List<Str> = []
+    let out = ""
+    let i = 0
+    let n = source.len()
+    while i < n [
+        let dollar_at = sandbox_dollar_scan(source, i)
+        if dollar_at == -1 [
+            out = out + source.slice(i, n)
+            i = n
+        ] else [
+            out = out + source.slice(i, dollar_at)
+            let close_at = -1
+            let ck = dollar_at + 1
+            while ck < n and close_at == -1 [
+                if source.char_at(ck) == "$" [
+                    close_at = ck
+                ]
+                ck = ck + 1
+            ]
+            if close_at == -1 [
+                log("[transpiler.hcs] niezamkniety sandbox-blok (brak drugiego '$')")
+                out = out + source.slice(dollar_at, n)
+                i = n
+            ] else [
+                let raw = source.slice(dollar_at + 1, close_at)
+                let dedented = trim_str_local(dedent_text(raw))
+                let idx = blocks.len()
+                blocks.push(dedented)
+                out = out + "__sandbox__(" + (idx as Str) + ")"
+                i = close_at + 1
+            ]
+        ]
+    ]
+    end SandboxExtraction(out, blocks)
+]
+
 !!! Rdzen transpilacji - parytet z `transpile_source_full` (patrz
 !!! uwaga na gorze pliku co do bledow: brak `Result`, zawsze sciezka
 !!! sukcesu). `extra` domyslnie `empty_extra_signatures()` dla
 !!! pojedynczego pliku bez kontekstu projektu.
-fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, extra: ExtraSignatures) -> TranspileResult [
+!!! Wspolny blok Rust (emitowany RAZ na crate, tylko gdy istnieje co
+!!! najmniej jedna funkcja `@hot_reload`) - watcher-watek + load-and-
+!!! swap-all + lazy-start. Kazda funkcja `@hot_reload` (patrz
+!!! `codegen.hcs::gen_fun`) ma WLASNY `static HKS_HOT_PTR_<NAZWA>:
+!!! AtomicPtr<()>` - ten blok je WSZYSTKIE odswieza po kazdym udanym
+!!! przeladowaniu `hotlib` (jeden .so, jedna rekompilacja na zmiane,
+!!! niezaleznie od liczby funkcji w nim). `default_source_path` to
+!!! sciezka pliku .hcs w ktorym byl zdefiniowany PIERWSZY hot_reload
+!!! (v1: watcher sledzi jeden plik - wieloplikowy hot-reload to
+!!! rozszerzenie na przyszlosc, patrz docs/ROADMAP.md) - baked-in jako
+!!! DOMYSLNA wartosc `HKS_HOT_SOURCE`, nadpisywalna zmienna
+!!! srodowiskowa (dla przeniesienia binarki gdzie indziej niz miejsce
+!!! kompilacji). `HKS_HOT_OUT_DIR` (katalog z `hotlib/`) MUSI byc
+!!! ustawiony jako zmienna srodowiskowa - transpiler.hcs (ten plik)
+!!! nie zna finalnego `out_dir`, to decyzja `project.hcs` podejmowana
+!!! PO transpilacji, wiec nie da sie tego wpisac na sztywno tutaj bez
+!!! naruszenia warstw - jawny blad startowy zamiast cichego zgadywania
+!!! zlej sciezki.
+!!! DOWIEDZIONE DZIALANIE (nie tylko deklaracja): identyczny mechanizm
+!!! (unikalna sciezka .so per generacja + AtomicPtr + watcher na mtime)
+!!! zweryfikowany w izolowanym prototypie PRZED wpisaniem tutaj -
+!!! dwie kolejne podmiany kodu ZYWEGO procesu (ten sam PID), bez
+!!! restartu - patrz docs/ROADMAP.md.
+fun hot_reload_runtime_block(names: List<Str>, default_source_path: Str) -> List<Str> [
+    let out: List<Str> = []
+    out.push("")
+    out.push("mod __hks_hot_reload {")
+    out.push("    use std::sync::atomic::{AtomicU64, Ordering};")
+    out.push("    use std::time::{Duration, SystemTime};")
+    out.push("    static HKS_GEN: AtomicU64 = AtomicU64::new(0);")
+    out.push("    fn hks_source_path() -> String { std::env::var(\"HKS_HOT_SOURCE\").unwrap_or_else(|_| " + python_raw_string(default_source_path) + ".to_string()) }")
+    out.push("    fn hks_out_dir() -> String { std::env::var(\"HKS_HOT_OUT_DIR\").unwrap_or_else(|_| { eprintln!(\"[hackerc-hot-reload] BLAD: zmienna srodowiskowa HKS_HOT_OUT_DIR nie jest ustawiona (katalog z 'hotlib/' - ten sam co przekazany do 'hackerc build -o')\"); String::new() }) }")
+    out.push("    fn hks_hackerc_path() -> String { std::env::var(\"HKS_HACKERC_PATH\").unwrap_or_else(|_| \"hackerc\".to_string()) }")
+    out.push("    pub fn load_and_swap_all() -> bool {")
+    out.push("        let out_dir = hks_out_dir();")
+    out.push("        if out_dir.is_empty() { return false; }")
+    out.push("        let gen = HKS_GEN.fetch_add(1, Ordering::SeqCst);")
+    out.push("        let built = format!(\"{}/hotlib/target/release/libhotlib.so\", out_dir);")
+    out.push("        let unique = format!(\"{}/hotlib/libhotlib_{}.so\", out_dir, gen);")
+    out.push("        if std::fs::copy(&built, &unique).is_err() {")
+    out.push("            eprintln!(\"[hackerc-hot-reload] nie udalo sie skopiowac {} -> {}\", built, unique);")
+    out.push("            return false;")
+    out.push("        }")
+    out.push("        let mut ok = true;")
+    out.push("        unsafe {")
+    out.push("            match libloading::Library::new(&unique) {")
+    out.push("                Ok(lib) => {")
+    let i = 0
+    let n = names.len()
+    while i < n [
+        let nm = names[i].clone()
+        out.push("                    match lib.get::<extern \"C\" fn()>(b\"" + nm + "\\0\") {")
+        out.push("                        Ok(sym) => { super::HKS_HOT_PTR_" + nm + ".store(*sym as *mut (), Ordering::Release); }")
+        out.push("                        Err(e) => { eprintln!(\"[hackerc-hot-reload] brak symbolu " + nm + ": {:?}\", e); ok = false; }")
+        out.push("                    }")
+        i = i + 1
+    ]
+    out.push("                    std::mem::forget(lib);")
+    out.push("                }")
+    out.push("                Err(e) => { eprintln!(\"[hackerc-hot-reload] zaladowanie {} nie powiodlo sie: {:?}\", unique, e); ok = false; }")
+    out.push("            }")
+    out.push("        }")
+    out.push("        if ok { eprintln!(\"[hackerc-hot-reload] przeladowano (gen {})\", gen); }")
+    out.push("        ok")
+    out.push("    }")
+    out.push("    fn watch_loop() {")
+    out.push("        let src = hks_source_path();")
+    out.push("        let out_dir = hks_out_dir();")
+    out.push("        let hackerc = hks_hackerc_path();")
+    out.push("        let mut last: Option<SystemTime> = None;")
+    out.push("        loop {")
+    out.push("            if let Ok(meta) = std::fs::metadata(&src) {")
+    out.push("                if let Ok(mtime) = meta.modified() {")
+    out.push("                    match last {")
+    out.push("                        None => { last = Some(mtime); }")
+    out.push("                        Some(prev) if mtime > prev => {")
+    out.push("                            last = Some(mtime);")
+    out.push("                            eprintln!(\"[hackerc-hot-reload] wykryto zmiane {}, przebudowuje...\", src);")
+    out.push("                            let step1 = std::process::Command::new(&hackerc).args([\"build\", src.as_str(), \"-o\", out_dir.as_str()]).status();")
+    out.push("                            let step1_ok = matches!(step1, Ok(s) if s.success());")
+    out.push("                            if !step1_ok { eprintln!(\"[hackerc-hot-reload] hackerc build nie powiodlo sie\"); }")
+    out.push("                            else {")
+    out.push("                                let manifest = format!(\"{}/hotlib/Cargo.toml\", out_dir);")
+    out.push("                                let step2 = std::process::Command::new(\"cargo\").args([\"build\", \"--release\", \"--manifest-path\", manifest.as_str()]).status();")
+    out.push("                                let step2_ok = matches!(step2, Ok(s) if s.success());")
+    out.push("                                if !step2_ok { eprintln!(\"[hackerc-hot-reload] cargo build (hotlib) nie powiodlo sie\"); }")
+    out.push("                                else { load_and_swap_all(); }")
+    out.push("                            }")
+    out.push("                        }")
+    out.push("                        Some(_) => {}")
+    out.push("                    }")
+    out.push("                }")
+    out.push("            }")
+    out.push("            std::thread::sleep(Duration::from_millis(500));")
+    out.push("        }")
+    out.push("    }")
+    out.push("    pub fn ensure_started() {")
+    out.push("        static ONCE: std::sync::Once = std::sync::Once::new();")
+    out.push("        ONCE.call_once(|| {")
+    out.push("            load_and_swap_all();")
+    out.push("            std::thread::spawn(watch_loop);")
+    out.push("        });")
+    out.push("    }")
+    out.push("}")
+    end out
+]
+
+fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native_blocks: List<Str>, native_engines: List<Str>, sandbox_blocks: List<Str>, hot_reload_names: List<Str>, default_source_path: Str, extra: ExtraSignatures) -> TranspileResult [
     let local_sigs = collect_signatures(prog.clone())
     let sigs = merge_signatures_with_extra(local_sigs, extra)
     let local_mut = compute_mut_params(prog.clone())
@@ -435,7 +986,11 @@ fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, extra:
     let varity = build_variant_arity(sigs.clone())
     let ndstructs = compute_no_default_structs(sigs.clone(), info.boxed_fields.clone())
     let direct_dict = direct_blocks_to_dict(direct_blocks)
-    let gen = new_codegen(sigs, info.boxed_fields, mut_params, method_mut_params, varity, ndstructs, direct_dict)
+    let native_dict = direct_blocks_to_dict(native_blocks)
+    let native_engine_dict = direct_blocks_to_dict(native_engines)
+    let sandbox_dict = direct_blocks_to_dict(sandbox_blocks)
+    let hot_reload_dict = names_to_bool_dict(hot_reload_names)
+    let gen = new_codegen(sigs, info.boxed_fields, mut_params, method_mut_params, varity, ndstructs, direct_dict, native_dict, native_engine_dict, sandbox_dict, hot_reload_dict)
 
     let i = 0
     let n = prog.body.len()
@@ -464,6 +1019,16 @@ fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, extra:
         oi = oi + 1
     ]
 
+    if gen.needs_hot_reload [
+        let hb = hot_reload_runtime_block(gen.hot_reload_order.clone(), default_source_path)
+        let hbi = 0
+        let hbn = hb.len()
+        while hbi < hbn [
+            rust_lines.push(hb[hbi].clone())
+            hbi = hbi + 1
+        ]
+    ]
+
     let rust_code = ""
     let ri = 0
     let rn = rust_lines.len()
@@ -476,7 +1041,7 @@ fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, extra:
     ]
     rust_code = rust_code + "\n"
 
-    end TranspileResult(rust_code, gen.needs_pyo3)
+    end TranspileResult(rust_code, gen.needs_pyo3, gen.needs_native_js, gen.needs_sandbox, gen.needs_hot_reload, gen.hot_reload_bodies, gen.hot_reload_order)
 ]
 
 !!! Transpiluje zrodlo `.hcs` -> `TranspileResult` (kod Rust + info czy
@@ -486,10 +1051,31 @@ fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, extra:
 !!! naglowka wygenerowanego pliku - laczenie wielu plikow/nazewnictwo
 !!! modulow to zadanie `project.hcs`, ktore uzywa go osobno przy
 !!! zapisie `src/{flat_name}.rs`.
+!!! Katalog nadrzedny sciezki (dla wzglednych importow w
+!!! `native {X} <sciezka>`) - "a/b/c.hcs" -> "a/b", "c.hcs" -> "".
+fun native_dirname(p: Str) -> Str [
+    let n = p.len()
+    let last_slash = -1
+    let i = 0
+    while i < n [
+        if p.char_at(i) == "/" [
+            last_slash = i
+        ]
+        i = i + 1
+    ]
+    if last_slash == -1 [
+        end ""
+    ]
+    end p.slice(0, last_slash)
+]
+
 fun transpile_source_full(source: Str, filename: Str, module_name: Str, extra: ExtraSignatures) -> TranspileResult [
     let extraction = extract_direct_blocks(source)
-    let prog = parse(extraction.stripped_source)
-    end transpile_program_with_extra(prog, extraction.blocks, extra)
+    let native_extraction = extract_native_blocks(extraction.stripped_source, native_dirname(filename))
+    let sandbox_extraction = extract_sandbox_blocks(native_extraction.stripped_source)
+    let hot_extraction = extract_hot_reload_markers(sandbox_extraction.stripped_source)
+    let prog = parse(hot_extraction.stripped_source)
+    end transpile_program_with_extra(prog, extraction.blocks, native_extraction.blocks, native_extraction.engines, sandbox_extraction.blocks, hot_extraction.names, filename, extra)
 ]
 
 !!! Skrot: zwraca tylko kod Rust (bez `needs_pyo3`) - parytet z
