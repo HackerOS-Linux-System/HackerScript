@@ -65,7 +65,8 @@ impl Parser [
     !!! parser.py.
     fun expect(self, kind: TokKind, value: Option<Str>) -> Token [
         if not self.check(kind, value) [
-            log("[hackerc-self] parser: nieoczekiwany token", self.cur().value)
+            let bad = self.cur()
+            log("[hackerc-self] parser: nieoczekiwany token '" + bad.value + "' w linii " + (bad.line as Str) + ", kolumna " + (bad.col as Str))
         ]
         end self.advance()
     ]
@@ -763,7 +764,7 @@ impl Parser [
             self.expect(Close, none())
             end ListLit(items)
         ]
-        log("[hackerc-self] parser: nieoczekiwany token", t.value)
+        log("[hackerc-self] parser: nieoczekiwany token '" + t.value + "' w linii " + (t.line as Str) + ", kolumna " + (t.col as Str))
         self.advance()
         end NullLit
     ]
