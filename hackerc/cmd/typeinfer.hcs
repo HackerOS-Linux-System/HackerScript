@@ -625,35 +625,3 @@ fun main() [
     log("a+b ->", type_opt_to_str(infer_expr_type(e3, env)))
     log("make().x ->", type_opt_to_str(infer_expr_type(e4, env)))
 ]
-
-!!! ## Ograniczenia tej wersji (patrz docs/ROADMAP.md)
-!!!
-!!! - `types_equal` porownuje generyki TYLKO do 1 poziomu zagniezdzenia
-!!!   (`ta.generic.name == tb.generic.name`, bez dalszej rekursji w
-!!!   `generic.generic`) - patrz uwaga projektowa na gorze pliku
-!!!   (dlaczego rekurencja przez wywolanie funkcji nie dziala tutaj).
-!!!   W praktyce w calym tym repo generyki nigdy nie sa zagniezdzone
-!!!   glebiej niz `Zewnetrzny<Wewnetrzny>` (np. `List<Int>`,
-!!!   `Dict<Str,Stmt>`, `Option<TypeRef>`), wiec to ograniczenie nie ma
-!!!   dzis praktycznego znaczenia.
-!!! - Brak iteracji po `Dict` (`.keys()`/`.values()`/`.items()` nie
-!!!   istnieja w tym bootstrapie) - `Signatures.variant_owner` to
-!!!   obejscie zbudowane Z GORY podczas `collect_signatures` zamiast
-!!!   iterowac `enums` pozniej (jak w Pythonie).
-!!! - `is_declared` uzywa `Dict.contains` (parytet z `name in
-!!!   self.vars` w Pythonie).
-!!! - **Nowe, potwierdzone dzis ograniczenie codegen.py**: `log(...)`
-!!!   ZAWSZE uzywa formatu `{}` (Display), nigdy `{:?}` (Debug) -
-!!!   struct/enum w tym bootstrapie dostaja `Debug`, NIGDY `Display`,
-!!!   wiec `log(jakis_struct_lub_enum)` (w tym `Option<T>` gdzie T to
-!!!   struct/enum) NIE SKOMPILUJE SIE. `log()` jest bezpieczny TYLKO
-!!!   dla Int/Float/Str/Bool. Patrz `type_opt_to_str` powyzej.
-!!! - NIEPODPIETE jeszcze pod `parser.hcs` (parser sam nie wywoluje
-!!!   `infer_expr_type` - to zrobi dopiero `typecheck.hcs`, kolejny
-!!!   krok, ktory rzeczywiscie UZYWA wynikow inferencji do
-!!!   wykrywania niezgodnosci typow).
-!!! - NIEPRZETESTOWANE na prawdziwym wejsciu w tym srodowisku (brak
-!!!   rustc) - zweryfikowane strukturalnie przez `hackerc check`/
-!!!   `build` i BARDZO dokladna inspekcje wygenerowanego Rusta (patrz
-!!!   docs/ROADMAP.md - ten plik mial NAJWIECEJ potencjalnych pulapek
-!!!   typu Box/referencja ze wszystkich dotychczasowych krokow).
