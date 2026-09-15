@@ -1,6 +1,4 @@
-
-! Przykladowy program HackerScript pokazujacy podstawowa skladnie.
-using <1.2>
+using <0.3>
 
 !! Zwraca sume dwoch liczb calkowitych.
 fun add(a: Int, b: Int) -> Int [
