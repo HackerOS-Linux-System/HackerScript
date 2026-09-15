@@ -1,6 +1,6 @@
 [package]
 name = "hackerscript-libs"
-version = "0.0.1"
+version = "0.3"
 description = "Workspace bibliotek HackerScript: core/ i std/ (100% kod w .hcs)."
 
 [workspace]
