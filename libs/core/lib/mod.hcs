@@ -1,9 +1,3 @@
-!! core - punkt wejscia pakietu core.
-!!
-!! UWAGA: HackerScript nie ma jeszcze prawdziwego systemu modulow
-!! WEWNATRZ jednego pakietu (kazdy plik core/lib/**/*.hcs jest
-!! importowany osobno przez get<core:sciezka::do::pliku> z zewnatrz -
-!! patrz docs/SYNTAX.md). Dostepne moduly:
 !!   get <core:memory::arena>            - bump allocator
 !!   get <core:memory::chained_arena>    - rosnaca arena lancuchowa
 !!   get <core:memory::stack_allocator>  - alokator stosowy (LIFO)
