@@ -11,7 +11,61 @@ struct TranspileResult [
     needs_sandbox: Bool,
     needs_hot_reload: Bool,
     hot_reload_bodies: Dict<Str, Str>,
-    hot_reload_order: List<Str>
+    hot_reload_order: List<Str>,
+    !! ZMIANA 0.3 - `native` `{C++}` `[ ... ]`, patrz `CodeGen::needs_native_cpp`.
+    needs_native_cpp: Bool,
+    !! ZMIANA 0.3 - jedna linia "kind\tname\ttryb" na kazdy
+    !! `get <extern:...> use <...>` / `get <c:...>` / `get <cpp:...>`
+    !! znaleziony na najwyzszym poziomie TEGO pliku (patrz
+    !! `collect_extern_link_specs` nizej) - `project.hcs` zbiera to ze
+    !! WSZYSTKICH plikow modulu i zapisuje do sidecar
+    !! `.hks-extern-links.txt` obok wygenerowanego Cargo.toml, ktory
+    !! `virus build` czyta, zeby dopisac linkowanie do `build.rs`
+    !! (patrz `virus/cmd/build.hcs::build_wire_extern_dependencies`) -
+    !! `hackerc` i `virus` sa OSOBNYMI binarkami (`virus` woła
+    !! `hackerc` przez `run_command`, patrz `hackerc_bridge.hcs`), wiec
+    !! plik na dysku jest jedynym kanalem miedzy nimi (parytet z tym,
+    !! jak `.vira-meta.txt` przenosi informacje o bibliotekach Vira).
+    extern_link_specs: List<Str>,
+    !! DODANE - patrz `CodeGen::native_cpp_sources`/`native_cpp_order`.
+    native_cpp_sources: Dict<Str, Str>,
+    native_cpp_order: List<Str>
+]
+
+!!! ZMIANA 0.3 - skanuje najwyzszy poziom `prog` w poszukiwaniu
+!!! `GetImportStmt` ze zrodlem "extern"/"c"/"cpp" i zwraca kazdy jako
+!!! linie "kind\tname\ttryb" (tryb pusty dla "c"/"cpp" - te zrodla nie
+!!! maja `use <...>` w skladni, patrz `parse_get_import`) - wejscie dla
+!!! `collect_project_extern_links` w project.hcs.
+fun collect_extern_link_specs(prog: Program) -> List<Str> [
+    let out: List<Str> = []
+    let i = 0
+    let n = prog.body.len()
+    while i < n [
+        let s = prog.body[i].clone()
+        match s [
+            GetImportStmt(source, name, version, details) -> [
+                if source == "extern" [
+                    let mode = "dynamic"
+                    match version [
+                        Some(m) -> [
+                            mode = m
+                        ]
+                        None -> [
+                        ]
+                    ]
+                    out.push("extern\t" + name + "\t" + mode)
+                ]
+                if source == "c" or source == "cpp" [
+                    out.push(source + "\t" + name + "\t")
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+        i = i + 1
+    ]
+    end out
 ]
 
 !!! Sygnatury/mut-maps "z zewnatrz" (z INNYCH plikow .hcs, zaimportowanych
@@ -459,7 +513,7 @@ fun extract_direct_blocks(source: Str) -> DirectExtraction [
 !!! wiec dwie rownolegle listy (`blocks[i]` <-> `engines[i]`) zamiast
 !!! jednej - HackerScript nie ma generycznych tupli (patrz komentarz
 !!! przy `DirectExtraction`).
-!!! Lokalny join/dirname dla importu plikow w `native {X} <sciezka>` -
+!!! Lokalny join/dirname dla importu plikow w `native` `{X}` `<sciezka>` -
 !!! ten sam wzorzec duplikacji co `trim_str_local` (patrz tam) zamiast
 !!! ciagnac `get <std:path>` do samego bootstrapu kompilatora.
 fun native_join_path(base_dir: Str, rel: Str) -> Str [
@@ -481,13 +535,13 @@ struct NativeExtraction [
     engines: List<Str>
 ]
 
-!!! Analog `extract_direct_blocks` dla `native {Silnik} [ ... ]`.
+!!! Analog `extract_direct_blocks` dla `native` `{Silnik}` `[ ... ]`.
 !!! Roznica: po slowie kluczowym `native` oczekiwany jest `{nazwa}`
 !!! (silnik wykonawczy - dzis: `JavaScript`) PRZED blokiem `[ ... ]`.
 !!! Dwie formy:
-!!!   native {JavaScript} [ ... ]              - inline
-!!!   native {JavaScript} <sciezka/do/pliku.js> - import calego pliku
-!!!   native {JavaScript} <sciezka.js> [ ... ]  - import + inline PO
+!!!   native` `{JavaScript}` `[ ... ]              - inline
+!!!   native` `{JavaScript}` `<sciezka/do/pliku.js> - import calego pliku
+!!!   native` `{JavaScript}` `<sciezka.js>` `[ ... ]  - import + inline PO
 !!!     nim (inline moze wywolywac funkcje zdefiniowane w pliku)
 !!! `base_dir` to katalog pliku .hcs (dla wzglednych sciezek importu)
 !!! - `project.hcs::parse_and_add` przekazuje katalog `path`, a
@@ -1041,7 +1095,7 @@ fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native
     ]
     rust_code = rust_code + "\n"
 
-    end TranspileResult(rust_code, gen.needs_pyo3, gen.needs_native_js, gen.needs_sandbox, gen.needs_hot_reload, gen.hot_reload_bodies, gen.hot_reload_order)
+    end TranspileResult(rust_code, gen.needs_pyo3, gen.needs_native_js, gen.needs_sandbox, gen.needs_hot_reload, gen.hot_reload_bodies, gen.hot_reload_order, gen.needs_native_cpp, collect_extern_link_specs(prog), gen.native_cpp_sources, gen.native_cpp_order)
 ]
 
 !!! Transpiluje zrodlo `.hcs` -> `TranspileResult` (kod Rust + info czy
@@ -1052,7 +1106,7 @@ fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native
 !!! modulow to zadanie `project.hcs`, ktore uzywa go osobno przy
 !!! zapisie `src/{flat_name}.rs`.
 !!! Katalog nadrzedny sciezki (dla wzglednych importow w
-!!! `native {X} <sciezka>`) - "a/b/c.hcs" -> "a/b", "c.hcs" -> "".
+!!! `native` `{X}` `<sciezka>`) - "a/b/c.hcs" -> "a/b", "c.hcs" -> "".
 fun native_dirname(p: Str) -> Str [
     let n = p.len()
     let last_slash = -1
@@ -1123,26 +1177,3 @@ fun main() [
     log("needs_pyo3:", result.needs_pyo3)
     log("dlugosc wygenerowanego Rusta:", result.rust_code.len())
 ]
-
-!!! ## Ograniczenia tej wersji (patrz docs/ROADMAP.md)
-!!!
-!!! - Brak `Result`/wyjatkow dla bledow PARSERA (patrz uwaga na gorze
-!!!   pliku) - `parser.hcs::parse()` sam w sobie best-effort/`log`-uje.
-!!!   `transpile_file` zwraca `Result` TYLKO dla bledow I/O
-!!!   (`read_file`/`write_file`), nie dla bledow skladni - inny zakres
-!!!   niz Pythonowy `TranspileError`, ktory pokrywa oba.
-!!! - `dedent_text` liczy wciecie PO DLUGOSCI wiodacych spacji/tabow,
-!!!   nie po identycznosci znak-po-znaku jak prawdziwy
-!!!   `textwrap.dedent` (patrz komentarz przy `common_leading_whitespace`)
-!!!   - wystarczajace dla `.hcs`, ktory zawsze wciska spacjami
-!!!   konsekwentnie, ale technicznie inny algorytm niz Python dla
-!!!   mieszanych spacje/taby.
-!!! - `module_name` jest przyjmowany, ale nie trafia jeszcze do
-!!!   wygenerowanego naglowka (parytet z dzisiejszym stanem
-!!!   `codegen.hcs::gen_program`, patrz tam) - `project.hcs` uzywa go
-!!!   TYLKO do nazwania pliku wyjsciowego `src/{module_name}.rs`.
-!!! - NIEPRZETESTOWANE na prawdziwym wejsciu w tym srodowisku bez
-!!!   pelnego `rustc`/`cargo` w oryginalnym stage0 - w TEJ sesji
-!!!   zweryfikowane strukturalnie (`hackerc check`) i, gdzie to mozliwe,
-!!!   przez faktyczne `cargo build` na wygenerowanym kodzie (patrz
-!!!   bootstrap/README.md, sekcja o tej sesji).
