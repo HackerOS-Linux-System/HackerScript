@@ -5,7 +5,13 @@ get <std:fs> import <create_dir_ok>
 include <cache>
 include <progress>
 
-const DEFAULT_HACKERC_VERSION: Str = "1.2"
+!!! ZMIANA 0.3 - poprzednia wartosc "1.2" byla pozostaloscia z
+!!! numeracji Pythonowego stage0 (sprzed bootstrapu na HackerScript) i
+!!! nie zgadzala sie z faktyczna linia wydan self-hostujacego
+!!! `hackerc` (0.1 -> 0.2 -> 0.3, patrz README.adoc,
+!!! <<historia-wersji>>) ani z przykladowym URL-em wydania GitHub
+!!! ponizej (`v0.0.1`) - naprawione tutaj.
+const DEFAULT_HACKERC_VERSION: Str = "0.3"
 
 !!! Nazwa assetu wydania GitHub - dokladnie `hackerc` (BEZ przyrostka
 !!! platformy) - te wydania sa dzis buildowane TYLKO dla Linux x86_64
