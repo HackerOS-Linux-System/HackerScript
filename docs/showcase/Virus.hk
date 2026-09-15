@@ -1,0 +1,8 @@
+[package]
+name = "showcase"
+version = "0.0"
+using = "0.3"
+description = "Ogromny przyklad pokazujacy jak najwiecej mozliwosci HackerScript w jednym pliku (0.3, wlacznie z nowym FFI: region/extern/native C++)."
+
+[build]
+entry = "cmd/main.hcs"
