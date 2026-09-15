@@ -12,10 +12,13 @@ niewielkiego fragmentu kodu, ktory nigdy nie bedzie wymagal wydajnosci.
 
 [cols="1,3"]
 |===
-| Status | *Bootstrap osiagniety* - `hackerc` (transpilator) i `virus`
+| Status | *Bootstrap osiagniety + FFI 0.3* - `hackerc` (transpilator) i `virus`
 (menedzer pakietow/narzedzie budowania) sa dzis w calosci napisane w
 samym HackerScript (`.hcs`), nie w Pythonie/Rust jak w wersji `0.0.1`.
-| Wersja | `0.1` (ta - self-hostujaca sie, wydawana na GitHub
+Od `0.3` dochodzi przeprojektowane FFI: `get <extern:...> use
+<static\|dynamic>` + `region [ ... ]`, `get <c:...>`/`get <cpp:...>`
+oraz `native {C++} [ ... ]`.
+| Wersja | `0.3` (ta - self-hostujaca sie, wydawana na GitHub
 Releases) - `0.0.1` to *zamrozona* wersja startowa sprzed bootstrapu
 (patrz <<historia-wersji>>).
 | Licencja | MIT (c) 2026 HackerOS Team
@@ -43,8 +46,15 @@ fun main() [
 ]
 ----
 
-Zobacz `docs/hello-world/` i `docs/module-demo/` - dzialajace
-przyklady, oraz `docs/SYNTAX.md` - pelny opis skladni.
+Zobacz `docs/hello-world/`, `docs/module-demo/`, `docs/showcase/`
+(ogromny, jednoplikowy przeglad niemal calego jezyka - zmienne,
+funkcje, struct/enum/match/impl, kolekcje, stringi, `manual[...]`,
+oraz FFI 0.3) i `docs/ffi-demo/` (minimalny, samodzielny przyklad
+samego FFI: `get<extern:...> use<...> + region`, `get<c:...>`/
+`get<cpp:...>`, i kompilowany build-time blok C++) - dzialajace
+przyklady, wszystkie zweryfikowane realna kompilacja i uruchomieniem
+(patrz naglowkowy komentarz kazdego pliku po instrukcje budowania).
+Oraz `docs/SYNTAX.md` - pelny opis skladni.
 
 == Struktura repozytorium
 
@@ -80,6 +90,8 @@ HackerScript/
   docs/
     hello-world/            minimalny dzialajacy przyklad (.hk + .hcs)
     module-demo/            przyklad systemu modulow (get <core:...>)
+    showcase/               ogromny, jednoplikowy przeglad jezyka (0.3)
+    ffi-demo/               samodzielny przyklad FFI 0.3 (extern/region/c/cpp)
     SYNTAX.md                 pelny opis skladni
     ROADMAP.md                 co jeszcze brakuje (szczegolowo, per-plik)
   scripts/                install.sh/remove.sh (HackerOS) + skrypty .hl
@@ -144,7 +156,7 @@ do `cargo build` w workspace Cargo.
 # hackerc i virus sa binarkami natywnymi (self-hosted) - najprosciej
 # pobrac gotowe wydanie:
 curl -L --fail -o hackerc \
-  https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v0.1/hackerc
+  https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v0.3/hackerc
 chmod +x hackerc
 
 ./hackerc check docs/hello-world/Virus.hk
@@ -191,22 +203,28 @@ miejscu (nie osobna linia per krok) - patrz nowy modul
 rozwijana - punkt odniesienia "skad zaczelismy".
 
 | `0.1`
-| *Ta wersja.* Bootstrap osiagniety: `hackerc` i `virus` przepisane w
-calosci na sam HackerScript (`.hcs`), kompilowane przez wlasny
-transpilator do Rusta. Pierwsze wydanie publikowane binarnie na
-GitHub Releases pod `v0.1` (stad mechanizm `using <0.1>` opisany
-wyzej pobiera wlasnie ta binarke).
+| *Bootstrap.* `hackerc` i `virus` przepisane w calosci na sam
+HackerScript (`.hcs`), kompilowane przez wlasny transpilator do
+Rusta. Pierwsze wydanie publikowane binarnie na GitHub Releases pod
+`v0.1`.
 
-| `0.2` / `0.3`
-| *Planowana.* Niezalezny backend generujacy kod maszynowy
-bezposrednio przez `get <crates:cranelift>`, *bez* zaleznosci od
-`rustc` w trakcie dzialania - zachowujac caly dzisiejszy front jezyka
-(lexer/parser/typecheck/typeinfer, `struct`/`enum`/`match`,
-`direct[...]`, system modulow `get<...>`) bez zmian. Motywacja:
-`rustc` jest ciezka zaleznoscia zewnetrzna i wolny do iteracji
-debugowej - Cranelift jako biblioteka pozwoliby `hackerc`/`virus` byc
-samowystarczalnym. Szczegoly i uzasadnienie: `docs/ROADMAP.md`,
-sekcja "Wersja 0.2/0.3 - niezalezny backend (Cranelift)".
+| `0.2`
+| *Wewnetrzna.* Kolorowe CLI i realny pasek postepu
+(`libs/std/lib/term.hcs`, `get <std:term>`) dla
+`hackerc build`/`check`/`lint`/`fmt` i `virus` odpowiednikow - patrz
+"Kolorowe CLI i pasek postepu" wyzej.
+
+| `0.3`
+| *Ta wersja.* Przeprojektowane FFI: stare, jedno-funkcyjne
+`extern "lib" fun nazwa(...)` zastapione przez
+`get <extern:sciezka> use <static\|dynamic>` + `region [ ... ]`
+(dowolnie wiele sygnatur naraz, powiazanych z jedna biblioteka).
+Dolozono `get <c:nazwa>`/`get <cpp:nazwa>` (zaleznosci C/C++ budowane
+przez crate `cc`) oraz `native {C++} [ ... ]` (analog
+`native {JavaScript}`, ale kompilowany build-time zamiast
+interpretowany). Mechanizm `using <wersja>` pobiera teraz `v0.3`
+(patrz "Szybki start" wyzej). Pelny opis nowej skladni:
+`docs/SYNTAX.md`, sekcja "FFI: extern/region/c/cpp".
 |===
 
 == Status projektu
@@ -230,17 +248,15 @@ bootstrapu (iteracja po `Dict`, `Set`, numery linii w AST, prawdziwe
 `ParseError`, `log()` dla struct/enum), uproszczenia per-plik
 (`codegen.hcs`/`typeinfer.hcs`/`project.hcs`/`cli.hcs`/
 `formatter.hcs`/`parser.hcs`), luki w `libs/std` poza rdzeniem, oraz
-plan backendu Cranelift - jest w *`docs/ROADMAP.md`*.
+gapy w swiezo dodanym FFI 0.3 (kompilacja wlasnego zrodla `.c`/`.cpp`
+z projektu przez `cc` zamiast linkowania systemowej biblioteki dla
+`get <c:...>`/`get <cpp:...>`) - jest w *`docs/ROADMAP.md`*.
 
 == Dokumentacja
 
-* `docs/SYNTAX.md` - pelny opis skladni. +
-  *UWAGA*: w tym stanie repozytorium ten plik jest referencjonowany z
-  dziesiatek komentarzy `!!!` w calym kodzie (`lexer.hcs`,
-  `libs/core/lib/mod.hcs`, i inne), ale sam plik jeszcze nie istnieje
-  - patrz `docs/ROADMAP.md`. Do czasu jego napisania jedynym pelnym
-  zrodlem prawdy o skladni jest sam kod `hackerc/cmd/parser.hcs` +
-  przyklady w `docs/hello-world/`/`docs/module-demo/`.
+* `docs/SYNTAX.md` - pelny opis skladni (w tym FFI 0.3:
+  `get <extern:...> use <...>` + `region [ ... ]`,
+  `get <c:...>`/`get <cpp:...>`, `native {C++} [ ... ]`).
 * `docs/ROADMAP.md` - co brakuje, szczegolowo i per-plik
 * Format `.hk`: https://hackeros-linux-system.github.io/HackerOS-Website/tools-docs/hk.html
 
