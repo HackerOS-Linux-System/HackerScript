@@ -1,0 +1,298 @@
+using <0.3>
+
+get <std:string> import <str_trim::str_contains::str_starts_with::str_ends_with::str_replace::str_repeat::str_split::str_join>
+
+!! ---- 1. Zmienne, stale, typy podstawowe -----------------------
+
+const PI: Float = 3.14159
+const APP_NAME: Str = "HackerScript Showcase"
+
+fun sekcja(tytul: Str) [
+    log("")
+    log("====", tytul, "====")
+]
+
+fun demo_zmienne() [
+    sekcja("1. Zmienne i typy podstawowe")
+    let liczba = 42
+    let pi: Float = PI
+    let tekst: Str = "hej"
+    let prawda: Bool = true
+    let nic: Option<Int> = none()
+    log("liczba =", liczba, " pi =", pi, " tekst =", tekst, " prawda =", prawda)
+    match nic [
+        Some(v) -> [
+            log("nic mialo wartosc:", v)
+        ]
+        None -> [
+            log("nic faktycznie jest puste (None)")
+        ]
+    ]
+]
+
+!! ---- 2. Funkcje, rekurencja ------------------------------------
+
+fun dodaj(a: Int, b: Int) -> Int [
+    end a + b
+]
+
+fun silnia(n: Int) -> Int [
+    if n <= 1 [
+        end 1
+    ]
+    end n * silnia(n - 1)
+]
+
+fun fib(n: Int) -> Int [
+    if n <= 1 [
+        end n
+    ]
+    end fib(n - 1) + fib(n - 2)
+]
+
+fun demo_funkcje() [
+    sekcja("2. Funkcje i rekurencja")
+    log("dodaj(2, 3) =", dodaj(2, 3))
+    log("silnia(5) =", silnia(5))
+    log("fib(10) =", fib(10))
+]
+
+!! ---- 3. Sterowanie przeplywem: if/elif/else, while, for -------
+
+fun ocena(n: Int) -> Str [
+    if n < 0 [
+        end "ujemna"
+    ] elif n == 0 [
+        end "zero"
+    ] elif n < 10 [
+        end "mala dodatnia"
+    ] else [
+        end "duza dodatnia"
+    ]
+]
+
+fun demo_sterowanie() [
+    sekcja("3. Sterowanie przeplywem")
+    log("ocena(-5) =", ocena(-5))
+    log("ocena(0) =", ocena(0))
+    log("ocena(3) =", ocena(3))
+    log("ocena(100) =", ocena(100))
+
+    let i = 0
+    while i < 5 [
+        log("while i =", i)
+        i = i + 1
+    ]
+
+    for jezyk in ["Python", "Rust", "HackerScript"] [
+        if jezyk == "HackerScript" [
+            log(jezyk, "- to my!")
+        ] else [
+            log(jezyk, "- inspiracja")
+        ]
+    ]
+
+    let suma = 0
+    let k = 0
+    while k < 10 [
+        k = k + 1
+        if k == 3 [
+            continue
+        ]
+        if k > 7 [
+            break
+        ]
+        suma = suma + k
+    ]
+    log("suma (z continue/break) =", suma)
+]
+
+!! ---- 4. struct / enum / match / impl ----------------------------
+
+struct Point [
+    x: Int,
+    y: Int
+]
+
+impl Point [
+    fun dlugosc_kw(self) -> Int [
+        end (self.x * self.x) + (self.y * self.y)
+    ]
+
+    pub fun przesun(self, dx: Int, dy: Int) -> Point [
+        end Point(self.x + dx, self.y + dy)
+    ]
+]
+
+enum Ksztalt [
+    Kolo(Float),
+    Prostokat(Float, Float),
+    Trojkat(Float, Float),
+    Pusty
+]
+
+fun pole(k: Ksztalt) -> Float [
+    match k [
+        Kolo(r) -> [
+            end PI * r * r
+        ]
+        Prostokat(szer, wys) -> [
+            end szer * wys
+        ]
+        Trojkat(podstawa, wys) -> [
+            end 0.5 * podstawa * wys
+        ]
+        Pusty -> [
+            end 0.0
+        ]
+    ]
+]
+
+fun demo_struct_enum() [
+    sekcja("4. struct / enum / match / impl")
+    let p1 = Point(3, 4)
+    log("p1.dlugosc_kw() =", p1.dlugosc_kw())
+    let p2 = p1.przesun(1, 1)
+    log("p2 =", p2.x, p2.y)
+
+    let ksztalty = [Kolo(2.0), Prostokat(3.0, 4.0), Trojkat(6.0, 2.0), Pusty]
+    let i = 0
+    while i < ksztalty.len() [
+        log("pole ksztaltu", i, "=", pole(ksztalty[i]))
+        i = i + 1
+    ]
+]
+
+!! ---- 5. Listy, Dict, Option/Result ------------------------------
+
+fun suma_listy(xs: List<Int>) -> Int [
+    let total = 0
+    let i = 0
+    while i < xs.len() [
+        total = total + xs[i]
+        i = i + 1
+    ]
+    end total
+]
+
+fun bezpieczne_dzielenie(a: Int, b: Int) -> Result<Int, Str> [
+    if b == 0 [
+        end Err("dzielenie przez zero")
+    ]
+    end Ok(a / b)
+]
+
+fun demo_kolekcje() [
+    sekcja("5. Listy, Dict, Option/Result")
+    let liczby = [1, 2, 3, 4, 5]
+    log("suma_listy([1..5]) =", suma_listy(liczby))
+
+    let slownik: Dict<Str, Int> = dict()
+    slownik.insert("jeden", 1)
+    slownik.insert("dwa", 2)
+    match slownik.fetch("dwa") [
+        Some(v) -> [
+            log("slownik['dwa'] =", v)
+        ]
+        None -> [
+            log("brak klucza")
+        ]
+    ]
+
+    match bezpieczne_dzielenie(10, 2) [
+        Ok(v) -> [
+            log("10 / 2 =", v)
+        ]
+        Err(e) -> [
+            log("blad:", e)
+        ]
+    ]
+    match bezpieczne_dzielenie(10, 0) [
+        Ok(v) -> [
+            log("10 / 0 =", v)
+        ]
+        Err(e) -> [
+            log("blad:", e)
+        ]
+    ]
+]
+
+!! ---- 6. Napisy ---------------------------------------------------
+
+fun demo_stringi() [
+    sekcja("6. Operacje na Str")
+    let s = "  Hello, HackerScript!  "
+    log("oryginal =[" + s + "]")
+    let trimmed = str_trim(s)
+    log("trim =[" + trimmed + "]")
+    log("zawiera 'Hacker' =", str_contains(s, "Hacker"))
+    log("zaczyna od 'Hello' =", str_starts_with(trimmed, "Hello"))
+    log("konczy na '!' =", str_ends_with(trimmed, "!"))
+    log("zamiana =", str_replace(trimmed, "HackerScript", "swiat"))
+    log("powtorz 'ab' x3 =", str_repeat("ab", 3))
+    log("podziel po ', ' =", str_join(str_split(trimmed, ", "), " | "))
+    log("dlugosc =", s.len())
+]
+
+!! ---- 7. manual[ ... ] i gc::tryb ---------------------------------
+
+fun demo_manual() [
+    sekcja("7. manual[ ... ] (blok unsafe)")
+    gc:use::arena
+    manual [
+        let x = 123
+        log("wartosc z bloku manual:", x)
+    ]
+]
+
+!! ---- 8. FFI 0.3: get<extern:...> use<...> + region ---------------
+
+get <extern:m> use <dynamic>
+region [
+    fun sqrt(x: Float) -> Float
+    fun pow(x: Float, y: Float) -> Float
+    fun fabs(x: Float) -> Float
+]
+
+!! Sama deklaracja zaleznosci C/C++ (bez wywolywania niczego) -
+!! syntax-only w tym demie, patrz docs/SYNTAX.md.
+get <c:sqlite3>
+get <cpp:fmt>
+
+fun demo_ffi_extern() [
+    sekcja("8. FFI 0.3 - get<extern:...> use<...> + region")
+    log("sqrt(16.0) =", sqrt(16.0))
+    log("pow(2.0, 10.0) =", pow(2.0, 10.0))
+    log("fabs(-3.5) =", fabs(-3.5))
+]
+
+!! ---- 9. FFI 0.3: blok kompilowanego build-time C++ -------------
+
+fun demo_native_cpp() [
+    sekcja("9. FFI 0.3 - kompilowany build-time blok C++")
+    native {C++} [
+        #include <cstdio>
+        int suma = 0;
+        for (int i = 1; i <= 10; i++) {
+            suma += i;
+        }
+        printf("suma 1..10 z C++ = %d\n", suma);
+    ]
+]
+
+!! ---- main ---------------------------------------------------------
+
+fun main() [
+    log(APP_NAME, "- pelny przeglad jezyka")
+    demo_zmienne()
+    demo_funkcje()
+    demo_sterowanie()
+    demo_struct_enum()
+    demo_kolekcje()
+    demo_stringi()
+    demo_manual()
+    demo_ffi_extern()
+    demo_native_cpp()
+    log("")
+    log("==== Koniec showcase ====")
+]
