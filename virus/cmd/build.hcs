@@ -317,9 +317,27 @@ fun vira_wire_rust_lib(crate_dir: Str, name: Str, rlib_path: Str) -> Result<Str,
 !!! Zaleznosci typu "git" NIE sa tu podpinane - pelne wpiecie przez
 !!! `get <vira:...>` (analogiczne do `get <std:...>`) to osobna,
 !!! wieksza funkcja kompilatora, nie zaimplementowana w tej rundzie
-!!! (patrz docs/ROADMAP.md). Brak zaleznosci "vira" w manifescie = nic
-!!! do zrobienia, zwraca `Ok` natychmiast.
-fun build_wire_vira_dependencies(cache: CacheDirs, manifest: Manifest, crate_dir: Str) -> Result<Str, Str> [
+!!! (patrz docs/ROADMAP.md).
+!!! ZMIANA 0.3 - PRZEMIANOWANE z `build_wire_vira_dependencies` (nazwa
+!!! wciaz opisuje TYLKO polowe roboty) - ta funkcja czyta TERAZ
+!!! rowniez sidecar `.hks-extern-links.txt` (jesli `hackerc build` go
+!!! zapisal - patrz `project.hcs::build_project`,
+!!! `TranspileResult::extern_link_specs`) i dopisuje analogiczne linie
+!!! `cargo:rustc-link-lib=...` dla kazdego `get <extern:sciezka>
+!!! use <tryb>` (`static`/`dynamic` -> `kind`/domyslne `dylib`, dokladnie
+!!! jak dla `static-lib`/`shared-lib` z Vira, patrz wyzej) oraz
+!!! `get <c:nazwa>`/`get <cpp:nazwa>` (linkowane dynamicznie PO NAZWIE,
+!!! jako systemowa biblioteka wyszukiwana domyslnymi sciezkami linkera -
+!!! kompilowanie WLASNEGO zrodla `.c`/`.cpp` z projektu przez crate `cc`
+!!! zamiast linkowania systemowej biblioteki NIE jest jeszcze zrobione
+!!! w tej rundzie, patrz docs/ROADMAP.md). WSZYSTKIE linie (vira +
+!!! extern/c/cpp) trafiaja do JEDNEGO `build.rs` w JEDNYM zapisie
+!!! (`write_file` NADPISUJE, nie dokleja - stad zbieranie do wspolnej
+!!! `link_lines` PRZED zapisem, a nie dwa osobne wywolania). Brak
+!!! zaleznosci "vira" w manifescie I brak `.hks-extern-links.txt` = nic
+!!! do zrobienia, zwraca `Ok` natychmiast (bez tworzenia pustego
+!!! `build.rs`).
+fun build_wire_extern_dependencies(cache: CacheDirs, manifest: Manifest, crate_dir: Str) -> Result<Str, Str> [
     let link_lines: List<Str> = []
     let i = 0
     let n = manifest.dependencies.len()
@@ -354,6 +372,101 @@ fun build_wire_vira_dependencies(cache: CacheDirs, manifest: Manifest, crate_dir
         ]
         i = i + 1
     ]
+
+    !!! ZMIANA 0.3 - sidecar `.hks-extern-links.txt` (patrz doc-comment
+    !!! nad ta funkcja) - kazda linia "kind\tname\ttryb". Brak pliku
+    !!! (najczesciej: program nie uzywa `get <extern:...>`/`get
+    !!! <c:...>`/`get <cpp:...>`) NIE jest bledem, po prostu nic tu nie
+    !!! dopisujemy.
+    let links_path = path_join(crate_dir.clone(), ".hks-extern-links.txt")
+    if path_exists(links_path.clone()) [
+        match read_file(links_path.clone()) [
+            Ok(links_text) -> [
+                let lines = str_split(links_text, "\n")
+                let li = 0
+                let ln = lines.len()
+                while li < ln [
+                    let line = lines[li].clone()
+                    if line.len() > 0 [
+                        let cols = str_split(line, "\t")
+                        if cols.len() >= 2 [
+                            let kind = cols[0].clone()
+                            let name = cols[1].clone()
+                            let mode = "dynamic"
+                            if cols.len() >= 3 and cols[2].clone() != "" [
+                                mode = cols[2].clone()
+                            ]
+                            if kind == "extern" [
+                                !!! `name` to SCIEZKA do pliku (z `get
+                                !!! <extern:sciezka> use <tryb>`) -
+                                !!! rozbij na katalog+nazwe jak dla
+                                !!! bibliotek Vira (patrz
+                                !!! `vira_split_dir_libname` wyzej).
+                                match vira_split_dir_libname(name.clone()) [
+                                    Some(vln) -> [
+                                        let kind2 = "dylib"
+                                        if mode == "static" [
+                                            kind2 = "static"
+                                        ]
+                                        link_lines.push("    println!(\"cargo:rustc-link-search=native=" + vln.dir + "\");")
+                                        link_lines.push("    println!(\"cargo:rustc-link-lib=" + kind2 + "=" + vln.libname + "\");")
+                                    ]
+                                    None -> [
+                                        !!! Brak `/` w sciezce - potraktuj
+                                        !!! `name` jako gola nazwe
+                                        !!! biblioteki (linkowana z
+                                        !!! domyslnych sciezek linkera,
+                                        !!! bez `-L`), parytet z
+                                        !!! obsluga `c`/`cpp` nizej.
+                                        let kind2 = "dylib"
+                                        if mode == "static" [
+                                            kind2 = "static"
+                                        ]
+                                        link_lines.push("    println!(\"cargo:rustc-link-lib=" + kind2 + "=" + name + "\");")
+                                    ]
+                                ]
+                            ]
+                            if kind == "c" or kind == "cpp" [
+                                !!! `get <c:nazwa>`/`get <cpp:nazwa>` (bez
+                                !!! `use <...>`, patrz skladnia) - linkuje
+                                !!! PO NAZWIE jako systemowa biblioteka
+                                !!! dynamiczna (typowy przypadek: `zlib`,
+                                !!! `fmt` juz zainstalowane przez system/
+                                !!! menedzer pakietow). Kompilowanie
+                                !!! WLASNEGO zrodla `.c`/`.cpp` z projektu
+                                !!! (`native/<nazwa>/...`) przez crate `cc`
+                                !!! zamiast tego - NIE jest jeszcze
+                                !!! zrobione w tej rundzie (patrz
+                                !!! docs/ROADMAP.md).
+                                link_lines.push("    println!(\"cargo:rustc-link-lib=dylib=" + name + "\");")
+                            ]
+                            !!! DODANE - `native` `{C++}` `[ ... ]` (patrz
+                            !!! `project.hcs::build_project`, ktory
+                            !!! zapisal `crate_dir/native/<name>.cpp`) -
+                            !!! kompilujemy go build-time przez crate
+                            !!! `cc` (juz w `[build-dependencies]`, patrz
+                            !!! `needs_native_cpp` w `cargo_toml_text`) i
+                            !!! linkujemy statycznie pod nazwa `name`
+                            !!! (unikalna, bo `name` to
+                            !!! `__hks_native_cpp_block_N`). W
+                            !!! przeciwienstwie do liniowej "extern"/"c"/
+                            !!! "cpp" wyzej, TO jest kod Rust wykonywany
+                            !!! W TRAKCIE budowy (`build.rs`), nie tylko
+                            !!! `println!`.
+                            if kind == "native_cpp" [
+                                link_lines.push("    cc::Build::new().cpp(true).file(\"native/" + name + ".cpp\").compile(\"" + name + "\");")
+                            ]
+                        ]
+                    ]
+                    li = li + 1
+                ]
+            ]
+            Err(e) -> [
+                progress_warn("nie mozna odczytac " + links_path + ": " + e)
+            ]
+        ]
+    ]
+
     if link_lines.len() > 0 [
         let build_rs = "fn main() {\n" + str_join(link_lines, "\n") + "\n}\n"
         write_file(path_join(crate_dir, "build.rs"), build_rs)?
@@ -417,7 +530,7 @@ fun cmd_build_run(project_root: Str, opts: BuildOptions) -> Result<Str, Str> [
 
     progress_step(1, 2, "generowanie crate'a Rust (hackerc build)")
     hackerc_build_crate(hackerc_bin, entry, crate_dir.clone(), manifest.package.name.clone())?
-    build_wire_vira_dependencies(cache.clone(), manifest.clone(), crate_dir.clone())?
+    build_wire_extern_dependencies(cache.clone(), manifest.clone(), crate_dir.clone())?
 
     match opts.target [
         TargetDefault -> [
