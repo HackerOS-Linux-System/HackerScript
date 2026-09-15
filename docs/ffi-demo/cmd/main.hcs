@@ -1,0 +1,52 @@
+using <0.3>
+
+!! ---- get<extern:...> use<...> + region: prawdziwa libm --------
+
+get <extern:m> use <dynamic>
+region [
+    fun sqrt(x: Float) -> Float
+    fun pow(x: Float, y: Float) -> Float
+    fun fabs(x: Float) -> Float
+    fun floor(x: Float) -> Float
+    fun ceil(x: Float) -> Float
+]
+
+!! ---- get<c:...> / get<cpp:...>: deklaracja zaleznosci ----------
+!! (syntax-only tutaj - zadna funkcja z nich nie jest wywolywana,
+!! wiec nic nie trzeba linkowac zeby ten plik sie zbudowal).
+
+get <c:sqlite3>
+get <cpp:fmt>
+
+fun demo_extern_region() [
+    log("--- get<extern:m> use<dynamic> + region ---")
+    log("sqrt(2.0) =", sqrt(2.0))
+    log("pow(2.0, 16.0) =", pow(2.0, 16.0))
+    log("fabs(-7.5) =", fabs(-7.5))
+    log("floor(3.9) =", floor(3.9))
+    log("ceil(3.1) =", ceil(3.1))
+]
+
+!! ---- kompilowany build-time blok C++ (native), nie interpretowany --
+
+fun demo_native_cpp() [
+    log("--- blok kompilowany build-time (C++, crate 'cc') ---")
+    native {C++} [
+        #include <cstdio>
+        long fib = 0;
+        long a = 0;
+        long b = 1;
+        for (int i = 0; i < 20; i++) {
+            fib = a + b;
+            a = b;
+            b = fib;
+        }
+        printf("fib(20) liczone w C++ = %ld\n", a);
+    ]
+]
+
+fun main() [
+    log("HackerScript FFI 0.3 - demo")
+    demo_extern_region()
+    demo_native_cpp()
+]
