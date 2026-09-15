@@ -1,7 +1,7 @@
 [package]
 -> name        => virus
 -> version     => 0.3
--> using       => 0.2
+-> using       => 0.3
 -> description => Manager pakietow i narzedzie budowania dla HackerScript - przepisane z virus/ (Rust) na HackerScript.
 
 [build]
