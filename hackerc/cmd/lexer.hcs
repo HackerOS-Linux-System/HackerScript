@@ -44,12 +44,24 @@ fun is_alnum(c: Str) -> Bool [
 !!! hackerc/hackerc/lexer.py::KEYWORDS. Bez Set-literalu w tej wersji
 !!! uzywamy zwyklej petli po List<Str> (patrz "Ograniczenia" - O(n) na
 !!! kazde sprawdzenie, akceptowalne dla malych plikow zrodlowych .hcs).
+!!! ZMIANA 0.3: `extern` PRZESTAL byc slowem kluczowym - stary zapis
+!!! `extern "lib" fun nazwa(...)` (jedna deklaracja FFI naraz) zostal
+!!! usuniety z jezyka. Jego miejsce zajmuje para `get <extern:sciezka>
+!!! use <static|dynamic>` (zwykly `GetImportStmt`, "extern" tu jest
+!!! TYLKO nazwa zrodla wewnatrz `<...>`, czytana jako tekst przez
+!!! `read_angle_segment()` - NIE musi byc slowem kluczowym) + nowy blok
+!!! `region [ ... ]` (nowe slowo kluczowe) z zerowa lub wieksza liczba
+!!! samych sygnatur `fun nazwa(...) -> Typ` (bez ciala) - patrz
+!!! `parse_region()`/`RegionBlock` i `docs/SYNTAX.md`, sekcja "FFI:
+!!! extern/region/c/cpp". `use` DODANE jako nowe slowo kluczowe
+!!! wylacznie dla `get <extern:...> use <tryb>` (patrz
+!!! `parse_get_import()`).
 fun is_keyword(w: Str) -> Bool [
     let kws = ["fun", "let", "const", "if", "else", "elif", "while", "for", "in",
                "return", "end", "get", "import", "using", "direct", "manual",
                "true", "false", "null", "struct", "enum", "match", "break",
-               "continue", "gc", "pub", "self", "and", "or", "not", "extern", "as",
-               "impl", "include", "native"]
+               "continue", "gc", "pub", "self", "and", "or", "not", "as",
+               "impl", "include", "native", "region", "use"]
     let i = 0
     while i < kws.len() [
         if kws[i] == w [
@@ -392,23 +404,3 @@ fun main() [
     let tokens = tokenize(sample)
     log("tokens:", tokens.len())
 ]
-
-!!! ## Ograniczenia tej wersji (patrz docs/ROADMAP.md)
-!!!
-!!! - Liczby: brak jawnego rozroznienia Int/Float na tym etapie (jak w
-!!!   oryginalnym lexer.py - to robi parser na podstawie obecnosci '.').
-!!! - `is_keyword`-owe sprawdzenie to petla O(n) zamiast HashSet - dla
-!!!   malych plikow .hcs bez znaczenia wydajnosciowego.
-!!! - Nieznane znaki sa CICHO pomijane zamiast zglaszac blad leksykalny
-!!!   (`LexError` w Pythonowym lexer.py) - samo-hostowany bootstrap nie
-!!!   ma jeszcze reprezentacji bledow z komunikatem+linia+kolumna poza
-!!!   `log`, to czeka na `diagnostics.hcs` (nastepny krok).
-!!! - Flaga `tight` na `Token::Open` jest juz OBLICZANA poprawnie (brak
-!!!   bialej spacji miedzy poprzednim znakiem a `[`), ale NIC W TYM
-!!!   PLIKU jeszcze z niej nie korzysta - to zadanie parsera
-!!!   (`parse_postfix` w kolejnym kroku), ktory musi odrozniac
-!!!   `xs[i]` (tight=true, indeksowanie) od `if cond [ ... ]`
-!!!   (tight=false, nowy blok).
-!!! - NIEPRZETESTOWANE na prawdziwym wejsciu w tym srodowisku (brak
-!!!   rustc) - zweryfikowane strukturalnie przez `hackerc check` i
-!!!   inspekcje wygenerowanego Rusta, patrz tests/test_hackerc.py.
