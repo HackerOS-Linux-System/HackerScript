@@ -1,9 +1,8 @@
 [package]
 name = "hello-world"
-version = "0.0.1"
-using = "1.2"
-edition = "2026"
-authors = ["Twoje Imie"]
+version = "0.0"
+using = "0.3"
+authors = ["HackerOS Team <hackeros068@gmail.com>"]
 description = "Przykladowy projekt HackerScript pokazujacy podstawowa skladnie."
 
 [dependencies]
