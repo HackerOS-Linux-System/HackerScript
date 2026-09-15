@@ -1,5 +1,4 @@
-! Przyklad systemu modulow: import prawdziwego kodu z libs/core.
-using <1.2>
+using <0.3>
 
 get <core:memory::arena> import <arena_new::arena_alloc::arena_get>
 
