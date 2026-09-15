@@ -1564,7 +1564,39 @@ struct CodeGen [
     hot_reload_bodies: Dict<Str, Str>,
     hot_reload_order: List<Str>,
     seen_real_toplevel_item: Bool,
-    char_cache_params: Dict<Str, Bool>
+    char_cache_params: Dict<Str, Bool>,
+    !! ZMIANA 0.3 - stan potrzebny do powiazania `region [ ... ]` z
+    !! poprzedzajacym `get <extern:sciezka> use <tryb>` w tym samym
+    !! pliku (patrz `gen_get_import()`/`gen_region()`). Resetowane po
+    !! kazdym zuzytym `region` - drugi `region` bez nowego
+    !! `get <extern:...>` dostaje ostrzezenie (patrz `gen_region()`).
+    pending_extern_lib: Option<Str>,
+    pending_extern_mode: Option<Str>,
+    !! ZMIANA 0.3 - jak `needs_native_js`/`needs_pyo3`, ale dla
+    !! `native` `{C++}` `[ ... ]` (patrz `gen_native()`) - flaguje, ze
+    !! wygenerowany crate potrzebuje zaleznosci budujacej i lacza
+    !! wbudowanego C++ (`cc` w `[build-dependencies]`, patrz
+    !! `virus/cmd/build.hcs`).
+    needs_native_cpp: Bool,
+    !! DODANE - surowe zrodlo C++ per wygenerowana funkcja
+    !! (`__hks_native_cpp_block_N` -> tekst), zbierane obok
+    !! `needs_native_cpp` w `gen_native()` - `project.hcs::build_project`
+    !! zapisuje kazdy wpis do `native/<fn_name>.cpp` i dopisuje linie do
+    !! `.hks-extern-links.txt` (kind "native_cpp"), zeby
+    !! `virus build` mogl je skompilowac/zlinkowac przez `cc::Build`
+    !! (patrz `virus/cmd/build.hcs::build_wire_extern_dependencies`).
+    !! `native_cpp_order` obok (kolejnosc kluczy) - Dict nie ma `.keys()`
+    !! w tym bootstrapie (patrz "Ograniczenia" w typeinfer.hcs), parytet
+    !! z para `hot_reload_order`/`hot_reload_bodies` nizej.
+    native_cpp_sources: Dict<Str, Str>,
+    native_cpp_order: List<Str>,
+    !! DODANE - nazwy funkcji zadeklarowanych w `region [ ... ]`
+    !! (wypelniane w `gen_region()`) - wywolania `extern "C"` sa w
+    !! Ruscie `unsafe`, a `region` (jak dawniej `extern "lib" fun`) nie
+    !! jest wpisywane do `self.sigs.functions` (patrz "Ograniczenia" w
+    !! docs/ROADMAP.md), wiec zwykla sciezka w `gen_call()` by tego nie
+    !! zlapala - potrzebny osobny check (patrz `gen_call()`).
+    extern_fn_names: Dict<Str, Bool>
 ]
 
 impl CodeGen [
@@ -2274,6 +2306,16 @@ impl CodeGen [
         if shape.is_method_call [
             end shape.target_rendered + "." + shape.method_name + "(" + self.gen_args_list(args) + ")"
         ]
+        !! DODANE - wywolanie funkcji zadeklarowanej w `region [ ... ]`
+        !! (patrz `gen_region()`) - `extern "C"` w Ruscie jest zawsze
+        !! `unsafe fn`, wiec samo `nazwa(args)` by sie nie skompilowalo.
+        !! `region` nie jest wpisywane do `self.sigs.functions` (ten
+        !! sam "Ograniczenie" co mialo stare `extern "lib" fun` przed
+        !! 0.3), wiec ten check MUSI byc tutaj, PO nieudanej probie
+        !! `self.sigs.functions.fetch(...)` wyzej, a NIE zamiast niej.
+        if ident_name != "" and self.extern_fn_names.contains(ident_name.clone()) [
+            end "unsafe { " + ident_name + "(" + self.gen_args_list(args) + ") }"
+        ]
         end self.gen_expr(callee) + "(" + self.gen_args_list(args) + ")"
     ]
 
@@ -2753,8 +2795,8 @@ impl CodeGen [
         self.emit("}")
     ]
 
-    !!! `native {Silnik} [ ... ]` - analog `gen_direct`, ale dla
-    !!! surowego kodu w innym jezyku niz Python. Dzis: TYLKO
+    !!! `native` `{Silnik}` `[ ... ]` - analog `gen_direct`, ale dla
+    !!! surowego kodu w innym jezyku niz Python. Do wersji 0.2: TYLKO
     !!! `JavaScript` (silnik: QuickJS przez `rquickjs`, statycznie
     !!! linkowany - `rquickjs-sys` kompiluje C QuickJS przez `cc`, wiec
     !!! wymaga kompilatora C w srodowisku budujacym, ale NIE wymaga
@@ -2763,10 +2805,24 @@ impl CodeGen [
     !!! kompilacja). `console.log` jest doklejane recznie jako
     !!! polyfill (surowy QuickJS nie ma globalnego `console`) -
     !!! wypisuje przez Rustowe `println!`, wiec dziala tak samo jak
-    !!! `log()` w HackerScript. Nieznany `engine` (inny niz
-    !!! "JavaScript") -> tylko komentarz w wygenerowanym Ruscie, bez
-    !!! polamanego kodu (parytet z fallbackiem `gen_get_import` dla
-    !!! nieznanego `source`).
+    !!! `log()` w HackerScript.
+    !!! ZMIANA 0.3 - DODANE `native` `{C++}` `[ ... ]`: w przeciwienstwie
+    !!! do `JavaScript` (interpretowane w runtime przez QuickJS) i
+    !!! `direct[...]` (interpretowany Python przez PyO3), C++ NIE MA
+    !!! tu wbudowanego interpretera - blok jest kompilowany NAPRZOD
+    !!! (build-time), tak samo jak `rquickjs-sys` kompiluje C QuickJS:
+    !!! surowy kod C++ jest zawijany jako cialo
+    !!! `extern "C" void __hks_native_cpp_block_<idx>()` i zapisywany
+    !!! przez `virus build` do osobnego `.cpp` w wygenerowanym crate,
+    !!! kompilowanego crate'em `cc` (`.cpp(true)`, wymaga g++/clang++ w
+    !!! srodowisku budujacym - patrz `virus/cmd/build.hcs`) - `hackerc`
+    !!! tutaj emituje TYLKO deklaracje FFI + wywolanie, samo zapisanie
+    !!! `.cpp`/wpiecie do `cc::Build` robi `virus build`
+    !!! (`needs_native_cpp` nizej sygnalizuje to project.hcs/build.hcs,
+    !!! parytet z `needs_native_js`/`needs_pyo3`). Nieznany `engine`
+    !!! (inny niz "JavaScript"/"C++") -> tylko komentarz w
+    !!! wygenerowanym Ruscie, bez polamanego kodu (parytet z
+    !!! fallbackiem `gen_get_import` dla nieznanego `source`).
     fun gen_native(self, idx_text: Str) [
         let raw = ""
         match self.native_blocks.fetch(idx_text) [
@@ -2784,8 +2840,21 @@ impl CodeGen [
             None -> [
             ]
         ]
+        if engine == "C++" [
+            self.needs_native_cpp = true
+            let fn_name = "__hks_native_cpp_block_" + idx_text
+            self.native_cpp_sources.insert(fn_name.clone(), raw)
+            self.native_cpp_order.push(fn_name.clone())
+            self.emit("{")
+            self.indent = self.indent + 1
+            self.emit("extern \"C\" { fn " + fn_name + "(); }")
+            self.emit("unsafe { " + fn_name + "(); }")
+            self.indent = self.indent - 1
+            self.emit("}")
+            end
+        ]
         if engine != "JavaScript" [
-            self.emit("// native {" + engine + "} [ ... ] - nieobslugiwany silnik (dzis dostepne: \"JavaScript\"), pomijam blok")
+            self.emit("// native {" + engine + "} [ ... ] - nieobslugiwany silnik (dzis dostepne: \"JavaScript\", \"C++\"), pomijam blok")
             end
         ]
         self.needs_native_js = true
@@ -3597,46 +3666,126 @@ impl CodeGen [
             self.emit("// get <" + source + ":" + name + "> - pobierane przez 'virus install' do cache/libs/" + source + "/" + name + "/; integracja z uruchomieniem JS jest jeszcze w budowie, patrz docs/ROADMAP.md")
             end
         ]
-        self.emit("// get <" + source + ":" + name + "> - nieznane zrodlo, pomijam import")
-    ]
-
-    !!! Parytet z `gen_extern()` - deklaracja FFI: `#[link(name =
-    !!! "lib")] extern "C" { pub fn nazwa(...) -> Typ; }`.
-    fun gen_extern(self, lib: Str, name: Str, params: List<Param>, ret_type: Option<TypeRef>) [
-        let params_str = ""
-        let i = 0
-        let n = params.len()
-        while i < n [
-            if i > 0 [
-                params_str = params_str + ", "
-            ]
-            let p = params[i].clone()
-            let t = "i64"
-            match p.type_ref [
-                Some(pt) -> [
-                    t = rust_type_name(pt, self.sigs, self.current_type_params)
+        !!! ZMIANA 0.3 - `get <extern:sciezka> use <tryb>` NIE emituje
+        !!! samo w sobie zadnego `use ...;` (w przeciwienstwie do
+        !!! std/core/crates) - tylko zapamietuje (`pending_extern_lib`/
+        !!! `pending_extern_mode`) biblioteke i tryb linkowania dla
+        !!! NASTEPUJACEGO `region [ ... ]` (patrz `gen_region()`), ktory
+        !!! dopiero emituje faktyczny blok `extern "C" { ... }`.
+        if source == "extern" [
+            let mode = "dynamic"
+            match version [
+                Some(m) -> [
+                    mode = m
                 ]
                 None -> [
                 ]
             ]
-            params_str = params_str + p.name + ": " + t
-            i = i + 1
+            self.pending_extern_lib = some(name.clone())
+            self.pending_extern_mode = some(mode.clone())
+            self.emit("// get <extern:" + name + "> use <" + mode + "> - nastepny 'region [ ... ]' zostanie polaczony z ta biblioteka (" + mode + "); samo linkowanie (.so/.a -> rustc-link-lib) robi 'virus build', patrz virus/cmd/build.hcs")
+            end
         ]
-        let ret = ""
-        match ret_type [
-            Some(rt) -> [
-                ret = " -> " + rust_type_name(rt, self.sigs, self.current_type_params)
+        !!! ZMIANA 0.3 - `get <c:nazwa>`/`get <cpp:nazwa>`: deklaruje
+        !!! zaleznosc od biblioteki C/C++ kompilowanej/linkowanej przez
+        !!! `virus build` (crate `cc` w `[build-dependencies]`, `.cpp
+        !!! (true)` dla `cpp` - patrz `virus/cmd/build.hcs`). Sama
+        !!! deklaracja `get` NIE tworzy sygnatur wywolywalnych funkcji -
+        !!! do tego wciaz sluzy `get <extern:...> use <...>` +
+        !!! `region [ ... ]` (biblioteka C/C++ jest zazwyczaj
+        !!! statyczna po zbudowaniu przez `cc`, wiec typowo
+        !!! `use <static>`).
+        if source == "c" or source == "cpp" [
+            let lang_label = "C"
+            if source == "cpp" [
+                lang_label = "C++"
+            ]
+            self.emit("// get <" + source + ":" + name + "> - zaleznosc " + lang_label + ", kompilowana/linkowana przez 'virus build' (crate 'cc'); sygnatury importuj osobnym 'get <extern:" + name + "> use <static>' + 'region [ ... ]'")
+            end
+        ]
+        self.emit("// get <" + source + ":" + name + "> - nieznane zrodlo, pomijam import")
+    ]
+
+    !!! ZMIANA 0.3 - zastepuje stare `gen_extern()` (jedna funkcja
+    !!! naraz). `region [ ... ]` emituje JEDEN blok `#[link(name =
+    !!! "lib", kind = "...")] extern "C" { ... }` dla WSZYSTKICH
+    !!! sygnatur naraz, powiazany z ostatnim `get <extern:sciezka>
+    !!! use <tryb>` widzianym w tym pliku (`self.pending_extern_lib`/
+    !!! `self.pending_extern_mode`, ustawiane w `gen_get_import()`).
+    !!! `kind` mapuje `use <tryb>`: `"static"` -> `kind = "static"`,
+    !!! kazdy inny (w tym domyslny brak `use <...>`) -> dynamiczne
+    !!! (`kind` pominiete - domyslne zachowanie linkera to `dylib`,
+    !!! parytet z tym jak `rustc`/`cargo` linkuja domyslnie).
+    !!! Rzeczywiste dostarczenie biblioteki (skopiowanie/skompilowanie
+    !!! .so/.a i dodanie sciezki wyszukiwania) zostaje po stronie
+    !!! `virus build` (patrz `virus/cmd/build.hcs`), TAK JAK dla
+    !!! starego `extern "lib" fun` - `region` samo w sobie generuje
+    !!! TYLKO deklaracje FFI, nie linkowanie.
+    fun gen_region(self, sigs: List<ExternSig>) [
+        let lib = "unknown_extern_lib"
+        match self.pending_extern_lib.clone() [
+            Some(l) -> [
+                lib = l
+            ]
+            None -> [
+                self.emit("// UWAGA: 'region [ ... ]' bez poprzedzajacego 'get <extern:...> use <...>' w tym pliku - nazwa biblioteki nieznana, uzywam zaslepki '" + lib + "'")
+            ]
+        ]
+        let mode = "dynamic"
+        match self.pending_extern_mode.clone() [
+            Some(m) -> [
+                mode = m
             ]
             None -> [
             ]
         ]
-        self.emit("#[link(name = \"" + lib + "\")]")
+        let link_attr = "#[link(name = \"" + lib + "\")]"
+        if mode == "static" [
+            link_attr = "#[link(name = \"" + lib + "\", kind = \"static\")]"
+        ]
+        self.emit(link_attr)
         self.emit("extern \"C\" {")
         self.indent = self.indent + 1
-        self.emit("pub fn " + name + "(" + params_str + ")" + ret + ";")
+        let i = 0
+        let n = sigs.len()
+        while i < n [
+            let sig = sigs[i].clone()
+            let params_str = ""
+            let j = 0
+            let pn = sig.params.len()
+            while j < pn [
+                if j > 0 [
+                    params_str = params_str + ", "
+                ]
+                let p = sig.params[j].clone()
+                let t = "i64"
+                match p.type_ref [
+                    Some(pt) -> [
+                        t = rust_type_name(pt, self.sigs, self.current_type_params)
+                    ]
+                    None -> [
+                    ]
+                ]
+                params_str = params_str + p.name + ": " + t
+                j = j + 1
+            ]
+            let ret = ""
+            match sig.ret_type [
+                Some(rt) -> [
+                    ret = " -> " + rust_type_name(rt, self.sigs, self.current_type_params)
+                ]
+                None -> [
+                ]
+            ]
+            self.emit("pub fn " + sig.name + "(" + params_str + ")" + ret + ";")
+            self.extern_fn_names.insert(sig.name.clone(), true)
+            i = i + 1
+        ]
         self.indent = self.indent - 1
         self.emit("}")
         self.emit("")
+        self.pending_extern_lib = none()
+        self.pending_extern_mode = none()
     ]
 
     fun string_lit_value(self, e: Expr) -> Str [
@@ -3735,9 +3884,9 @@ impl CodeGen [
                 self.seen_real_toplevel_item = true
                 self.gen_impl(struct_name, methods, itype_params)
             ]
-            ExternFunDecl(lib, name, params, ret_type) -> [
+            RegionBlock(sigs) -> [
                 self.seen_real_toplevel_item = true
-                self.gen_extern(lib, name, params, ret_type)
+                self.gen_region(sigs)
             ]
             FunDecl(fname, fparams, fret, fbody, fis_pub, ftype_params) -> [
                 self.seen_real_toplevel_item = true
@@ -3801,7 +3950,7 @@ impl CodeGen [
 fun new_codegen(sigs: Signatures, boxed_fields: Dict<Str, Str>, mut_params: Dict<Str, Bool>, method_mut_params: Dict<Str, Bool>, variant_arity: Dict<Str, Int>, no_default_structs: Dict<Str, Bool>, direct_blocks: Dict<Str, Str>, native_blocks: Dict<Str, Str>, native_engines: Dict<Str, Str>, sandbox_blocks: Dict<Str, Str>, hot_reload_names: Dict<Str, Bool>) -> CodeGen [
     let env_vars: Dict<Str, Option<TypeRef>> = dict()
     let empty_hr_bodies: Dict<Str, Str> = dict()
-    end CodeGen(sigs.clone(), env_vars, variant_arity, boxed_fields, method_mut_params, mut_params, [], none(), [], 0, no_default_structs, false, direct_blocks, false, native_blocks, native_engines, false, sandbox_blocks, hot_reload_names, false, empty_hr_bodies, [], false, dict())
+    end CodeGen(sigs.clone(), env_vars, variant_arity, boxed_fields, method_mut_params, mut_params, [], none(), [], 0, no_default_structs, false, direct_blocks, false, native_blocks, native_engines, false, sandbox_blocks, hot_reload_names, false, empty_hr_bodies, [], false, dict(), none(), none(), false, dict(), [], dict())
 ]
 
 !!! Punkt wejscia - parytet z `CodeGen.gen_program()`. Liczy WSZYSTKIE
@@ -3902,7 +4051,7 @@ fun main() [
     let empty_dict7: Dict<Str, Str> = dict()
     let empty_hr_names: Dict<Str, Bool> = dict()
     let empty_hr_bodies2: Dict<Str, Str> = dict()
-    let gen = CodeGen(empty_sigs, empty_vars, empty_dict1, empty_dict2, empty_dict3, empty_dict4, [], some(TypeRef("Str", none(), none())), [], 0, empty_dict5, false, empty_dict6, false, empty_dict7, empty_dict7, false, empty_dict7, empty_hr_names, false, empty_hr_bodies2, [], false, dict())
+    let gen = CodeGen(empty_sigs, empty_vars, empty_dict1, empty_dict2, empty_dict3, empty_dict4, [], some(TypeRef("Str", none(), none())), [], 0, empty_dict5, false, empty_dict6, false, empty_dict7, empty_dict7, false, empty_dict7, empty_hr_names, false, empty_hr_bodies2, [], false, dict(), none(), none(), false, dict(), [], dict())
     gen.gen_stmts(body)
 
     let i = 0
@@ -3931,76 +4080,3 @@ fun main() [
         gi = gi + 1
     ]
 ]
-
-!!! ## Stan tej sesji (patrz docs/ROADMAP.md - "krok 6/N, W PELNI ZAMKNIETY")
-!!!
-!!! `codegen.hcs` jest teraz W PELNI KOMPLETNY jako generator
-!!! POJEDYNCZEGO pliku `.hcs` -> Rust: `rust_type_name` +
-!!! `RecursionAnalyzer`/`build_recursion_info` (Box) + `MutTracker`/
-!!! `SelfCallTracker`/`compute_mut_params`/`compute_method_mut_params`
-!!! (auto-`&mut`, z punktem stalym) + `compute_no_default_structs`
-!!! (`#[derive(Default)]`) + `CodeGen` (struct: `sigs`/`env_vars`/
-!!! `variant_arity`/`boxed_fields`/`method_mut_params`/`mut_params`/
-!!! `current_type_params`/`current_ret_type`/`output`/`indent`/
-!!! `no_default_structs`/`needs_pyo3`/`direct_blocks`) + PELNE
-!!! `gen_expr`/`gen_stmt`/`gen_struct`/`gen_enum`/`gen_fun`/`gen_impl`/
-!!! `gen_method`/`gen_extern`/`gen_const`/`gen_get_import`/`gen_direct`
-!!! (PyO3)/`gen_toplevel`/`gen_program`. `gen_toplevel` obsluguje
-!!! WSZYSTKIE formy najwyzszego poziomu (nie tylko struct/enum/fun/impl -
-!!! DOPISANE: `using`/`get <...>`/`gc:use::`/`extern`/`const`/komentarz
-!!! dokumentacyjny modulu). `gen_program(prog: Program) -> List<Str>`
-!!! spina WSZYSTKO w JEDEN dzialajacy generator - liczy wszystkie
-!!! analizy raz, doklada NAGLOWEK pliku (`#![allow(...)]` + warunkowo
-!!! `use pyo3::prelude::*;`), potem przechodzi `prog.body`.
-!!!
-!!! **KRZYZOWO ZWERYFIKOWANY wobec PRAWDZIWEGO Pythonowego `hackerc`**
-!!! na rownowaznym programie (`struct Point [...]` + prosta `fun`) -
-!!! identyczny ksztalt wyjscia (patrz docs/ROADMAP.md po szczegoly).
-!!!
-!!! **CALKOWICIE NIE ZROBIONE (naleza do INNYCH, przyszlych modulow, nie
-!!! do tego pliku)**:
-!!! - Wyciaganie surowego tekstu `direct[]` ZE ZRODLA `.hcs` PRZED
-!!!   tokenizacja (`transpiler.py`/`_extract_direct_blocks`) - `gen_direct`
-!!!   w TYM pliku jest KOMPLETNE i czeka na `direct_blocks` jako dane
-!!!   wejsciowe, ktore dostarczy `transpiler.hcs` (przyszly krok).
-!!! - Wielo-plikowe skladanie/system modulow/Cargo.toml (`project.hcs`).
-!!!
-!!! ## Ograniczenia
-!!!
-!!! - `rust_type_name` nie ma prawdziwego `CodegenError` - `log`-uje i
-!!!   zwraca przyblizenie (ta sama filozofia co `expect` w parser.hcs).
-!!! - `RecursionInfo.boxed_fields` splaszczone do JEDNEGO `Dict<Str,Str>`
-!!!   (klucz laczy poziom struct+pole/enum+wariant#idx) zamiast
-!!!   Pythonowych dwoch osobnych, zagniezdzonych map - rownowazne
-!!!   informacyjnie, mniej wygodne w API.
-!!! - `compute_mut_params`/`compute_method_mut_params` splaszczone
-!!!   analogicznie (`Dict<Str,Bool>` z kluczem laczonym `"::"` zamiast
-!!!   Pythonowych `dict[str, set[str]]`).
-!!! - `MutTracker`/`SelfCallTracker` maja dodatkowe pole `order:
-!!!   List<Str>` (obok `Dict<Str,Bool>`) WYLACZNIE dlatego, ze ten
-!!!   bootstrap nie ma iteracji po Dict - Python zwraca zwykly `set`.
-!!! - `type_ref_generic`/`type_ref_generic2` (proba "zwrocenia" TypeRef
-!!!   wyciagnietego z Box) zostaly CALKOWICIE USUNIETE jako
-!!!   fundamentalnie niewykonalne w tym bootstrapie (patrz
-!!!   docs/ROADMAP.md) - zastapione `type_ref_generic_name`/
-!!!   `rust_type_name_of_generic`/`_of_generic2`.
-!!! - `CodeGen.env` NIE jest `Option<TypeEnv>` (jak pierwotnie w
-!!!   Pythonie) - splaszczone do `env_vars: Dict<Str, Option<TypeRef>>`
-!!!   BEZPOSREDNIO, z tego samego powodu co `FnChecker` w typecheck.hcs
-!!!   (`self.env.declare(...)` nie wymuszaloby `&mut self`).
-!!! - `gen_let_stmt`'s `skip_hint` implementuje TYLKO jeden z trzech
-!!!   warunkow oryginalu (`_contains_any`) - reszta wymaga infrastruktury
-!!!   z `project.hcs` (jeszcze nieistniejacego).
-!!! - Wielo-plikowe skladanie (naglowki `use`/system modulow) to
-!!!   zadanie `project.hcs` (kolejny krok) - `gen_program` obsluguje
-!!!   TYLKO pojedynczy plik.
-!!! - `extern_libs` (Set nazw bibliotek do polaczenia) z oryginalu NIE
-!!!   zostal przepisany - w Pythonie i tak nic z nim nie robi poza
-!!!   iteracja+`pass` (linki emitowane bezposrednio przy kazdym
-!!!   `ExternFunDecl` przez `gen_extern`), wiec pominiecie go jest
-!!!   nieszkodliwe (brak roznicy w zachowaniu).
-!!! - NIEPRZETESTOWANE na prawdziwym wejsciu w tym srodowisku (brak
-!!!   rustc) - zweryfikowane strukturalnie przez `hackerc check`/
-!!!   `build`, inspekcje wygenerowanego Rusta, I krzyzowe porownanie z
-!!!   PRAWDZIWYM Pythonowym `hackerc` na rownowaznym programie - patrz
-!!!   tests/test_hackerc.py.
