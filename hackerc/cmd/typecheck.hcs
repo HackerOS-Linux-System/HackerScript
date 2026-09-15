@@ -2,8 +2,13 @@ include <ast_nodes>
 include <diagnostics>
 include <typeinfer>
 
+!!! ZMIANA 0.3: dodano "extern"/"c"/"cpp" (patrz `gen_get_import`/
+!!! `gen_region` w codegen.hcs). Przy okazji naprawiono
+!!! przeoczenie sprzed 0.3 - "npm"/"jsr" byly juz obslugiwane przez
+!!! `gen_get_import` (codegen.hcs), ale nie byly tu wypisane, co dawalo
+!!! falszywy blad E0003 dla poprawnego kodu.
 fun is_known_get_source(s: Str) -> Bool [
-    end s == "pypi" or s == "crates" or s == "std" or s == "core" or s == "selfhost" or s == "virus" or s == "vira"
+    end s == "pypi" or s == "crates" or s == "std" or s == "core" or s == "selfhost" or s == "virus" or s == "vira" or s == "npm" or s == "jsr" or s == "extern" or s == "c" or s == "cpp"
 ]
 
 fun is_builtin_func(name: Str) -> Bool [
@@ -380,7 +385,7 @@ impl Checker [
     !!! E0003 - parytet z `_check_get`.
     fun check_get(self, source: Str, name: Str) [
         if not is_known_get_source(source) [
-            self.diags.push(Diagnostic("error", "E0003", "nieznane zrodlo '" + source + "' w 'get <" + source + ":" + name + ">' (dozwolone: core, crates, pypi, selfhost, std, vira, virus)", 0, 0, 1, ""))
+            self.diags.push(Diagnostic("error", "E0003", "nieznane zrodlo '" + source + "' w 'get <" + source + ":" + name + ">' (dozwolone: c, core, cpp, crates, extern, jsr, npm, pypi, selfhost, std, vira, virus)", 0, 0, 1, ""))
         ]
     ]
 
@@ -517,27 +522,3 @@ fun main() [
     let diags = check_program(prog, [])
     log("liczba diagnostyk:", diags.len())
 ]
-
-!!! ## Ograniczenia tej wersji (patrz docs/ROADMAP.md)
-!!!
-!!! - Wszystkie `Diagnostic` maja `line=0, col=0, length=1` - brak
-!!!   pola `line: Int` na wezlach AST (patrz "Ograniczenia" w
-!!!   ast_nodes.hcs) - komunikaty sa poprawne tresciowo, ale bez
-!!!   lokalizacji w zrodle (parser.hcs rowniez tego dzis nie sledzi).
-!!! - `Checker.check()` (bez argumentow, odpowiadajac
-!!!   `Checker.check(self) -> list[Diagnostic]` w Pythonie) jest tu
-!!!   PUSTE - prawdziwa logika zyje w wolnej funkcji `check_program`
-!!!   zamiast metody (matched Python semantycznie identycznie, ale
-!!!   `check_program` MUSI byc funkcja wolna, bo POTRZEBUJE zbudowac
-!!!   `Signatures`/`imported_names` PRZED skonstruowaniem `Checker`,
-!!!   co w Pythonie dzieje sie w `__init__` - HackerScript nie ma
-!!!   konstruktorow z logika, tylko plaskie pozycyjne wywolanie typu).
-!!! - `used`/`imported_names` to `Dict<Str, Bool>` (nie prawdziwy Set -
-!!!   ten bootstrap go nie ma).
-!!! - `declared_names` to `List<Str>` (nie `Dict<Str, LetStmt>` jak w
-!!!   Pythonie) - bez iteracji po Dict (`.items()`) nie dalo by sie
-!!!   tego przejrzec, a i tak nie mamy `line` do pokazania z LetStmt.
-!!! - NIEPRZETESTOWANE na prawdziwym wejsciu w tym srodowisku (brak
-!!!   rustc) - zweryfikowane strukturalnie przez `hackerc check`/
-!!!   `build` i BARDZO dokladna inspekcje wygenerowanego Rusta (patrz
-!!!   docs/ROADMAP.md - uwaga projektowa o `self.pole` + `match`).
