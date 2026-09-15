@@ -166,7 +166,8 @@ fun vira_install_binary_file(dest: Str, url: Str) -> Result<Str, Str> [
 
 !!! Zapisuje `dest/.vira-meta.txt` (format prosty, dwie linie
 !!! `type=...`/`file=...`) - odczytywane pozniej przez
-!!! `build.hcs::build_wire_vira_dependencies`, zeby wiedziec JAK
+!!! `build.hcs::build_wire_extern_dependencies` (przemianowane z
+!!! `build_wire_vira_dependencies` w 0.3), zeby wiedziec JAK
 !!! podpiac pobrany plik do `cargo build` BEZ ponownego odpytywania
 !!! sieci przy kazdym `virus build`.
 fun vira_write_meta(dest: Str, lib_type: Str, file_path: Str) -> Result<Str, Str> [
