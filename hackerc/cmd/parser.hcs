@@ -161,8 +161,8 @@ impl Parser [
                     ]
                 ]
             ]
-            if kw == "extern" [
-                end self.parse_extern()
+            if kw == "region" [
+                end self.parse_region()
             ]
             if kw == "fun" [
                 end self.parse_fun()
@@ -268,6 +268,20 @@ impl Parser [
             version = some(self.read_angle_segment())
         ]
         self.expect(RAngle, none())
+
+        !!! ZMIANA 0.3 - `get <extern:sciezka> use <static|dynamic>`:
+        !!! `use <...>` istnieje TYLKO za `get <extern:...>` (inne
+        !!! zrodla - std/core/crates/pypi/npm/jsr/vira/c/cpp - nie maja
+        !!! trybu linkowania w tym miejscu skladni), i zapisuje tryb w
+        !!! tym samym slocie co `::wersja` (patrz komentarz przy
+        !!! `GetImportStmt` w ast_nodes.hcs) - `extern` nigdy nie ma
+        !!! obu naraz, wiec kolizji nie ma.
+        if source == "extern" and self.check(Keyword, some("use")) [
+            self.advance()
+            self.expect(LAngle, none())
+            version = some(self.read_angle_segment())
+            self.expect(RAngle, none())
+        ]
 
         let details: List<Str> = []
         if self.check(Keyword, some("import")) [
@@ -443,18 +457,37 @@ impl Parser [
         end ForStmt(var, iterable, body)
     ]
 
-    fun parse_extern(self) -> Stmt [
-        self.expect(Keyword, some("extern"))
-        let lib_tok = self.expect(StrLit, none())
-        self.expect(Keyword, some("fun"))
-        let name = self.expect(Ident, none()).value
-        let params = self.parse_params()
-        let ret_type: Option<TypeRef> = none()
-        if self.check(Op, some("->")) [
-            self.advance()
-            ret_type = some(self.parse_type())
+    !!! ZMIANA 0.3 - `region [ ... ]` zastepuje stare `extern "lib" fun
+    !!! nazwa(...)`. Jedna deklaracja `region` moze niesc DOWOLNIE
+    !!! WIELE sygnatur (zamiast jednej naraz jak wczesniej) i jest
+    !!! zwiazana z ostatnim poprzedzajacym `get <extern:...> use
+    !!! <tryb>` w tym samym pliku (wiazanie robione dopiero w
+    !!! `codegen.hcs::gen_region`, patrz `pending_extern_lib`/
+    !!! `pending_extern_mode` - parser NIE sprawdza tego powiazania,
+    !!! best-effort jak reszta bootstrapu, patrz "Ograniczenia").
+    !!! Kazda linia wewnatrz to goła sygnatura `fun nazwa(params) ->
+    !!! Typ` (typ zwracany opcjonalny) BEZ ciala i bez `[ ... ]` -
+    !!! parytet skladniowy z `parse_params()`/`parse_type()`
+    !!! uzywanymi normalnie w `parse_fun()`.
+    fun parse_region(self) -> Stmt [
+        self.expect(Keyword, some("region"))
+        self.expect(Open, none())
+        self.skip_newlines()
+        let sigs: List<ExternSig> = []
+        while not self.check(Close, none()) and not self.at_end() [
+            self.expect(Keyword, some("fun"))
+            let name = self.expect(Ident, none()).value
+            let params = self.parse_params()
+            let ret_type: Option<TypeRef> = none()
+            if self.check(Op, some("->")) [
+                self.advance()
+                ret_type = some(self.parse_type())
+            ]
+            sigs.push(ExternSig(name, params, ret_type))
+            self.skip_newlines()
         ]
-        end ExternFunDecl(lib_tok.value, name, params, ret_type)
+        self.expect(Close, none())
+        end RegionBlock(sigs)
     ]
 
     !!! `direct[]` jest wyjatkowe: w prawdziwym hackerc surowy tekst
@@ -477,6 +510,11 @@ impl Parser [
         end ManualBlock(body)
     ]
 
+    !! Skladnia pragmy to `gc:use::tryb` (patrz `gen_toplevel`/
+    !! `fmt_stmt` -> `"gc:use::" + mode` w codegen.hcs/formatter.hcs) -
+    !! `Colon` (":"), DOWOLNY token (typowo identyfikator "use", ale
+    !! parser go nie sprawdza - patrz `self.advance()` bez `expect`),
+    !! potem `DColon` ("::") i dopiero `tryb`.
     fun parse_gc_pragma(self) -> Stmt [
         self.expect(Keyword, some("gc"))
         self.expect(Colon, none())
@@ -558,7 +596,28 @@ impl Parser [
                 self.advance()
                 self.skip_newlines()
             ] else [
+                !! NAPRAWIONE (wykryte przez `showcase.hcs` - `pub fun`
+                !! w `impl` konczylo sie kaskada "nieoczekiwany token")
+                !! - w przeciwienstwie do najwyzszego poziomu (patrz
+                !! obsluga "pub" w `parse_statement()`), ta petla
+                !! wolala `parse_fun()` BEZPOSREDNIO (z pominieciem
+                !! `parse_statement()`), wiec wiodace `pub` nie bylo w
+                !! ogole konsumowane.
+                let is_pub_method = false
+                if self.check(Keyword, some("pub")) [
+                    self.advance()
+                    is_pub_method = true
+                ]
                 let m = self.parse_fun()
+                if is_pub_method [
+                    match m [
+                        FunDecl(name, params, ret_type, body, mip, type_params2) -> [
+                            m = FunDecl(name, params, ret_type, body, true, type_params2)
+                        ]
+                        _ -> [
+                        ]
+                    ]
+                ]
                 methods.push(m)
                 self.skip_newlines()
             ]
@@ -787,31 +846,3 @@ fun main() [
     let prog = parse(src)
     log("instrukcje najwyzszego poziomu:", prog.body.len())
 ]
-
-!!! ## Ograniczenia tej wersji (patrz docs/ROADMAP.md)
-!!!
-!!! - `expect`/`parse_primary` nie maja prawdziwego `ParseError` -
-!!!   `log`-uja i probuja kontynuowac (best-effort), zamiast zatrzymac
-!!!   parsowanie z komunikatem linia+kolumna jak w Pythonie. To dzis
-!!!   NIE JEST podpiete pod `diagnostics.hcs` (krok 2/N) - osobny,
-!!!   przyszly krok.
-!!! - `parse_impl` ODRZUCA komentarze `!!` przed metoda (zbiera je, ale
-!!!   nie ma gdzie doczepic - `Stmt::FunDecl` nie ma pola na
-!!!   `_leading_doc_comments`, patrz "Ograniczenia" w ast_nodes.hcs).
-!!! - `parse_direct` jest siecia bezpieczenstwa (jak w Pythonie) - w
-!!!   PRAKTYCE `direct[]` musi byc wyciagniete PRZED wywolaniem
-!!!   `parse`/`tokenize` (osobny preprocessing krok w transpiler.py,
-!!!   NIE przepisany w tej sesji) - inaczej ta funkcja jest wywolana,
-!!!   ale zwraca pusty `DirectBlock`, gubiac cala tresc.
-!!! - Brak `_leading_comments` doczepianych do `parse_program`/
-!!!   `parse_block` (zbierane przez `skip_newlines_collect_comments`,
-!!!   ale WYNIK jest dzis IGNOROWANY przez wywolujacych - `Stmt` nie ma
-!!!   pola na to, tak jak `FunDecl` nie ma na doc-comments) - potrzebne
-!!!   dla przyszlego `formatter.hcs`.
-!!! - Kazde poprzednie odstepstwo udokumentowane w `ast_nodes.hcs`
-!!!   (brak `line: Int`, `is_doc` jako pole nie dynamiczny atrybut, itd.)
-!!!   dotyczy TEZ tego pliku.
-!!! - NIEPRZETESTOWANE na prawdziwym wejsciu w tym srodowisku (brak
-!!!   rustc) - zweryfikowane strukturalnie przez `hackerc check`/
-!!!   `build` i inspekcje wygenerowanego Rusta, patrz
-!!!   tests/test_hackerc.py.
