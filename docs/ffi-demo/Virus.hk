@@ -1,0 +1,8 @@
+[package]
+name = "ffi-demo"
+version = "0.0"
+using = "0.3"
+description = "Minimalny, samodzielny przyklad nowego FFI 0.3: get<extern:...> use<...> + region, oraz native {C++}."
+
+[build]
+entry = "cmd/main.hcs"
