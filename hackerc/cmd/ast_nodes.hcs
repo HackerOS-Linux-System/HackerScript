@@ -36,6 +36,18 @@ struct Param [
     default_expr: Option<Expr>
 ]
 
+!!! Jedna sygnatura wewnatrz `region [ ... ]` (0.3) - odpowiednik
+!!! pojedynczej deklaracji `fun nazwa(params) -> Typ` BEZ ciala,
+!!! przywiazanej do biblioteki zadeklarowanej poprzedzajacym
+!!! `get <extern:sciezka> use <tryb>` (patrz `RegionBlock` w `Stmt`
+!!! ponizej oraz `parse_region()`/`gen_region()`). Zastepuje stare,
+!!! jedno-funkcyjne `ExternFunDecl` z wersji < 0.3.
+struct ExternSig [
+    name: Str,
+    params: List<Param>,
+    ret_type: Option<TypeRef>
+]
+
 !!! Jedna galaz `elif cond [ body ]` - w Pythonie to `tuple[Expr,
 !!! list]` w `IfStmt.elifs`, tu WLASNY struct (HackerScript nie ma
 !!! generycznych tupli).
@@ -75,7 +87,7 @@ enum Stmt [
     LetStmt(Str, Option<TypeRef>, Option<Expr>, Bool),
     AssignStmt(Expr, Str, Expr),
     FunDecl(Str, List<Param>, Option<TypeRef>, List<Stmt>, Bool, List<Str>),
-    ExternFunDecl(Str, Str, List<Param>, Option<TypeRef>),
+    RegionBlock(List<ExternSig>),
     IfStmt(Expr, List<Stmt>, List<ElifArm>, Option<List<Stmt>>),
     WhileStmt(Expr, List<Stmt>),
     ForStmt(Str, Expr, List<Stmt>),
@@ -83,6 +95,13 @@ enum Stmt [
     BreakStmt,
     ContinueStmt,
     ExprStmt(Expr),
+    !! ZMIANA 0.3: dla `source == "extern"` trzecie pole (pierwotnie
+    !! `::wersja`) trzyma zamiast tego tryb linkowania z `use <tryb>`
+    !! ("static"/"dynamic") - `get <extern:...>` nie ma wersji, wiec
+    !! slot jest bezpiecznie ponownie uzyty zamiast dodawania nowego
+    !! wariantu `Stmt` (patrz `parse_get_import()`/`gen_get_import()`).
+    !! Dla kazdego innego `source` czwarte pole (`version`) znaczy
+    !! dokladnie to co wczesniej.
     GetImportStmt(Str, Str, Option<Str>, List<Str>),
     IncludeStmt(Str),
     UsingStmt(Str),
@@ -113,40 +132,3 @@ fun main() [
     let prog = Program([f])
     log("instrukcje w programie:", prog.body.len())
 ]
-
-!!! ## Ograniczenia tej wersji (patrz docs/ROADMAP.md)
-!!!
-!!! - `Expr::IdentExpr` jest nazwane INACZEJ niz Pythonowe `class Ident`
-!!!   - `TokKind::Ident` (lexer.hcs) i `Expr::Ident` kolidowalyby jako
-!!!   dwa warianty o tej samej nazwie w dwoch roznych enumach, co ten
-!!!   bootstrap ZABRANIA globalnie (patrz E0010 - nazwy wariantow musza
-!!!   byc unikalne w CALYM programie, nie tylko w obrebie jednego enuma,
-!!!   dokladnie ten sam rodzaj kolizji co juz udokumentowany gdzie
-!!!   indziej w docs/ROADMAP.md). `TokKind::Ident` zostalo, bo ma wiecej
-!!!   miejsc uzycia (lexer.hcs + caly parser.hcs); zmienic nazwe
-!!!   musialo `Expr::IdentExpr`.
-!!! - Brak pola `line: Int` na kazdym wezle (Pythonowe `Node.line`) -
-!!!   `parser.hcs` (kolejny plik) rowniez go dzis nie ustawia - komunikaty
-!!!   bledow z `typecheck.hcs` (przyszly krok) beda musialy sobie radzic
-!!!   bez precyzyjnych numerow linii, albo ten brak trzeba bedzie
-!!!   nadrobic pozniej (osobny krok, NIE ten).
-!!! - `StringLit` ma DODATKOWE pole `is_doc: Bool`, ktorego NIE MA w
-!!!   Pythonowej dataclass `StringLit` (tam `_is_doc = True` jest
-!!!   dynamicznym atrybutem dolepianym po konstrukcji WYLACZNIE dla
-!!!   komentarzy dokumentacyjnych `!!` na poziomie instrukcji - patrz
-!!!   `parse_statement` w parser.py). HackerScript nie ma dynamicznych
-!!!   atrybutow struct, wiec to pole musialo stac sie CZESCIA
-!!!   definicji, nie dolepiane po fakcie.
-!!! - `Param`/`LetStmt` uzywaja nazw `type_ref`/`default_expr` zamiast
-!!!   Pythonowych `type_`/`default` - `type`/`default` kolidowalyby z
-!!!   innymi uzyciami w tym samo-hostowanym kompilatorze (np. `type_ref`
-!!!   jako parametr funkcji gdzie indziej).
-!!! - `ImplDecl.methods`/`impl`-blok w `DirectBlock.raw_lines` uzywaja
-!!!   `List<Stmt>`/`List<Str>` bez STATYCZNEGO wymuszenia "tylko
-!!!   FunDecl"/"tylko linie tekstu" - to (jak w Pythonie, gdzie `list`
-!!!   rowniez nie wymusza typu elementow) jest kontraktem parsera
-!!!   (`parser.hcs`), nie systemu typow.
-!!! - NIEPRZETESTOWANE na prawdziwym wejsciu w tym srodowisku (brak
-!!!   rustc) - zweryfikowane strukturalnie przez `hackerc check`/
-!!!   `build` i inspekcje wygenerowanego Rusta, patrz
-!!!   tests/test_hackerc.py.
