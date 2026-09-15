@@ -111,7 +111,7 @@ impl Formatter [
 
     !!! Parametry `fun`/pola `struct` sformatowane jako `nazwa: Typ` (z
     !!! wartoscia domyslna `= wyrazenie` dla parametrow, jesli jest) -
-    !!! wspolne dla `fmt_fun`/`ExternFunDecl`.
+    !!! wspolne dla `fmt_fun`/`RegionBlock` (sygnatury 0.3).
     fun fmt_param(self, p: Param) -> Str [
         let hint = ""
         match p.type_ref.clone() [
@@ -280,23 +280,37 @@ impl Formatter [
             FunDecl(name, params, ret, body, is_pub, type_params) -> [
                 self.fmt_fun(name, params, ret, body, is_pub, type_params)
             ]
-            ExternFunDecl(lib, name, params, ret) -> [
-                let param_strs: List<Str> = []
+            !! ZMIANA 0.3 - `RegionBlock` zastepuje `ExternFunDecl`:
+            !! `region [ ... ]` z jedna sygnatura na linie, kazda w
+            !! stylu `fun nazwa(params) -> Typ` (bez ciala) - parytet
+            !! wizualny z `fmt_fun` dla naglowka funkcji.
+            RegionBlock(sigs) -> [
+                self.emit("region [")
+                self.indent = self.indent + 1
                 let i = 0
-                let n = params.len()
+                let n = sigs.len()
                 while i < n [
-                    param_strs.push(self.fmt_param(params[i].clone()))
+                    let sig = sigs[i].clone()
+                    let param_strs: List<Str> = []
+                    let j = 0
+                    let pn = sig.params.len()
+                    while j < pn [
+                        param_strs.push(self.fmt_param(sig.params[j].clone()))
+                        j = j + 1
+                    ]
+                    let ret_str = ""
+                    match sig.ret_type [
+                        Some(rt) -> [
+                            ret_str = " -> " + self.fmt_type(rt)
+                        ]
+                        None -> [
+                        ]
+                    ]
+                    self.emit("fun " + sig.name + "(" + join_str_list(param_strs, ", ") + ")" + ret_str)
                     i = i + 1
                 ]
-                let ret_str = ""
-                match ret [
-                    Some(rt) -> [
-                        ret_str = " -> " + self.fmt_type(rt)
-                    ]
-                    None -> [
-                    ]
-                ]
-                self.emit("extern \"" + lib + "\" fun " + name + "(" + join_str_list(param_strs, ", ") + ")" + ret_str)
+                self.indent = self.indent - 1
+                self.emit("]")
             ]
             IfStmt(cond, body, elifs, else_body) -> [
                 self.emit("if " + self.fmt_expr(cond) + " [")
@@ -603,22 +617,3 @@ fun main() [
     let out = format_source(src, "<demo>")
     log(out)
 ]
-
-!!! ## Ograniczenia tej wersji (patrz docs/ROADMAP.md)
-!!!
-!!! - Komentarze jednoliniowe `!` przylegajace do instrukcji i `!!`
-!!!   przylegajace bezposrednio do `fun` SA GUBIONE (patrz duza uwaga
-!!!   na gorze pliku) - ograniczenie `ast_nodes.hcs`/`parser.hcs`, nie
-!!!   tego pliku. `!!` jako WLASNA instrukcja (linia doc-comment sama
-!!!   w sobie, styl uzywany w calym tym bootstrapie) JEST zachowywana.
-!!! - `DirectBlock` (natywny wariant `Stmt` w ast_nodes.hcs) jest
-!!!   obslugiwany w `fmt_stmt` dla kompletnosci dopasowania, ale w
-!!!   praktyce nieosiagalny z `format_source` - `direct[...]` zawsze
-!!!   przechodzi przez `extract_direct_blocks` (preprocessing z
-!!!   transpiler.hcs) i konczy jako `ExprStmt(Call(IdentExpr(
-!!!   "__direct__"), [NumberLit(idx)]))`, nie `DirectBlock`.
-!!! - NIEPRZETESTOWANE na prawdziwym wejsciu w tym srodowisku bez
-!!!   pelnego `rustc`/`cargo` w oryginalnym stage0 - w TEJ sesji
-!!!   zweryfikowane strukturalnie (`hackerc check`) i, gdzie to
-!!!   mozliwe, przez faktyczne `cargo build` na wygenerowanym kodzie
-!!!   (patrz bootstrap/README.md, sekcja o tej sesji).
