@@ -3,6 +3,7 @@ include <parser>
 include <codegen>
 include <transpiler>
 get <std:io> import <file_readable>
+get <std:string> import <str_join::str_split::str_trim::str_starts_with>
 
 const CARGO_TOML_HEADER: Str = "[package]\nname = \""
 const CARGO_TOML_MID: Str = "\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\n[[bin]]\nname = \""
@@ -162,12 +163,20 @@ fun find_bootstrap_root(start: Str) -> Option<Str> [
 !!! `virus/cmd/vira.hcs`/`virus/cmd/cache.hcs::cache_lib_path`).
 !!! DODANE w tej rundzie - odblokowuje `get <vira:nazwa[::plik]>` dla
 !!! bibliotek Vira typu "git" (kod zrodlowy .hcs) - `static-lib`/
-!!! `shared-lib`/`rust-lib` sa uzywane INACZEJ, przez `extern "nazwa"
-!!! fun ...` (patrz `gen_extern`/`ExternFunDecl`) PO automatycznym
+!!! `shared-lib`/`rust-lib` sa uzywane INACZEJ: od 0.3 przez
+!!! `get <extern:nazwa> use <static|dynamic>` + `region [ ... ]`
+!!! (patrz `gen_region`/`RegionBlock` w codegen.hcs/ast_nodes.hcs;
+!!! zastepuje stare, jedno-funkcyjne `extern "nazwa" fun ...`/
+!!! `gen_extern`/`ExternFunDecl` sprzed 0.3) PO automatycznym
 !!! podlinkowaniu przez `virus build` (patrz
-!!! `virus/cmd/build.hcs::build_wire_vira_dependencies`), NIE przez
-!!! `get<...>` - `git`-type to jedyny typ Vira bedacy prawdziwym
-!!! zrodlem .hcs do wspolnego skompilowania z projektem.
+!!! `virus/cmd/build.hcs::build_wire_extern_dependencies` - przemianowane
+!!! z `build_wire_vira_dependencies` w 0.3), NIE przez
+!!! `get <vira:...>` - `git`-type to jedyny typ Vira bedacy prawdziwym
+!!! zrodlem .hcs do wspolnego skompilowania z projektem. Analogicznie,
+!!! `get <c:nazwa>`/`get <cpp:nazwa>` (0.3) deklaruja zaleznosc od
+!!! biblioteki C/C++ budowanej przez `cc`, rowniez wywolywanej przez
+!!! `get <extern:...> use <...>` + `region [ ... ]`, NIGDY jako .hcs
+!!! do sparsowania - stad rowniez pomijane w kolejce ponizej.
 fun find_vira_cache_root(start: Str) -> Option<Str> [
     let d = to_absolute_dir(start)
     let prev_d = "\0no-such-dir"
@@ -302,7 +311,11 @@ struct ProjectResult [
     needs_hot_reload: Bool,
     crates_deps_names: List<Str>,
     crates_deps_versions: List<Str>,
-    warnings: List<Str>
+    warnings: List<Str>,
+    !! ZMIANA 0.3 - patrz `TranspileResult::needs_native_cpp`/
+    !! `extern_link_specs` w transpiler.hcs.
+    needs_native_cpp: Bool,
+    extern_links_path: Option<Str>
 ]
 
 !!! Wewnetrzny akumulator odkrytych plikow + kolejki BFS importow -
@@ -441,9 +454,12 @@ impl Discovery [
 !!! kazdego elementu - potrzebny pozniej WYLACZNIE dla `IncludeStmt`.
 !!! `vira` DODANE w tej rundzie - TYLKO dla bibliotek Vira typu "git"
 !!! (patrz `find_vira_cache_root`) - `static-lib`/`shared-lib`/
-!!! `rust-lib` nie sa .hcs zrodlem, wiec nigdy nie trafiaja tutaj (nie
-!!! ma dla nich zadnego pliku do sparsowania - sa uzywane przez
-!!! `extern "nazwa" fun ...` po podlinkowaniu).
+!!! `rust-lib` (ani `get <c:...>`/`get <cpp:...>`, DODANE w 0.3) nie sa
+!!! .hcs zrodlem, wiec nigdy nie trafiaja tutaj (nie ma dla nich
+!!! zadnego pliku do sparsowania - sa uzywane przez
+!!! `get <extern:nazwa> use <tryb>` + `region [ ... ]` po
+!!! podlinkowaniu, patrz komentarz przy `find_vira_cache_root`
+!!! powyzej).
 fun collect_module_imports(prog: Program, base_dir: Str, queue: List<QueueItem>) [
     let i = 0
     let n = prog.body.len()
@@ -600,7 +616,7 @@ fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_roo
     end ProjectSignatures(sigs, disc.warnings)
 ]
 
-fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, needs_sandbox: Bool, needs_hot_reload: Bool, deps_names: List<Str>, deps_versions: List<Str>) -> Str [
+fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, needs_sandbox: Bool, needs_hot_reload: Bool, needs_native_cpp: Bool, deps_names: List<Str>, deps_versions: List<Str>) -> Str [
     let deps_lines = ""
     if needs_pyo3 [
         deps_lines = deps_lines + "pyo3 = { version = \"0.22\", features = [\"auto-initialize\"] }\n"
@@ -620,7 +636,17 @@ fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, ne
         deps_lines = deps_lines + deps_names[i] + " = \"" + deps_versions[i] + "\"\n"
         i = i + 1
     ]
-    end CARGO_TOML_HEADER + crate_name + CARGO_TOML_MID + crate_name + CARGO_TOML_TAIL + deps_lines
+    !!! ZMIANA 0.3 - `native` `{C++}` `[ ... ]` (patrz `codegen.hcs::gen_native`)
+    !!! wymaga kompilatora C++ dostepnego przez `cc::Build` w
+    !!! `build.rs` - `cc` idzie do `[build-dependencies]` (NIE
+    !!! `[dependencies]`, bo dziala TYLKO w trakcie budowy, nie w
+    !!! wygenerowanym binarnym), pisany przez `virus build` po tym
+    !!! pliku (patrz `virus/cmd/build.hcs::build_wire_extern_dependencies`).
+    let build_deps_section = ""
+    if needs_native_cpp [
+        build_deps_section = "\n[build-dependencies]\ncc = \"1\"\n"
+    ]
+    end CARGO_TOML_HEADER + crate_name + CARGO_TOML_MID + crate_name + CARGO_TOML_TAIL + deps_lines + build_deps_section
 ]
 
 !!! Wstawia `mod X;` (deklaracje modulow) do `entry_rust` PO ostatniej
@@ -770,6 +796,13 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     let needs_native_js = false
     let needs_sandbox = false
     let needs_hot_reload = false
+    !!! ZMIANA 0.3 - patrz `TranspileResult::needs_native_cpp`/
+    !!! `extern_link_specs` (transpiler.hcs) i `collect_extern_link_specs`.
+    let needs_native_cpp = false
+    let extern_link_specs: List<Str> = []
+    !! DODANE - patrz `CodeGen::native_cpp_sources`/`TranspileResult::native_cpp_sources`.
+    let native_cpp_sources: Dict<Str, Str> = dict()
+    let native_cpp_names: List<Str> = []
     let hot_reload_bodies: Dict<Str, Str> = dict()
     let hot_reload_order: List<Str> = []
     let hot_reload_source_path = ""
@@ -793,6 +826,37 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
         ]
         if r.needs_sandbox [
             needs_sandbox = true
+        ]
+        if r.needs_native_cpp [
+            needs_native_cpp = true
+        ]
+        let eli = 0
+        let eln = r.extern_link_specs.len()
+        while eli < eln [
+            extern_link_specs.push(r.extern_link_specs[eli].clone())
+            eli = eli + 1
+        ]
+        !! DODANE - scala `r.native_cpp_sources` (per-plikowy Dict z
+        !! `TranspileResult`) do jednego, projektowego `native_cpp_sources`
+        !! (klucze - nazwy `__hks_native_cpp_block_N` - sa unikalne
+        !! globalnie w ramach JEDNEGO pliku, patrz `idx_text` w
+        !! `codegen.hcs::gen_native`; miedzy plikami kolizja jest
+        !! teoretycznie mozliwa, ale nieobslugiwana w tej rundzie,
+        !! patrz docs/ROADMAP.md).
+        let ncsi = 0
+        let ncsn = r.native_cpp_order.len()
+        while ncsi < ncsn [
+            let fnname = r.native_cpp_order[ncsi].clone()
+            match r.native_cpp_sources.fetch(fnname.clone()) [
+                Some(src) -> [
+                    native_cpp_sources.insert(fnname.clone(), src)
+                    native_cpp_names.push(fnname.clone())
+                    extern_link_specs.push("native_cpp\t" + fnname + "\t")
+                ]
+                None -> [
+                ]
+            ]
+            ncsi = ncsi + 1
         ]
         if r.needs_hot_reload [
             needs_hot_reload = true
@@ -865,12 +929,94 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     ]
 
     let cargo_toml_path = out_dir + "/Cargo.toml"
-    let cargo_text = cargo_toml_text(crate_name, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, crates_names.clone(), crates_versions.clone())
+    let cargo_text = cargo_toml_text(crate_name, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, needs_native_cpp, crates_names.clone(), crates_versions.clone())
     match write_file(cargo_toml_path.clone(), cargo_text) [
         Ok(_v) -> [
         ]
         Err(e) -> [
             warnings.push(cargo_toml_path + ": " + e)
+        ]
+    ]
+
+    !! DODANE - materializuje kazdy `native` `{C++}` `[ ... ]` (patrz
+    !! `CodeGen::native_cpp_sources`) jako `out_dir/native/<fn_name>.cpp`,
+    !! zawijajac surowy kod jako cialo `extern "C" void <fn_name>()`
+    !! (dokladnie to, czego oczekuje deklaracja FFI wyemitowana przez
+    !! `gen_native()` w `main.rs`/module) - `virus build` kompiluje ten
+    !! plik przez `cc::Build` na podstawie linii "native_cpp" w
+    !! `.hks-extern-links.txt` nizej.
+    let nci = 0
+    let ncn = native_cpp_names.len()
+    if ncn > 0 [
+        let native_dir = out_dir + "/native"
+        match create_dir(native_dir.clone()) [
+            Ok(_v) -> [
+            ]
+            Err(e) -> [
+                warnings.push(native_dir + ": " + e)
+            ]
+        ]
+    ]
+    while nci < ncn [
+        let fnname = native_cpp_names[nci].clone()
+        match native_cpp_sources.fetch(fnname.clone()) [
+            Some(src) -> [
+                let cpp_path = out_dir + "/native/" + fnname + ".cpp"
+                !! NAPRAWIONE (wykryte przez showcase.hcs) - jesli
+                !! `src` zawiera dyrektywy preprocesora (`#include`,
+                !! `#define`...), nie moga one ladowac sie WEWNATRZ
+                !! ciala funkcji (`extern "C" void fn() { #include
+                !! <cstdio> ... }` psuje widocznosc deklaracji jak
+                !! `printf` dla reszty bloku) - trzeba je wypchnac PRZED
+                !! `extern "C" void ...`, na poziom pliku.
+                let src_lines = str_split(src.clone(), "\n")
+                let preproc_lines: List<Str> = []
+                let body_lines: List<Str> = []
+                let sli = 0
+                let sln = src_lines.len()
+                while sli < sln [
+                    let line = src_lines[sli].clone()
+                    if str_starts_with(str_trim(line.clone()), "#") [
+                        preproc_lines.push(line)
+                    ] else [
+                        body_lines.push(line)
+                    ]
+                    sli = sli + 1
+                ]
+                let cpp_text = str_join(preproc_lines, "\n") + "\nextern \"C\" void " + fnname + "() {\n" + str_join(body_lines, "\n") + "\n}\n"
+                match write_file(cpp_path.clone(), cpp_text) [
+                    Ok(_v) -> [
+                    ]
+                    Err(e) -> [
+                        warnings.push(cpp_path + ": " + e)
+                    ]
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        nci = nci + 1
+    ]
+
+    !!! ZMIANA 0.3 - sidecar `.hks-extern-links.txt` (jedna linia
+    !!! "kind\tname\ttryb" na `get <extern:...> use <...>`/
+    !!! `get <c:...>`/`get <cpp:...>` znaleziony w calym module) -
+    !!! jedyny kanal miedzy `hackerc` (ten plik) a `virus build`
+    !!! (osobna binarka - patrz `TranspileResult::extern_link_specs`
+    !!! wyzej). Pomijany calkowicie (brak pliku), jesli zaden taki
+    !!! `get <...>` nie wystapil - `virus build` traktuje brak pliku
+    !!! jako "nic do polaczenia", parytet z reszta best-effort/
+    !!! brak-pliku-znaczy-brak-pracy tego bootstrapu.
+    let extern_links_path: Option<Str> = none()
+    if extern_link_specs.len() > 0 [
+        let links_path = out_dir + "/.hks-extern-links.txt"
+        match write_file(links_path.clone(), str_join(extern_link_specs.clone(), "\n") + "\n") [
+            Ok(_v) -> [
+                extern_links_path = some(links_path)
+            ]
+            Err(e) -> [
+                warnings.push(links_path + ": " + e)
+            ]
         ]
     ]
 
@@ -915,7 +1061,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
         ]
     ]
 
-    end ProjectResult(out_dir, main_rs_path, module_files, cargo_toml_path, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, crates_names, crates_versions, warnings)
+    end ProjectResult(out_dir, main_rs_path, module_files, cargo_toml_path, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, crates_names, crates_versions, warnings, needs_native_cpp, extern_links_path)
 ]
 
 !!! Demonstracyjne uzycie - `flat_module_name`/`module_file_path` na
@@ -928,33 +1074,3 @@ fun main() [
     let path = module_file_path("/repo/libs", "core", "memory", some("arena"))
     log("module_file_path:", path)
 ]
-
-!!! ## Ograniczenia tej wersji (patrz docs/ROADMAP.md)
-!!!
-!!! - `find_libs_root`/`find_bootstrap_root` sonduja obecnosc pliku-
-!!!   znacznika zamiast prawdziwego sprawdzenia katalogu (brak
-!!!   `is_dir` w tym bootstrapie) - patrz duza uwaga na gorze pliku.
-!!! - `build_project` NIE TWORZY `out_dir`/`out_dir/src` (brak `mkdir`)
-!!!   - WYWOLUJACY musi je przygotowac; w przeciwnym razie kazdy zapis
-!!!   ladu je jako wpis w `warnings` zamiast sie udac.
-!!! - `read_file`/`parse` sa best-effort (patrz uwagi w parser.hcs) -
-!!!   `resolve`/`build_project` NIE PRZERYWAJA na bledzie parsera
-!!!   jednego pliku tak jak Pythonowy `ProjectError` (ktory od razu
-!!!   przerywa cala budowe) - zamiast tego plik z bledem I/O trafia do
-!!!   `warnings` i jest pomijany, a plik z bledem SKLADNI (ktorego
-!!!   `parse()` nie sygnalizuje wcale - zwraca best-effort AST) po
-!!!   prostu przechodzi dalej z niepelnym/bledym AST. Inny profil
-!!!   bledow niz Python, konsekwencja tego samego ograniczenia
-!!!   `parser.hcs` udokumentowanego w transpiler.hcs.
-!!! - `Discovery::resolve`/`collect_project_signatures` NIE deduplikuja
-!!!   `crates_deps` (Pythonowy `dict[str,str]` scala duplikaty po
-!!!   nazwie paczki automatycznie; tu `crates_names`/`crates_versions`
-!!!   to rownolegle listy, wiec dwa pliki importujace ta sama paczke
-!!!   `crates` wygeneruja DWA wpisy w Cargo.toml - nieszkodliwe dla
-!!!   Cargo w praktyce, ale nie jest to bajt-w-bajt ten sam plik co z
-!!!   Pythona).
-!!! - NIEPRZETESTOWANE na prawdziwym wielomodulowym projekcie w tym
-!!!   srodowisku (wymaga katalogu wyjsciowego przygotowanego z gory,
-!!!   patrz wyzej) - zweryfikowane strukturalnie (`hackerc check`/
-!!!   `build`) i, gdzie to mozliwe, przez faktyczne `cargo build` na
-!!!   wygenerowanym kodzie (patrz bootstrap/README.md).
