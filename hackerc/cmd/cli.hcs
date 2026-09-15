@@ -8,7 +8,7 @@ include <project>
 get <std:io> import <file_readable>
 get <std:term> import <c_bold_green::c_bold_red::c_bold_cyan::c_red::c_gray::print_progress_line>
 
-const VERSION: Str = "0.2"
+const VERSION: Str = "0.3"
 
 !!! DODANE w tej rundzie (patrz docs/ROADMAP.md) - `hackerc` byl do tej
 !!! pory calkowicie monochromatyczny (`log("hackerc: ...", ...)`).
@@ -19,7 +19,7 @@ const VERSION: Str = "0.2"
 const BUILD_STEP_COUNT: Int = 4
 
 !!! `parse()` ale z tym samym preprocessingiem `direct [ ... ]` I
-!!! `native {Silnik} [ ... ]` co transpilacja - inaczej pliki z
+!!! `native` `{Silnik}` `[ ... ]` co transpilacja - inaczej pliki z
 !!! `direct[...]`/`native{...}[...]` psulyby `check`/`lint` mylacym
 !!! bledem parsera (`direct`/`native` sa normalnymi slowami
 !!! kluczowymi TYLKO na etapie preprocessingu, patrz transpiler.hcs).
@@ -204,13 +204,23 @@ fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<St
                 log(c_bold_cyan("hackerc build:") + " wykryto direct[ ... ] -> Cargo.toml zawiera zaleznosc pyo3 (auto-initialize)")
             ]
             if result.needs_native_js [
-                log(c_bold_cyan("hackerc build:") + " wykryto native{JavaScript} [ ... ] -> Cargo.toml zawiera zaleznosc rquickjs")
+                log(c_bold_cyan("hackerc build:") + " wykryto blok inline JavaScript (native) -> Cargo.toml zawiera zaleznosc rquickjs")
             ]
             if result.needs_sandbox [
                 log(c_bold_cyan("hackerc build:") + " wykryto $ ... $ (Zero-Cost Sandbox) -> Cargo.toml zawiera zaleznosc libc")
             ]
             if result.needs_hot_reload [
                 log(c_bold_cyan("hackerc build:") + " wykryto @hot_reload -> utworzono " + out_dir + "/hotlib/ (zbuduj osobno: cargo build --release --manifest-path " + out_dir + "/hotlib/Cargo.toml), ustaw HKS_HOT_OUT_DIR=" + out_dir + " przed uruchomieniem")
+            ]
+            if result.needs_native_cpp [
+                log(c_bold_cyan("hackerc build:") + " wykryto blok kompilowanego build-time C++ (native) -> Cargo.toml zawiera zaleznosc budujaca 'cc' ([build-dependencies])")
+            ]
+            match result.extern_links_path [
+                Some(lp) -> [
+                    log(c_bold_cyan("hackerc build:") + " wykryto get <extern:...>/get <c:...>/get <cpp:...> -> zapisano " + lp + " (przeczyta 'virus build', patrz build_wire_extern_dependencies)")
+                ]
+                None -> [
+                ]
             ]
             if result.crates_deps_names.len() > 0 [
                 log(c_bold_cyan("hackerc build:") + " zaleznosci Cargo z get<crates:...>: " + join_str_list(result.crates_deps_names, ", "))
@@ -554,18 +564,3 @@ fun main() [
     ]
     exit(cmd_transpile_legacy(legacy_src, legacy_out))
 ]
-
-!!! ## Ograniczenia tej wersji (patrz docs/ROADMAP.md)
-!!!
-!!! - `find_flag_value`/`first_positional` obsluguja TYLKO skladnie
-!!!   `-o wartosc`/`--output wartosc` (rozdzielone spacja) - argparse'owe
-!!!   `--output=wartosc` (znak `=`) NIE JEST rozpoznawane.
-!!! - `cmd_build`/`cmd_transpile_legacy` dziedzicza wszystkie
-!!!   ograniczenia `project.hcs`/`transpiler.hcs` (m. in. brak
-!!!   tworzenia katalogow wyjsciowych, best-effort parser bez
-!!!   `Result` dla bledow skladni) - patrz "Ograniczenia" w tamtych
-!!!   plikach.
-!!! - NIEPRZETESTOWANE na prawdziwym wejsciu z dysku w tym srodowisku
-!!!   poza demo w `main()` - zweryfikowane strukturalnie (`hackerc
-!!!   check`/`build`) i, gdzie to mozliwe, przez faktyczne `cargo
-!!!   build` na wygenerowanym kodzie (patrz bootstrap/README.md).
