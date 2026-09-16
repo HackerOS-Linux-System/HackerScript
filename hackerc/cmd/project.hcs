@@ -2,6 +2,7 @@ include <ast_nodes>
 include <parser>
 include <codegen>
 include <transpiler>
+include <hlib>
 get <std:io> import <file_readable>
 get <std:string> import <str_join::str_split::str_trim::str_starts_with>
 
@@ -214,6 +215,63 @@ fun vira_module_file_path(vira_root: Str, name: Str, version: Option<Str>) -> St
     end path + ".hcs"
 ]
 
+!!! Szuka archiwum `.hlib` dla `get <hlib:name[::version]>`, w tej
+!!! kolejnosci:
+!!!   1. `<vira_root>/<name>/<name>.hlib` i `<vira_root>/<name>/dist/<name>.hlib`
+!!!      - paczka Vira MOZE dostarczac prekompilowany `.hlib` obok (albo
+!!!        zamiast) surowego `.hcs` - to jest "liby vira jako hlib"
+!!!   2. `<base_dir_lub_przodek>/hlibs/<name>.hlib` - wlasne `.hlib`
+!!!      projektu, szukane w gore drzewa katalogow (jak `bytes ->` w H#)
+!!!   3. `<libs_root>/hlib/<name>.hlib` - globalny slot obok `std`/`core`
+!!!   4. `/usr/lib/HackerOS/HackerScript/hlibs/<name>.hlib` - systemowy
+!!! Kazdy krok probuje najpierw `<name>-<version>.hlib` (jesli podano
+!!! wersje), potem `<name>.hlib`.
+fun find_hlib_file_path(name: Str, version: Option<Str>, base_dir: Str, vira_root: Option<Str>, libs_root: Option<Str>) -> Option<Str> [
+    let filenames: List<Str> = []
+    match version.clone() [
+        Some(v) -> [ filenames.push(name + "-" + v + ".hlib") ]
+        None -> [ ]
+    ]
+    filenames.push(name + ".hlib")
+
+    let dirs: List<Str> = []
+    match vira_root.clone() [
+        Some(vr) -> [
+            dirs.push(vr + "/" + name)
+            dirs.push(vr + "/" + name + "/dist")
+        ]
+        None -> [ ]
+    ]
+
+    let d = to_absolute_dir(base_dir)
+    let prev_d = "\0no-such-dir"
+    while d != prev_d [
+        dirs.push(path_join_safe(d.clone(), "hlibs"))
+        prev_d = d.clone()
+        d = path_parent(d)
+    ]
+
+    match libs_root.clone() [
+        Some(lr) -> [ dirs.push(lr + "/hlib") ]
+        None -> [ ]
+    ]
+    dirs.push("/usr/lib/HackerOS/HackerScript/hlibs")
+
+    let di = 0
+    while di < dirs.len() [
+        let fi = 0
+        while fi < filenames.len() [
+            let candidate = path_join_safe(dirs[di].clone(), filenames[fi].clone())
+            if file_readable(candidate.clone()) [
+                end some(candidate)
+            ]
+            fi = fi + 1
+        ]
+        di = di + 1
+    ]
+    end none()
+]
+
 
 !!! katalog PLIKU, w ktorym sie znajduje (potrzebny WYLACZNIE dla
 !!! `IncludeStmt`, rozwiazywanego wzgledem tego katalogu - `GetImportStmt`
@@ -397,6 +455,23 @@ impl Discovery [
                                     self.warnings.push("get <vira:" + iname.clone() + "> - nie znaleziono katalogu cache/libs/vira/ - uruchom `virus install vira " + iname.clone() + "` (modul " + flat.clone() + " nie zostanie zbudowany)")
                                 ]
                             ]
+                        ] elif isource == "hlib" [
+                            let hlib_path = find_hlib_file_path(iname.clone(), iversion.clone(), base_dir.clone(), vira_root.clone(), libs_root.clone())
+                            match hlib_path [
+                                Some(hp) -> [
+                                    let extract_dir = path_join_safe(path_parent(hp.clone()), ".hlib-extracted/" + iname.clone())
+                                    let bound_file = hlib_extract_for_import(hp.clone(), iname.clone(), extract_dir)
+                                    if bound_file == "" [
+                                        self.warnings.push("get <hlib:" + iname.clone() + "> -> " + hp.clone() + " nie ma ani artefaktu `ast`, ani `.so` dla tego hosta - nic do zaimportowania")
+                                    ] else [
+                                        mod_file = bound_file
+                                        have_root = true
+                                    ]
+                                ]
+                                None -> [
+                                    self.warnings.push("get <hlib:" + iname.clone() + "> - nie znaleziono .hlib. Sprawdzone: <vira>/" + iname.clone() + "/" + iname.clone() + ".hlib, hlibs/" + iname.clone() + ".hlib (w projekcie i katalogach nadrzednych), libs/hlib/" + iname.clone() + ".hlib, /usr/lib/HackerOS/HackerScript/hlibs/" + iname.clone() + ".hlib. Zbuduj jeden przez `hackerc build --hlib " + iname.clone() + ".hcs`.")
+                                ]
+                            ]
                         ] else [
                             match libs_root.clone() [
                                 Some(lr) -> [
@@ -459,7 +534,13 @@ impl Discovery [
 !!! zadnego pliku do sparsowania - sa uzywane przez
 !!! `get <extern:nazwa> use <tryb>` + `region [ ... ]` po
 !!! podlinkowaniu, patrz komentarz przy `find_vira_cache_root`
-!!! powyzej).
+!!! powyzej). `hlib` DODANE w 0.4 (patrz `hlib.hcs` i
+!!! `find_hlib_file_path` powyzej) - w odroznieniu od `vira`/`c`/`cpp`
+!!! ZAWSZE konczy sie plikiem `.hcs` do sparsowania (badz to prawdziwym
+!!! zrodlem z artefaktu `ast`, badz to WYGENEROWANYM przez
+!!! `hlib_extract_for_import` stubem `get <extern:...>`+`region`) -
+!!! wiec `get <hlib:x>` nigdy nie wymaga od uzytkownika pisania
+!!! `extern`/`native` samemu, tylko samego `get <hlib:x>`.
 fun collect_module_imports(prog: Program, base_dir: Str, queue: List<QueueItem>) [
     let i = 0
     let n = prog.body.len()
@@ -467,7 +548,7 @@ fun collect_module_imports(prog: Program, base_dir: Str, queue: List<QueueItem>)
         let s = prog.body[i].clone()
         match s.clone() [
             GetImportStmt(source, name, version, details) -> [
-                if source == "std" or source == "core" or source == "selfhost" or source == "virus" or source == "vira" [
+                if source == "std" or source == "core" or source == "selfhost" or source == "virus" or source == "vira" or source == "hlib" [
                     queue.push(QueueItem(s, base_dir.clone()))
                 ]
             ]
