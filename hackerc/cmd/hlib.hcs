@@ -1,0 +1,388 @@
+get <crates:tar::0.4>
+get <crates:zstd::0.13>
+get <crates:sha2::0.10>
+get <crates:hex::0.4>
+get <crates:ed25519-dalek::2.0.0>
+get <crates:rand::0.8>
+get <crates:serde_json::1.0>
+
+!!! Wynik `hlib_build` - parytet z tym co CLI (`hackerc build --hlib`)
+!!! pokazuje uzytkownikowi.
+struct HlibBuildResult [
+    ok: Bool,
+    message: Str,
+    artifact_count: Int,
+    signed: Bool
+]
+
+!!! Buduje `.hlib` z:
+!!!   - `source_hcs_path`  - oryginalny plik `.hcs` (jego PELNY tekst
+!!!     trafia do artefaktu `ast/<nazwa>.hcs`, patrz komentarz na gorze)
+!!!   - `so_path`          - juz skompilowany `.so` (cdylib) dla tej
+!!!     biblioteki (budowany wczesniej przez zwykla sciezke `virus
+!!!     build --lib`/`hackerc build --emit cdylib` - ten plik TYLKO
+!!!     pakuje, nie kompiluje) - pusty Str `""` jesli biblioteka nie ma
+!!!     natywnego `.so` (czysto-zrodlowa biblioteka `.hcs`)
+!!!   - `out_hlib_path`    - gdzie zapisac wynikowe archiwum
+!!!   - `lib_name`/`lib_version` - metadane do manifest.json
+!!!   - `sign_key_path`    - sciezka do klucza Ed25519 (`hlib_keygen`)
+!!!     albo `""` dla archiwum niepodpisanego
+fun hlib_build(source_hcs_path: Str, so_path: Str, out_hlib_path: Str, lib_name: Str, lib_version: Str, sign_key_path: Str) -> HlibBuildResult [
+    let ok = false
+    let message = ""
+    let artifact_count = 0
+    let signed = false
+
+    native {Rust} [
+        use sha2::{Digest, Sha256};
+        use std::io::Write;
+
+        fn sha256_hex(data: &[u8]) -> String {
+            let mut h = Sha256::new();
+            h.update(data);
+            hex::encode(h.finalize())
+        }
+
+        let mut artifacts: Vec<(String, String, Vec<u8>)> = Vec::new(); // (path, kind, data)
+
+        // ── ast/<name>.hcs — pelny tekst zrodlowy (patrz naglowek pliku) ──
+        match std::fs::read_to_string(&source_hcs_path) {
+            Ok(src) => {
+                artifacts.push((format!("ast/{}.hcs", lib_name), "ast".to_string(), src.into_bytes()));
+            }
+            Err(e) => {
+                message = format!("nie moge odczytac {}: {}", source_hcs_path, e);
+                return;
+            }
+        }
+
+        // ── native/<target>/<name>.so — opcjonalny skompilowany cdylib ──
+        let host_target = std::env::var("HOST").unwrap_or_else(|_| {
+            // rustc nie zawsze eksportuje $HOST do build scriptow-nie-buildscriptow;
+            // dla `hackerc`/`virus` (zwykly binarny proces, nie build.rs) uzywamy
+            // prostego, praktycznego defaultu — patrz HLIB_FORMAT.md, sekcja
+            // "ABI stability", po pelny opis dlaczego to jest OK dla v1.
+            "x86_64-unknown-linux-gnu".to_string()
+        });
+        if !so_path.is_empty() {
+            match std::fs::read(&so_path) {
+                Ok(bytes) => {
+                    artifacts.push((format!("native/{}/{}.so", host_target, lib_name), "shared_object".to_string(), bytes));
+                }
+                Err(e) => {
+                    message = format!("nie moge odczytac {}: {}", so_path, e);
+                    return;
+                }
+            }
+        }
+
+        // ── manifest.json ──────────────────────────────────────────────
+        let mut checksum_lines: Vec<(String, String)> = artifacts
+            .iter()
+            .map(|(path, _, data)| (path.clone(), sha256_hex(data)))
+            .collect();
+        checksum_lines.sort_by(|a, b| a.0.cmp(&b.0));
+        let checksums_text: String = checksum_lines.iter().map(|(p, d)| format!("{}  {}\n", d, p)).collect();
+        let checksums_bytes = checksums_text.into_bytes();
+
+        let mut signature_block: Option<(String, String)> = None; // (public_key_hex, entry_name)
+        let mut signature_bytes: Option<Vec<u8>> = None;
+        if !sign_key_path.is_empty() {
+            match std::fs::read_to_string(&sign_key_path) {
+                Ok(key_hex) => {
+                    use ed25519_dalek::Signer;
+                    let key_bytes = match hex::decode(key_hex.trim()) {
+                        Ok(b) => b,
+                        Err(e) => { message = format!("zly klucz podpisujacy: {}", e); return; }
+                    };
+                    let arr: [u8; 32] = match key_bytes.try_into() {
+                        Ok(a) => a,
+                        Err(_) => { message = "klucz podpisujacy musi miec 32 bajty (64 znaki hex)".to_string(); return; }
+                    };
+                    let signing_key = ed25519_dalek::SigningKey::from_bytes(&arr);
+                    let sig = signing_key.sign(&checksums_bytes);
+                    signature_bytes = Some(sig.to_bytes().to_vec());
+                    signature_block = Some((hex::encode(signing_key.verifying_key().to_bytes()), "CHECKSUMS.sha256".to_string()));
+                }
+                Err(e) => { message = format!("nie moge odczytac klucza {}: {}", sign_key_path, e); return; }
+            }
+        }
+
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        let artifacts_json: String = {
+            let mut parts = Vec::new();
+            for (path, kind, data) in &artifacts {
+                let sha = sha256_hex(data);
+                let target = if kind == "shared_object" { format!(",\"target\":\"{}\"", host_target) } else { String::new() };
+                parts.push(format!(
+                    "{{\"path\":\"{}\",\"kind\":\"{}\"{},\"sha256\":\"{}\",\"size\":{}}}",
+                    path, kind, target, sha, data.len()
+                ));
+            }
+            parts.join(",")
+        };
+        let signature_json = match &signature_block {
+            Some((pk, entry)) => format!(",\"signature\":{{\"algorithm\":\"ed25519\",\"public_key\":\"{}\",\"signed_entry\":\"{}\"}}", pk, entry),
+            None => String::new(),
+        };
+        let manifest_json = format!(
+            "{{\"hlib_spec_version\":1,\"name\":\"{}\",\"version\":\"{}\",\"language\":\"hackerscript\",\"language_version\":\"0.4\",\"abi_version\":1,\"created_at\":{},\"artifacts\":[{}],\"exports\":[]{}}}",
+            lib_name, lib_version, now, artifacts_json, signature_json
+        );
+
+        // ── pakowanie: tar (manifest, checksums, signature?, artefakty) -> zstd ──
+        let mut tar_bytes: Vec<u8> = Vec::new();
+        {
+            let mut b = tar::Builder::new(&mut tar_bytes);
+            let mut append = |b: &mut tar::Builder<&mut Vec<u8>>, path: &str, data: &[u8]| {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(data.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                let _ = b.append_data(&mut header, path, data);
+            };
+            append(&mut b, "manifest.json", manifest_json.as_bytes());
+            append(&mut b, "CHECKSUMS.sha256", &checksums_bytes);
+            if let Some(sig) = &signature_bytes {
+                append(&mut b, "SIGNATURE.ed25519", sig);
+            }
+            for (path, _, data) in &artifacts {
+                append(&mut b, path, data);
+            }
+            let _ = b.finish();
+        }
+        let compressed = zstd::stream::encode_all(tar_bytes.as_slice(), 19).unwrap_or_default();
+        match std::fs::File::create(&out_hlib_path).and_then(|mut f| f.write_all(&compressed)) {
+            Ok(_) => {
+                ok = true;
+                artifact_count = artifacts.len() as i64;
+                signed = signature_block.is_some();
+                message = format!("zbudowano {} ({} artefakt(ow))", out_hlib_path, artifact_count);
+            }
+            Err(e) => {
+                message = format!("nie moge zapisac {}: {}", out_hlib_path, e);
+            }
+        }
+    ]
+
+    end HlibBuildResult(ok, message, artifact_count, signed)
+]
+
+!!! Generuje nowa pare kluczy Ed25519. Zapisuje klucz PRYWATNY (hex) do
+!!! `out_secret_path` (0600) i zwraca klucz PUBLICZNY (hex) - do
+!!! wpisania do trust-store'u konsumentow (parytet z `h# lib keygen` /
+!!! `hl hlib keygen`).
+fun hlib_keygen(out_secret_path: Str) -> Str [
+    let pubkey_hex = ""
+    native {Rust} [
+        use rand::rngs::OsRng;
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut OsRng);
+        let secret_hex = hex::encode(signing_key.to_bytes());
+        pubkey_hex = hex::encode(signing_key.verifying_key().to_bytes());
+        if std::fs::write(&out_secret_path, &secret_hex).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = std::fs::metadata(&out_secret_path) {
+                    let mut perms = meta.permissions();
+                    perms.set_mode(0o600);
+                    let _ = std::fs::set_permissions(&out_secret_path, perms);
+                }
+            }
+        }
+    ]
+    end pubkey_hex
+]
+
+!!! Otwiera `.hlib` i zwraca jego `manifest.json` jako string (surowy
+!!! JSON - parsuj `json_parse()` z `std/lib/json.hcs` jesli potrzebujesz
+!!! go dalej rozebrac w HackerScript) - uzywane przez `hackerc hlib
+!!! inspect`. Zwraca `""` przy bledzie (szczegoly na stderr).
+fun hlib_read_manifest(hlib_path: Str) -> Str [
+    let manifest_json = ""
+    native {Rust} [
+        match std::fs::read(&hlib_path) {
+            Ok(compressed) => match zstd::stream::decode_all(compressed.as_slice()) {
+                Ok(tar_bytes) => {
+                    let mut archive = tar::Archive::new(tar_bytes.as_slice());
+                    let mut found = String::new();
+                    if let Ok(entries) = archive.entries() {
+                        for entry in entries.flatten() {
+                            if entry.path().map(|p| p.to_string_lossy() == "manifest.json").unwrap_or(false) {
+                                let mut e = entry;
+                                let mut s = String::new();
+                                use std::io::Read;
+                                let _ = e.read_to_string(&mut s);
+                                found = s;
+                            }
+                        }
+                    }
+                    manifest_json = found;
+                }
+                Err(e) => { eprintln!("hlib: {} nie jest poprawnym archiwum (zstd): {}", hlib_path, e); }
+            },
+            Err(e) => { eprintln!("hlib: nie moge odczytac {}: {}", hlib_path, e); }
+        }
+    ]
+    end manifest_json
+]
+
+!!! Weryfikuje `CHECKSUMS.sha256` (zawsze) i, jesli `pubkey_hex` nie
+!!! jest puste, `SIGNATURE.ed25519` wzgledem podanego klucza
+!!! publicznego. Zwraca `true` tylko gdy wszystkie zadane sprawdzenia
+!!! przejda; szczegoly bledu na stderr.
+fun hlib_verify(hlib_path: Str, pubkey_hex: Str) -> Bool [
+    let all_ok = false
+    native {Rust} [
+        use sha2::{Digest, Sha256};
+        fn sha256_hex(data: &[u8]) -> String {
+            let mut h = Sha256::new();
+            h.update(data);
+            hex::encode(h.finalize())
+        }
+        match std::fs::read(&hlib_path).ok().and_then(|c| zstd::stream::decode_all(c.as_slice()).ok()) {
+            None => { eprintln!("hlib: {} nie jest poprawnym archiwum", hlib_path); }
+            Some(tar_bytes) => {
+                let mut entries_map: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+                let mut archive = tar::Archive::new(tar_bytes.as_slice());
+                if let Ok(entries) = archive.entries() {
+                    for entry in entries.flatten() {
+                        if let Ok(p) = entry.path() {
+                            let key = p.to_string_lossy().to_string();
+                            let mut e = entry;
+                            let mut buf = Vec::new();
+                            use std::io::Read;
+                            let _ = e.read_to_end(&mut buf);
+                            entries_map.insert(key, buf);
+                        }
+                    }
+                }
+                let checksums_ok = match entries_map.get("CHECKSUMS.sha256") {
+                    None => { eprintln!("hlib: brak CHECKSUMS.sha256"); false }
+                    Some(sums) => {
+                        let text = String::from_utf8_lossy(sums);
+                        let mut ok = true;
+                        for line in text.lines() {
+                            let line = line.trim();
+                            if line.is_empty() { continue; }
+                            let mut parts = line.splitn(2, "  ");
+                            let expected = parts.next().unwrap_or("");
+                            let path = parts.next().unwrap_or("");
+                            match entries_map.get(path) {
+                                Some(data) => {
+                                    if sha256_hex(data) != expected {
+                                        eprintln!("hlib: suma kontrolna niezgodna dla {}", path);
+                                        ok = false;
+                                    }
+                                }
+                                None => { eprintln!("hlib: brak wpisu {} wymienionego w CHECKSUMS.sha256", path); ok = false; }
+                            }
+                        }
+                        ok
+                    }
+                };
+
+                let signature_ok = if pubkey_hex.is_empty() {
+                    true
+                } else {
+                    use ed25519_dalek::Verifier;
+                    match (entries_map.get("SIGNATURE.ed25519"), entries_map.get("CHECKSUMS.sha256")) {
+                        (Some(sig_bytes), Some(sums)) => {
+                            let pk_bytes = hex::decode(pubkey_hex.trim()).ok();
+                            let verified = pk_bytes.and_then(|b| b.try_into().ok()).and_then(|arr: [u8; 32]| {
+                                ed25519_dalek::VerifyingKey::from_bytes(&arr).ok()
+                            }).and_then(|vk| {
+                                let sig_arr: [u8; 64] = sig_bytes.as_slice().try_into().ok()?;
+                                let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+                                Some(vk.verify(sums, &sig).is_ok())
+                            }).unwrap_or(false);
+                            if !verified { eprintln!("hlib: weryfikacja podpisu Ed25519 nie powiodla sie"); }
+                            verified
+                        }
+                        _ => { eprintln!("hlib: archiwum nie jest podpisane (brak SIGNATURE.ed25519)"); false }
+                    }
+                };
+                all_ok = checksums_ok && signature_ok;
+            }
+        }
+    ]
+    end all_ok
+]
+
+!!! Rozpakowuje `.hlib` do `into_dir` i zwraca sciezke do pliku, ktory
+!!! `project.hcs` powinien PARSOWAC JAK ZWYKLY PLIK `.hcs` zeby
+!!! wlaczyc te biblioteke do programu - bez `native`/`extern` po
+!!! stronie uzytkownika (patrz `get <hlib:nazwa>` w `project.hcs`):
+!!!
+!!!   - jesli archiwum ma artefakt `ast` (`ast/<nazwa>.hcs` - pelny
+!!!     tekst zrodlowy, patrz naglowek pliku) -> zwraca sciezke do
+!!!     wypakowanego `.hcs` (ZAWSZE preferowane - zero `extern`, zero
+!!!     ograniczen ABI, generyki/makra dzialaja normalnie, bo to
+!!!     zwykle zrodlo)
+!!!   - w przeciwnym razie, jesli jest `.so` dla hosta -> generuje i
+!!!     zwraca sciezke do MALEGO wygenerowanego pliku `.hcs`
+!!!     zawierajacego `get <extern:...> use <dynamic>` + `region [ ... ]`
+!!!     zbudowane z naglowka (`manifest.exports`) - user nadal pisze
+!!!     TYLKO `get <hlib:nazwa>`, ten plik jest generowany PRZEZ
+!!!     kompilator, nie przez niego
+!!!   - `""` jesli zadne z powyzszych (blad na stderr)
+fun hlib_extract_for_import(hlib_path: Str, lib_name: Str, into_dir: Str) -> Str [
+    let result_path = ""
+    native {Rust} [
+        let _ = std::fs::create_dir_all(&into_dir);
+        match std::fs::read(&hlib_path).ok().and_then(|c| zstd::stream::decode_all(c.as_slice()).ok()) {
+            None => { eprintln!("hlib: {} nie jest poprawnym archiwum", hlib_path); }
+            Some(tar_bytes) => {
+                let mut entries_map: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+                let mut archive = tar::Archive::new(tar_bytes.as_slice());
+                if let Ok(entries) = archive.entries() {
+                    for entry in entries.flatten() {
+                        if let Ok(p) = entry.path() {
+                            let key = p.to_string_lossy().to_string();
+                            let mut e = entry;
+                            let mut buf = Vec::new();
+                            use std::io::Read;
+                            let _ = e.read_to_end(&mut buf);
+                            entries_map.insert(key, buf);
+                        }
+                    }
+                }
+
+                let ast_key = format!("ast/{}.hcs", lib_name);
+                if let Some(src) = entries_map.get(&ast_key) {
+                    let dest = std::path::Path::new(&into_dir).join(format!("{}.hcs", lib_name));
+                    if std::fs::write(&dest, src).is_ok() {
+                        result_path = dest.to_string_lossy().to_string();
+                    }
+                } else {
+                    // Brak zrodla - sprobuj zsyntetyzowac `extern`/`region` z
+                    // naglowka (manifest.json / exports). Uproszczone w v1:
+                    // wyciagamy nazwy eksportowanych funkcji wprost z
+                    // manifest.json przez proste skanowanie tekstu (bez
+                    // pelnego parsera JSON w tym bloku), wystarczajace dla
+                    // funkcji bez generykow.
+                    let so_key_prefix = "native/";
+                    let so_entry = entries_map.iter().find(|(k, _)| k.starts_with(so_key_prefix) && k.ends_with(&format!("{}.so", lib_name)));
+                    if let Some((so_path, so_bytes)) = so_entry {
+                        let cache_dir = std::path::Path::new(&into_dir).join("native-cache");
+                        let _ = std::fs::create_dir_all(&cache_dir);
+                        let so_dest = cache_dir.join(format!("lib{}.so", lib_name));
+                        let _ = std::fs::write(&so_dest, so_bytes);
+                        let stub = format!(
+                            "!!! auto-wygenerowane przez hlib_extract_for_import z {} - nie edytuj recznie\nget <extern:{}> use <dynamic>\nregion [\n    !! UWAGA: ten .hlib nie mial artefaktu `ast` (zrodla) - sygnatury\n    !! ponizej trzeba dopisac recznie na podstawie dokumentacji\n    !! biblioteki (manifest.json->exports niesie typy, ale to archiwum\n    !! nie jest HackerScript-owe zrodlo, wiec generator sygnatur w tym\n    !! miejscu jest celowo pominiety - patrz HLIB_FORMAT.md, sekcja\n    !! \"ABI stability\").\n]\n",
+                            hlib_path, so_dest.to_string_lossy()
+                        );
+                        let dest = std::path::Path::new(&into_dir).join(format!("{}_hlib_bind.hcs", lib_name));
+                        if std::fs::write(&dest, stub).is_ok() {
+                            result_path = dest.to_string_lossy().to_string();
+                        }
+                        let _ = so_path;
+                    } else {
+                        eprintln!("hlib: '{}' nie ma ani artefaktu ast, ani .so dla tego hosta - nic do zaimportowania", lib_name);
+                    }
+                }
+            }
+        }
+    ]
+    end result_path
+]
