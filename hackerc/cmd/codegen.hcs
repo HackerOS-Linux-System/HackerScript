@@ -2853,8 +2853,35 @@ impl CodeGen [
             self.emit("}")
             end
         ]
+        !!! `native {Rust} [ ... ]` - NOWY silnik (0.4). W odroznieniu od
+        !!! `{JavaScript}`/`{C++}` (uruchamiane w osobnym runtime/TU),
+        !!! kod jest wklejany DOSLOWNIE w tym miejscu wygenerowanego
+        !!! Rusta - bez sandboxa, bez FFI, bez `#[link(...)]`. To
+        !!! dziala, bo HackerScript i tak transpiluje 1:1 do Rusta:
+        !!! parametry/`let`-y otaczajacej funkcji `.hcs` sa w tym
+        !!! miejscu ZWYKLYMI zywymi bindingami Rusta o tej samej
+        !!! nazwie, wiec blok `native {Rust} [ ... ]` moze ich uzywac
+        !!! bezposrednio (czytac i zwracac wartosci) - to jedyny silnik
+        !!! z prawdziwym przekazywaniem parametrow w obie strony.
+        !!! Uzywane przez `hackerc/cmd/hlib.hcs` (obsluga formatu
+        !!! `.hlib`) - patrz ten plik po przyklad. Zaleznosci crates.io
+        !!! potrzebne wewnatrz bloku (`tar`, `zstd`, `sha2`, ...)
+        !!! deklaruje sie zwyklym `get <crates:nazwa::wersja>` na
+        !!! poczatku TEGO SAMEGO pliku `.hcs` - `project.hcs` i tak juz
+        !!! skanuje kazdy odkryty plik pod katem `get <crates:...>`,
+        !!! wiec nie trzeba tu niczego dodatkowo sygnalizowac
+        !!! (`needs_native_rust` nie istnieje - w odroznieniu od JS/C++
+        !!! ten silnik nie potrzebuje wlasnej flagi/runtime).
+        if engine == "Rust" [
+            self.emit("{")
+            self.indent = self.indent + 1
+            self.emit(raw)
+            self.indent = self.indent - 1
+            self.emit("}")
+            end
+        ]
         if engine != "JavaScript" [
-            self.emit("// native {" + engine + "} [ ... ] - nieobslugiwany silnik (dzis dostepne: \"JavaScript\", \"C++\"), pomijam blok")
+            self.emit("// native {" + engine + "} [ ... ] - nieobslugiwany silnik (dzis dostepne: \"JavaScript\", \"C++\", \"Rust\"), pomijam blok")
             end
         ]
         self.needs_native_js = true
