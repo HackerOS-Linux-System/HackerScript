@@ -234,6 +234,161 @@ fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<St
     ]
 ]
 
+!!! Proste narzedzia string na potrzeby `cmd_hlib` - budowane iteracyjnie
+!!! po znakach (`char_at`), tak jak `replace_dash` w project.hcs, zeby
+!!! nie zakladac dostepnosci operatora wycinania podciagow.
+fun base_name_of(path: Str) -> Str [
+    let last_slash = 0 - 1
+    let i = 0
+    let n = path.len()
+    while i < n [
+        if path.char_at(i) == "/" [
+            last_slash = i
+        ]
+        i = i + 1
+    ]
+    let out = ""
+    let j = last_slash + 1
+    while j < n [
+        out = out + path.char_at(j)
+        j = j + 1
+    ]
+    end out
+]
+
+fun strip_hcs_ext(name: Str) -> Str [
+    let n = name.len()
+    if n > 4 [
+        if name.char_at(n-4) == "." and name.char_at(n-3) == "h" and name.char_at(n-2) == "c" and name.char_at(n-1) == "s" [
+            let out = ""
+            let i = 0
+            while i < n - 4 [
+                out = out + name.char_at(i)
+                i = i + 1
+            ]
+            end out
+        ]
+    ]
+    end name
+]
+
+!!! `hackerc hlib build|inspect|verify|keygen` - podkomendy do pracy z
+!!! formatem `.hlib` (patrz hlib.hcs - cala logika tam, to tylko
+!!! parsowanie argv i komunikaty). Zwraca kod wyjscia (0 = ok).
+fun cmd_hlib(argv: List<Str>) -> Int [
+    if argv.len() == 0 [
+        elog(c_red("hackerc hlib:") + " oczekiwano podkomendy: build | inspect | verify | keygen")
+        end 1
+    ]
+    let action = argv[0].clone()
+    let rest = argv.clone()
+    let _drop = rest.remove(0)
+
+    if action == "build" [
+        let src = first_positional(rest, ["-o", "--output", "--lib-version", "--sign"])
+        if src == "" [
+            elog(c_red("hackerc hlib build:") + " brak wymaganego argumentu 'source' (plik .hcs)")
+            end 1
+        ]
+        if not file_readable(src.clone()) [
+            elog(c_red("hackerc hlib build:") + " nie znaleziono pliku " + src)
+            end 1
+        ]
+        let lib_name = src
+        !! wytnij katalogi i rozszerzenie ".hcs" z nazwy pliku, zeby dostac nazwe biblioteki
+        match find_flag_value(rest, "", "--name") [
+            Some(v) -> [ lib_name = v ]
+            None -> [ lib_name = strip_hcs_ext(base_name_of(src.clone())) ]
+        ]
+        let out_hlib = "build/" + lib_name + ".hlib"
+        match find_flag_value(rest, "-o", "--output") [
+            Some(v) -> [ out_hlib = v ]
+            None -> [ ]
+        ]
+        let lib_version = "0.1.0"
+        match find_flag_value(rest, "", "--lib-version") [
+            Some(v) -> [ lib_version = v ]
+            None -> [ ]
+        ]
+        let sign_key_path = ""
+        match find_flag_value(rest, "", "--sign") [
+            Some(v) -> [ sign_key_path = v ]
+            None -> [ ]
+        ]
+
+        !!! v1: `.hlib` HackerScript-owe pakuje ZRODLO (artefakt `ast` =
+        !!! pelny tekst `.hcs`, patrz naglowek hlib.hcs) - bez natywnego
+        !!! `.so`. To wystarcza w 100% dla `get <hlib:x>` (splice
+        !!! zrodla, zero `extern`) - jedynego wymaganego trybu w tej
+        !!! rundzie. Dolaczanie skompilowanego `.so` (dla konsumentow
+        !!! spoza HackerScript, przez naglowek/`region`) to udokumentowane
+        !!! rozszerzenie na potem (manifest/hlib_build juz to obslugujom
+        !!! - parametr `so_path` - brakuje tylko wpiecia go tutaj w CLI
+        !!! do istniejacego `build_project()`/cargo).
+        let result = hlib_build(src, "", out_hlib, lib_name, lib_version, sign_key_path)
+        if result.ok [
+            log(c_bold_green("hackerc hlib build:") + " " + result.message)
+            end 0
+        ] else [
+            elog(c_red("hackerc hlib build:") + " " + result.message)
+            end 1
+        ]
+    ]
+
+    if action == "inspect" [
+        let path = first_positional(rest, [])
+        if path == "" [
+            elog(c_red("hackerc hlib inspect:") + " brak wymaganego argumentu 'plik .hlib'")
+            end 1
+        ]
+        let manifest_json = hlib_read_manifest(path)
+        if manifest_json == "" [
+            end 1
+        ]
+        log(manifest_json)
+        end 0
+    ]
+
+    if action == "verify" [
+        let path = first_positional(rest, ["--pubkey"])
+        if path == "" [
+            elog(c_red("hackerc hlib verify:") + " brak wymaganego argumentu 'plik .hlib'")
+            end 1
+        ]
+        let pubkey = ""
+        match find_flag_value(rest, "", "--pubkey") [
+            Some(v) -> [ pubkey = v ]
+            None -> [ ]
+        ]
+        if hlib_verify(path, pubkey) [
+            log(c_bold_green("hackerc hlib verify:") + " OK")
+            end 0
+        ] else [
+            elog(c_red("hackerc hlib verify:") + " weryfikacja nie powiodla sie")
+            end 1
+        ]
+    ]
+
+    if action == "keygen" [
+        let out = "hlib_signing.key"
+        match find_flag_value(rest, "-o", "--out") [
+            Some(v) -> [ out = v ]
+            None -> [ ]
+        ]
+        let pubkey = hlib_keygen(out)
+        if pubkey == "" [
+            elog(c_red("hackerc hlib keygen:") + " nie udalo sie wygenerowac klucza")
+            end 1
+        ]
+        log(c_bold_green("hackerc hlib keygen:") + " klucz prywatny zapisany do " + out + " (nie udostepniaj go!)")
+        log("  klucz publiczny: " + pubkey)
+        end 0
+    ]
+
+    elog(c_red("hackerc hlib:") + " nieznana podkomenda '" + action + "' (oczekiwano: build | inspect | verify | keygen)")
+    end 1
+]
+
 fun join_str_list(items: List<Str>, sep: Str) -> Str [
     let out = ""
     let i = 0
@@ -365,16 +520,21 @@ fun cmd_transpile_legacy(src_path: Str, out_path: Str) -> Int [
 !!! Wypisuje banner `usage`/`--help` - parytet z
 !!! `build_parser().print_help()` (Python, argparse).
 fun print_usage() [
-    log("usage: hackerc [-h] [--version] {check,lint,build,fmt} ...")
+    log("usage: hackerc [-h] [--version] {check,lint,build,fmt,hlib} ...")
     log("")
     log("Transpilator HackerScript -> Rust")
     log("")
     log("positional arguments:")
-    log("  {check,lint,build,fmt}")
+    log("  {check,lint,build,fmt,hlib}")
     log("    check               typecheck bez generowania kodu")
     log("    lint                tylko warningi (podzbior 'check')")
     log("    build               pelny crate Rust (Cargo.toml + src/)")
     log("    fmt                 formatuje kod .hcs")
+    log("    hlib                buduj/sprawdzaj archiwa .hlib (HackerOS Lib) - patrz hlib.hcs")
+    log("      hlib build <plik.hcs> [-o wyjscie.hlib] [--lib-version W] [--sign klucz]")
+    log("      hlib inspect <plik.hlib>")
+    log("      hlib verify <plik.hlib> [--pubkey HEX]")
+    log("      hlib keygen [-o klucz.key]")
     log("")
     log("options:")
     log("  -h, --help            show this help message and exit")
@@ -540,6 +700,11 @@ fun main() [
             ]
         ]
         exit(cmd_build(src, out_dir, crate_name, libs_root, bootstrap_root, vira_root))
+    ]
+
+    if first == "hlib" [
+        let _rest = argv.remove(0)
+        exit(cmd_hlib(argv))
     ]
 
     !!! Tryb kompatybilnosci wstecznej (parytet z `legacy` ArgumentParser
