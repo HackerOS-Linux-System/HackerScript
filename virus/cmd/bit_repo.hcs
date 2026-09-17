@@ -1,0 +1,190 @@
+get <std:json> import <JsonValue::JsonEntry::json_parse>
+get <std:http> import <http_get_checked>
+get <std:process> import <run_command_checked::command_succeeds>
+get <std:path> import <path_join>
+get <std:fs> import <create_dir_ok::list_dir_or_empty>
+get <std:string> import <str_ends_with::str_contains>
+include <manifest>
+include <net_helpers>
+include <progress>
+include <vira>
+
+!!! Rejestr `bit` (menedzer pakietow Hacker Lang) - `get <bit:nazwa>`
+!!! (patrz `codegen.hcs::gen_get_import`, przypadek "bytes"/"bit").
+!!! Format listy: OBIEKT `{ "nazwa": { "url": "...", "type":
+!!! "rust"|"hl" }, ... }` (mapa, NIE tablica jak Bytes-Repository -
+!!! patrz `bytes_repo.hcs`). Dwa typy pakietow:
+!!!   "rust" - zwykla biblioteka Rust (Cargo.toml + src/) - klonujemy i
+!!!            budujemy SAMI przez `cargo build --release`, dokladnie
+!!!            tak jak `bytes` buduje H# przez `bytes build --release`
+!!!            (patrz `bit_build_rust`).
+!!!   "hl"   - biblioteka Hacker Lang - Hacker Lang dziala WYLACZNIE na
+!!!            HackerOS (patrz README.adoc tego jezyka: "Hacker Lang
+!!!            dziala wylacznie na HackerOS"), wiec zamiast
+!!!            reimplementowac rozwiazywanie zaleznosci `bit` (ktore
+!!!            juz i tak jest zainstalowane na kazdym HackerOS),
+!!!            DELEGUJEMY do prawdziwego `bit install <nazwa>` (patrz
+!!!            `bit_install_hl`) - ten sam wzorzec co `native {Hacker
+!!!            Lang}` w `codegen.hcs::gen_native` (uzyj systemowych
+!!!            binarek zamiast wlasnej implementacji).
+const BIT_REPO_LIST_URL: Str = "https://raw.githubusercontent.com/bit-io/repository/main/bit-repo/repo-list.json"
+
+!!! `bit install` (prawdziwy Hacker Lang `bit`, patrz `source-code/
+!!! bit.hl::BIT_HOME` w archiwum Hacker-Lang) pakuje zainstalowane
+!!! biblioteki pod ten katalog - uzywamy TEJ SAMEJ sciezki, zeby
+!!! `bit_install_hl` (nizej) mowilo prawde o tym gdzie pakiet
+!!! wyladowal, bez zgadywania.
+const BIT_HL_HOME: Str = "~/.hackeros/hacker-lang/libs"
+
+fun bit_lib_extension_ok(filename: Str) -> Bool [
+    end str_ends_with(filename.clone(), ".a") or str_ends_with(filename.clone(), ".so") or str_ends_with(filename.clone(), ".rlib")
+]
+
+!!! Pobiera i parsuje `repo-list.json` (mapa nazwa -> {url,type}).
+fun bit_fetch_repo_list() -> Result<List<JsonEntry>, Str> [
+    let body = http_get_checked(BIT_REPO_LIST_URL.to_string())?
+    let parsed = json_parse(body)?
+    match manifest_as_map(parsed) [
+        Some(entries) -> [
+            end ok(entries)
+        ]
+        None -> [
+            end err("bit: " + BIT_REPO_LIST_URL + " nie jest obiektem JSON - nieoczekiwany format")
+        ]
+    ]
+]
+
+struct BitEntry [
+    url: Str,
+    kind: Str
+]
+
+!!! Szuka `name` na liscie i wyciaga `{url, type}` - `none()` gdy
+!!! pakietu brak albo brakuje ktoregos z tych dwoch pol.
+fun bit_find_package(entries: List<JsonEntry>, name: Str) -> Option<BitEntry> [
+    match manifest_find_entry(entries, name.clone()) [
+        Some(v) -> [
+            let url = ""
+            let kind = ""
+            match jv_field_str(v.clone(), "url") [
+                Some(u) -> [
+                    url = u
+                ]
+                None -> [
+                ]
+            ]
+            match jv_field_str(v, "type") [
+                Some(t) -> [
+                    kind = t
+                ]
+                None -> [
+                ]
+            ]
+            if url.len() == 0 or kind.len() == 0 [
+                end none()
+            ]
+            end some(BitEntry(url, kind))
+        ]
+        None -> [
+            end none()
+        ]
+    ]
+]
+
+!!! Czy to jest HackerOS - zawartosc `/etc/os-release` zawiera
+!!! "HackerOS" (parytet DOKLADNIE z tym co generuje
+!!! `codegen.hcs::gen_native` dla `native {Hacker Lang}` w
+!!! wygenerowanym Ruscie - ta sama regula, tu po prostu sprawdzana w
+!!! samym `hackerc`/`virus`, nie w skompilowanym programie
+!!! uzytkownika).
+fun bit_is_hackeros() -> Bool [
+    match read_file("/etc/os-release") [
+        Ok(text) -> [
+            end str_contains(text, "HackerOS")
+        ]
+        Err(_e) -> [
+            end false
+        ]
+    ]
+]
+
+fun bit_missing_binaries_hint() -> Str [
+    end "Pakiety 'bit' (Hacker Lang) wymagaja HackerOS z zainstalowanymi /usr/bin/bit i /usr/bin/hl.\nNa HackerOS: hacker unpack hacker-lang"
+]
+
+!!! Buduje pakiet typu "rust": `git clone --depth 1` + `cargo build
+!!! --release` (przez `sh -c "cd ... && ..."`, patrz uwaga w
+!!! `bytes_repo.hcs::bytes_build_from_source` o braku katalogu
+!!! roboczego w `run_command`), potem szuka `lib*.{a,so,rlib}` w
+!!! `target/release/`.
+fun bit_build_rust(dest: Str, name: Str, git_url: Str) -> Result<Str, Str> [
+    if not command_succeeds("git", ["--version"]) [
+        end err("`virus install bit` (typ 'rust') wymaga zainstalowanego `git`")
+    ]
+    if not command_succeeds("cargo", ["--version"]) [
+        end err("`virus install bit` (typ 'rust') wymaga zainstalowanego `cargo`")
+    ]
+    let src_dir = path_join(dest.clone(), "src")
+    run_command_checked("git", ["clone", "--depth", "1", git_url, src_dir.clone()])?
+    progress_info("bit: buduje '" + name + "' (Rust, cargo build --release) - moze to chwile potrwac")
+    run_command_checked("sh", ["-c", "cd '" + src_dir + "' && cargo build --release"])?
+
+    let release_dir = path_join(path_join(src_dir, "target"), "release")
+    let candidates = list_dir_or_empty(release_dir.clone())
+    let i = 0
+    let n = candidates.len()
+    while i < n [
+        let fname = candidates[i].clone()
+        if bit_lib_extension_ok(fname.clone()) [
+            end ok(path_join(release_dir, fname))
+        ]
+        i = i + 1
+    ]
+    end err("bit: 'cargo build --release' zakonczylo sie, ale nie znaleziono lib*.{a,so,rlib} w " + release_dir + " dla '" + name + "' - sprawdz [lib] crate-type w Cargo.toml tego pakietu")
+]
+
+!!! Typ "hl": deleguje do prawdziwego `bit install <nazwa>` (patrz
+!!! naglowek pliku) - wymaga HackerOS + /usr/bin/bit + /usr/bin/hl.
+!!! Zwraca `BIT_HL_HOME/<nazwa>` (dokladnie tam, gdzie prawdziwy `bit`
+!!! instaluje - patrz `BIT_HL_HOME`), gotowe do `native {Hacker Lang}
+!!! <BIT_HL_HOME/nazwa/...>` w kodzie uzytkownika.
+fun bit_install_hl(name: Str) -> Result<Str, Str> [
+    if not bit_is_hackeros() [
+        end err("bit: pakiet '" + name + "' (typ 'hl') wymaga HackerOS (nie znaleziono 'HackerOS' w /etc/os-release). " + bit_missing_binaries_hint())
+    ]
+    if not (path_exists("/usr/bin/bit") and path_exists("/usr/bin/hl")) [
+        end err("bit: pakiet '" + name + "' (typ 'hl') - " + bit_missing_binaries_hint())
+    ]
+    run_command_checked("/usr/bin/bit", ["install", name.clone()])?
+    end ok(BIT_HL_HOME + "/" + name)
+]
+
+!! ---- glowny punkt wejscia dla zrodla "bit" ---------------------------------
+
+!!! `virus install bit <nazwa>` - patrz naglowek pliku po rozroznienie
+!!! typow "rust"/"hl". `version` jest dzis uzywana tylko dla typu
+!!! "rust" jako `--branch` przy `git clone` (parytet z
+!!! `vira_install_git`) - prawdziwy `bit install` (typ "hl") ustala
+!!! wersje sam, na podstawie WLASNEGO `repo-list.json`/locka.
+fun install_bit(dest: Str, name: Str, version: Option<Str>) -> Result<Str, Str> [
+    progress_info("bit: szukam '" + name + "' w " + BIT_REPO_LIST_URL)
+    let entries = bit_fetch_repo_list()?
+    match bit_find_package(entries, name.clone()) [
+        Some(pkg) -> [
+            if pkg.kind == "rust" [
+                let file_path = bit_build_rust(dest.clone(), name.clone(), pkg.url.clone())?
+                vira_write_meta(dest, "bit-rust", file_path.clone())?
+                end ok(file_path)
+            ] elif pkg.kind == "hl" [
+                let hl_path = bit_install_hl(name.clone())?
+                vira_write_meta(dest, "bit-hl", hl_path.clone())?
+                end ok(hl_path)
+            ] else [
+                end err("bit: nieznany typ pakietu '" + pkg.kind + "' dla '" + name + "' (oczekiwano rust/hl)")
+            ]
+        ]
+        None -> [
+            end err("bit: nie znaleziono pakietu '" + name + "' na liscie " + BIT_REPO_LIST_URL)
+        ]
+    ]
+]
