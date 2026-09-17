@@ -5,6 +5,7 @@ include <diagnostics>
 include <formatter>
 include <transpiler>
 include <project>
+include <hlib>
 get <std:io> import <file_readable>
 get <std:term> import <c_bold_green::c_bold_red::c_bold_cyan::c_red::c_gray::print_progress_line>
 
