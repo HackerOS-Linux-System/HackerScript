@@ -28,7 +28,7 @@ fun cmd_usage() -> Str [
     cmds = cmds + "  " + c_bold_cyan("check") + "                                             sprawdza poprawnosc kodu bez budowania\n"
     cmds = cmds + "  " + c_bold_cyan("lint") + " [plik]                                       pokazuje tylko warningi\n"
     cmds = cmds + "  " + c_bold_cyan("fmt") + " [plik] [--check]                              formatuje kod .hcs\n"
-    cmds = cmds + "  " + c_bold_cyan("install") + " <zrodlo> <nazwa> [--version WERSJA]      instaluje zaleznosc (pypi/crates/npm/jsr/std/core)\n"
+    cmds = cmds + "  " + c_bold_cyan("install") + " <zrodlo> <nazwa> [--version WERSJA]      instaluje zaleznosc (pypi/crates/npm/jsr/vira/bytes/bit/std/core)\n"
     cmds = cmds + "  " + c_bold_cyan("remove") + " <zrodlo> <nazwa>                           usuwa zaleznosc\n"
     cmds = cmds + "  " + c_bold_cyan("repair") + " <kod>                                      wyjasnia kod diagnostyczny (np. E0001)\n"
     cmds = cmds + "  " + c_bold_cyan("clean") + "                                             usuwa caly katalog cache/\n"
