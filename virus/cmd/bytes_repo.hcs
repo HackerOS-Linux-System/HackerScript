@@ -1,0 +1,260 @@
+get <std:json> import <JsonValue::json_parse>
+get <std:http> import <http_get_checked>
+get <std:process> import <run_command_checked::command_succeeds>
+get <std:path> import <path_join>
+get <std:fs> import <create_dir_ok::list_dir_or_empty>
+get <std:string> import <str_ends_with::str_index_of::str_split>
+include <manifest>
+include <net_helpers>
+include <progress>
+include <vira>
+
+!!! Rejestr `bytes` (menedzer pakietow H#) - `get <bytes:nazwa>` w kodzie
+!!! HackerScript (patrz `codegen.hcs::gen_get_import`, przypadek
+!!! "bytes"/"bit") jest podpiety TUTAJ, po stronie `virus install` -
+!!! parytet 1:1 z `vira.hcs`, ale INNY ksztalt JSON-a listy: Bytes-
+!!! Repository trzyma tablice jednoelementowych obiektow
+!!! `[{"nazwa": "url-repo"}, ...]` (nie `{"libraries": [...]}` jak
+!!! Vira), a kazdy wpis to URL repo GitHub (NIE bezposredni URL pliku
+!!! .a/.so/.rlib jak Vira "static-lib"/"shared-lib") - trzeba wiec
+!!! najpierw odpytac "releases/latest" tego repo (GitHub API, tak jak
+!!! `vira_latest_github_release`, ale tu potrzebujemy calej listy
+!!! `assets`, nie samego `tag_name`).
+const BYTES_INDEX_URL: Str = "https://raw.githubusercontent.com/Bytes-Repository/repository/main/index.json"
+
+!!! Rozszerzenia akceptowane jako gotowy, linkowalny artefakt z
+!!! GitHub Releases - dokladnie te cztery, ktore wymienil uzytkownik:
+!!! `.a` (statyczna), `.so` (dynamiczna), `.hlib` (format HackerScript,
+!!! patrz `hackerc/cmd/hlib.hcs`), `.rlib` (surowa biblioteka Rust).
+fun bytes_asset_extension_ok(filename: Str) -> Bool [
+    end str_ends_with(filename.clone(), ".a") or str_ends_with(filename.clone(), ".so") or str_ends_with(filename.clone(), ".hlib") or str_ends_with(filename.clone(), ".rlib")
+]
+
+!!! Pobiera i parsuje `index.json` Bytes-Repository (tablica
+!!! jednoelementowych obiektow, patrz naglowek pliku).
+fun bytes_fetch_index() -> Result<List<JsonValue>, Str> [
+    let body = http_get_checked(BYTES_INDEX_URL.to_string())?
+    let parsed = json_parse(body)?
+    match manifest_as_array(parsed) [
+        Some(items) -> [
+            end ok(items)
+        ]
+        None -> [
+            end err("bytes: " + BYTES_INDEX_URL + " nie jest tablica JSON - nieoczekiwany format")
+        ]
+    ]
+]
+
+!!! Szuka `name` w indeksie (kazdy element to `{"nazwa": "url"}`) -
+!!! zwraca URL repo GitHub tego pakietu, albo `none()`.
+fun bytes_find_repo_url(index: List<JsonValue>, name: Str) -> Option<Str> [
+    let i = 0
+    let n = index.len()
+    while i < n [
+        let item = index[i].clone()
+        match manifest_as_map(item) [
+            Some(entries) -> [
+                match manifest_find_entry(entries, name.clone()) [
+                    Some(v) -> [
+                        end manifest_as_string(v)
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        i = i + 1
+    ]
+    end none()
+]
+
+!!! `org/repo` z URL-a repo, tolerujac koncowke `.git` (Vira nie ma
+!!! `.git` w URL-ach, bit-io - tak, patrz `bit_repo.hcs`) - wspolne dla
+!!! obu, zeby nie duplikowac tej samej logiki dwa razy.
+fun bytes_org_repo_from_url(url: Str) -> Option<Str> [
+    let clean = url
+    if str_ends_with(clean.clone(), ".git") [
+        clean = clean.slice(0, clean.len() - 4)
+    ]
+    end vira_extract_github_org_repo(clean)
+]
+
+!!! Wszystkie `assets` najnowszego wydania GitHub repo `org/repo` -
+!!! kazdy element ma (przynajmniej) "name"/"browser_download_url".
+!!! `Ok([])` (nie `Err`) gdy repo NIE MA zadnych wydan - to prawidlowy
+!!! stan (pakiet do budowania ze zrodel), nie blad sieci.
+fun bytes_latest_release_assets(org_repo: Str) -> Result<List<JsonValue>, Str> [
+    let api_url = "https://api.github.com/repos/" + org_repo + "/releases/latest"
+    match http_get_checked(api_url) [
+        Ok(body) -> [
+            let parsed = json_parse(body)?
+            match jv_field(parsed, "assets") [
+                Some(av) -> [
+                    match manifest_as_array(av) [
+                        Some(items) -> [
+                            end ok(items)
+                        ]
+                        None -> [
+                            end ok([])
+                        ]
+                    ]
+                ]
+                None -> [
+                    end ok([])
+                ]
+            ]
+        ]
+        Err(_e) -> [
+            !! Najczesciej 404 (repo bez zadnego wydania) - traktuj jak
+            !! "brak assetow", nie jak twardy blad sieci.
+            end ok([])
+        ]
+    ]
+]
+
+!!! Pierwszy asset z rozszerzeniem z `bytes_asset_extension_ok` -
+!!! `none()` jesli zadnego nie ma (wtedy wolajacy sciaga zrodla i
+!!! buduje przez `bytes build --release`).
+fun bytes_pick_asset(assets: List<JsonValue>) -> Option<JsonValue> [
+    let i = 0
+    let n = assets.len()
+    while i < n [
+        let a = assets[i].clone()
+        match jv_field_str(a.clone(), "name") [
+            Some(fname) -> [
+                if bytes_asset_extension_ok(fname) [
+                    end some(a)
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        i = i + 1
+    ]
+    end none()
+]
+
+!!! Sciaga wybrany asset (`browser_download_url`) do `dest/<nazwa>`.
+fun bytes_download_asset(dest: Str, asset: JsonValue) -> Result<Str, Str> [
+    let filename = "artifact"
+    match jv_field_str(asset.clone(), "name") [
+        Some(fn2) -> [
+            filename = fn2
+        ]
+        None -> [
+        ]
+    ]
+    let dl_url = ""
+    match jv_field_str(asset, "browser_download_url") [
+        Some(u) -> [
+            dl_url = u
+        ]
+        None -> [
+            end err("bytes: asset '" + filename + "' nie ma 'browser_download_url'")
+        ]
+    ]
+    let dest_file = path_join(dest, filename)
+    curl_download(dl_url, dest_file.clone())?
+    end ok(dest_file)
+]
+
+!!! Komunikat wyswietlany, gdy `h#`/`bytes` nie sa dostepne w systemie
+!!! (dokladnie tak, jak zazadal uzytkownik - `hacker unpack`, reszta
+!!! krokow dopracowana pozniej).
+fun bytes_missing_hint() -> Str [
+    end "Zainstaluj H# na HackerOS:\n  hacker unpack h#\n  hacker unpack h#-utils\n(pozostale kroki instalacji zostana dopracowane w przyszlosci)\nJezeli potrzebujesz, zapoznaj sie z kodem zrodlowym H# i bytes."
+]
+
+!!! Czy `h#`/`bytes` sa dostepne w /usr/bin (uzywane do budowania ze
+!!! zrodel, patrz `bytes_missing_hint`) - literalnie `/usr/bin/<nazwa>`
+!!! (parytet z tym, jak zazadal uzytkownik dla `native {H#}`), z
+!!! zapasowym sprawdzeniem PATH (`command_succeeds`) dla instalacji
+!!! poza standardowym `/usr/bin` (np. z kodu zrodlowego, patrz README
+!!! H# - "Manualna").
+fun bytes_bin_available(name: Str) -> Bool [
+    end path_exists("/usr/bin/" + name) or command_succeeds(name, ["--version"])
+]
+
+!!! Buduje pakiet H# ze zrodel: `git clone --depth 1 <git_url> <dest>/
+!!! src`, potem `bytes build --release` W TYM katalogu (przez `sh -c
+!!! "cd ... && ..."`, bo `run_command` nie ma parametru katalogu
+!!! roboczego - patrz `std:process`), na koniec szuka artefaktu pod
+!!! `<dest>/src/build/` z jednym z rozszerzen z
+!!! `bytes_asset_extension_ok`. Zwraca `Err` z podpowiedzia
+!!! `bytes_missing_hint()`, jesli `h#`/`bytes` nie sa zainstalowane -
+!!! bez nich `bytes build` i tak by sie nie udalo (patrz
+!!! `bytes/src/build.h#::find_hsh` w kodzie zrodlowym bytes).
+fun bytes_build_from_source(dest: Str, name: Str, git_url: Str) -> Result<Str, Str> [
+    if not (bytes_bin_available("h#") and bytes_bin_available("bytes")) [
+        end err(bytes_missing_hint())
+    ]
+    if not command_succeeds("git", ["--version"]) [
+        end err("`virus install bytes` (budowanie ze zrodel) wymaga zainstalowanego `git`")
+    ]
+    let src_dir = path_join(dest.clone(), "src")
+    run_command_checked("git", ["clone", "--depth", "1", git_url, src_dir.clone()])?
+    progress_info("bytes: buduje '" + name + "' ze zrodel (bytes build --release) - moze to chwile potrwac")
+    run_command_checked("sh", ["-c", "cd '" + src_dir + "' && bytes build --release"])?
+
+    let build_dir = path_join(src_dir.clone(), "build")
+    let candidates = list_dir_or_empty(build_dir.clone())
+    let i = 0
+    let n = candidates.len()
+    while i < n [
+        let fname = candidates[i].clone()
+        if bytes_asset_extension_ok(fname.clone()) [
+            end ok(path_join(build_dir, fname))
+        ]
+        i = i + 1
+    ]
+    end err("bytes: 'bytes build --release' zakonczylo sie, ale nie znaleziono artefaktu (.a/.so/.hlib/.rlib) w " + build_dir + " - sprawdz 'emit' w bytes.hk pakietu '" + name + "'")
+]
+
+!! ---- glowny punkt wejscia dla zrodla "bytes" ------------------------------
+
+!!! `virus install bytes <nazwa> [--version WERSJA]` - patrz naglowek
+!!! pliku. Kolejnosc: 1) znajdz repo w `index.json`, 2) sprobuj
+!!! najnowszego wydania GitHub -> gotowy artefakt (.a/.so/.hlib/.rlib),
+!!! 3) jesli brak wydan/pasujacego assetu -> zbuduj ze zrodel przez
+!!! `bytes build --release` (wymaga h#+bytes, patrz
+!!! `bytes_build_from_source`). `version` (jesli podana) jest dzis
+!!! ignorowana dla wydan (GitHub API "latest" nie ma parametru wersji
+!!! per-asset bez dodatkowego zapytania listujacego WSZYSTKIE wydania -
+!!! zaplanowane rozszerzenie, patrz docs/ROADMAP.md) - dziala jednak
+!!! dla budowania ze zrodel, gdzie trafia jako `--branch` przy `git
+!!! clone` (parytet z `vira_install_git`).
+fun install_bytes(dest: Str, name: Str, version: Option<Str>) -> Result<Str, Str> [
+    progress_info("bytes: szukam '" + name + "' w " + BYTES_INDEX_URL)
+    let index = bytes_fetch_index()?
+    match bytes_find_repo_url(index, name.clone()) [
+        Some(repo_url) -> [
+            match bytes_org_repo_from_url(repo_url.clone()) [
+                Some(org_repo) -> [
+                    let assets = bytes_latest_release_assets(org_repo)?
+                    match bytes_pick_asset(assets) [
+                        Some(asset) -> [
+                            let file_path = bytes_download_asset(dest.clone(), asset)?
+                            vira_write_meta(dest, "bytes-release", file_path.clone())?
+                            end ok(file_path)
+                        ]
+                        None -> [
+                            !! Brak gotowego wydania/assetu - buduj ze zrodel
+                            !! (patrz `bytes_build_from_source`).
+                            let file_path2 = bytes_build_from_source(dest.clone(), name.clone(), repo_url.clone())?
+                            vira_write_meta(dest, "bytes-source", file_path2.clone())?
+                            end ok(file_path2)
+                        ]
+                    ]
+                ]
+                None -> [
+                    end err("bytes: nie umiem ustalic 'org/repo' z URL-a '" + repo_url + "' dla '" + name + "'")
+                ]
+            ]
+        ]
+        None -> [
+            end err("bytes: nie znaleziono pakietu '" + name + "' na liscie " + BYTES_INDEX_URL)
+        ]
+    ]
+]
