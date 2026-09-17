@@ -3,7 +3,7 @@ include <manifest>
 include <hackerc_bridge>
 include <progress>
 get <std:path> import <path_join::path_basename>
-get <std:string> import <str_contains::str_starts_with::str_split::str_join::str_index_of>
+get <std:string> import <str_contains::str_starts_with::str_split::str_join::str_index_of::str_ends_with>
 get <std:fs> import <create_dir_ok>
 
 !!! Warianty nazwane z prefiksem `Target*`, zeby nie kolidowaly z
@@ -364,6 +364,68 @@ fun build_wire_extern_dependencies(cache: CacheDirs, manifest: Manifest, crate_d
                         ]
                     ] elif meta.lib_type == "rust-lib" [
                         vira_wire_rust_lib(crate_dir.clone(), dep.name.clone(), meta.file.clone())?
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        !!! ZMIANA 0.4 - "bytes" (H#, Bytes-Repository) i "bit" (Hacker
+        !!! Lang, bit-io) - patrz `virus/cmd/bytes_repo.hcs`/
+        !!! `virus/cmd/bit_repo.hcs`. W przeciwienstwie do "vira"
+        !!! (gdzie typ linkowania - static-lib/shared-lib/rust-lib -
+        !!! jest ZNANY JUZ w `repo-list.json`), oba te rejestry moga
+        !!! zwrocic RUZNE rozszerzenia dla tej samej nazwy pakietu
+        !!! (wydanie GitHub .a/.so/.rlib ALBO build lokalny), wiec typ
+        !!! linkowania ustalamy tu z ROZSZERZENIA pliku zapisanego w
+        !!! meta (`vira_split_dir_libname` + `str_ends_with`), nie z
+        !!! `meta.lib_type` (ktory dla bytes/bit niesie tylko "skad to
+        !!! przyszlo" - "bytes-release"/"bytes-source"/"bit-rust"/
+        !!! "bit-hl" - do komunikatow bledow/diagnostyki).
+        if dep.source == "bytes" or dep.source == "bit" [
+            let dest2 = cache_lib_path(cache.clone(), dep.source.clone(), dep.name.clone())
+            let meta_path2 = path_join(dest2, ".vira-meta.txt")
+            match vira_read_meta(meta_path2) [
+                Some(meta2) -> [
+                    if meta2.lib_type == "bit-hl" [
+                        !!! Biblioteka Hacker Lang (zrodlo, nie .rlib) -
+                        !!! nic do zlinkowania w Cargo - jest konsumowana
+                        !!! w runtime przez `native {Hacker Lang}` (samo
+                        !!! wywolanie `hl`/`bit` wskazuje na nia po
+                        !!! sciezce, patrz `BIT_HL_HOME` w
+                        !!! `bit_repo.hcs`), wiec tylko informujemy.
+                        progress_info("bit: '" + dep.name.clone() + "' (Hacker Lang) dostepny pod " + meta2.file.clone() + " - uzyj w 'native {Hacker Lang}'")
+                    ] elif str_ends_with(meta2.file.clone(), ".rlib") [
+                        vira_wire_rust_lib(crate_dir.clone(), dep.name.clone(), meta2.file.clone())?
+                    ] elif str_ends_with(meta2.file.clone(), ".hlib") [
+                        !!! Format HackerScript - NIE jest linkowany jako
+                        !!! biblioteka natywna (patrz komentarz w
+                        !!! `codegen.hcs::gen_get_import`, przypadek
+                        !!! "bytes"/"bit") - potrzebne jest osobne `get
+                        !!! <extern:...> use <dynamic> region [ ... ]`
+                        !!! recznie napisane (albo wygenerowane przez
+                        !!! `hackerc hlib` z tego .hlib, jesli ma
+                        !!! artefakt `ast`, patrz
+                        !!! `hlib_extract_for_import`).
+                        progress_warn("'" + dep.name.clone() + "' (" + dep.source.clone() + ") to .hlib pod " + meta2.file.clone() + " - dopisz recznie 'get <extern:...> use <dynamic>' + 'region [ ... ]' albo wypakuj przez 'hackerc hlib extract'")
+                    ] else [
+                        !!! .a/.so (albo brak rozpoznanego rozszerzenia -
+                        !!! wtedy zgadujemy dynamiczne linkowanie, tak
+                        !!! samo jak dla nieznanych "kind" z
+                        !!! `.hks-extern-links.txt` nizej).
+                        match vira_split_dir_libname(meta2.file.clone()) [
+                            Some(vln2) -> [
+                                let kind3 = "dylib"
+                                if str_ends_with(meta2.file.clone(), ".a") [
+                                    kind3 = "static"
+                                ]
+                                link_lines.push("    println!(\"cargo:rustc-link-search=native=" + vln2.dir + "\");")
+                                link_lines.push("    println!(\"cargo:rustc-link-lib=" + kind3 + "=" + vln2.libname + "\");")
+                            ]
+                            None -> [
+                                progress_warn(dep.source.clone() + ": nie umiem ustalic nazwy biblioteki z '" + meta2.file + "' dla " + dep.name.clone())
+                            ]
+                        ]
                     ]
                 ]
                 None -> [
