@@ -7,8 +7,16 @@ include <typeinfer>
 !!! przeoczenie sprzed 0.3 - "npm"/"jsr" byly juz obslugiwane przez
 !!! `gen_get_import` (codegen.hcs), ale nie byly tu wypisane, co dawalo
 !!! falszywy blad E0003 dla poprawnego kodu.
+!!! ZMIANA 0.4: dodano "bytes" (rejestr H#/Bytes-Repository) i "bit"
+!!! (rejestr Hacker Lang/bit-io) - parytet z "vira": sam `get <bytes:
+!!! nazwa>`/`get <bit:nazwa>` w kodzie HackerScript TYLKO deklaruje
+!!! zaleznosc (patrz komentarz w `gen_get_import`), rzeczywiste
+!!! pobieranie/budowanie robi `virus install bytes|bit ...` (patrz
+!!! `virus/cmd/bytes_repo.hcs`/`virus/cmd/bit_repo.hcs`), a podpiecie
+!!! do linkera `virus build` (patrz `build_wire_extern_dependencies`
+!!! w `virus/cmd/build.hcs`).
 fun is_known_get_source(s: Str) -> Bool [
-    end s == "pypi" or s == "crates" or s == "std" or s == "core" or s == "selfhost" or s == "virus" or s == "vira" or s == "npm" or s == "jsr" or s == "extern" or s == "c" or s == "cpp"
+    end s == "pypi" or s == "crates" or s == "std" or s == "core" or s == "selfhost" or s == "virus" or s == "vira" or s == "npm" or s == "jsr" or s == "extern" or s == "c" or s == "cpp" or s == "bytes" or s == "bit"
 ]
 
 fun is_builtin_func(name: Str) -> Bool [
