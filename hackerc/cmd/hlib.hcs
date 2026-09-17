@@ -33,7 +33,18 @@ fun hlib_build(source_hcs_path: Str, so_path: Str, out_hlib_path: Str, lib_name:
     let artifact_count = 0
     let signed = false
 
+    !!! Cala reszta bloku jest owinieta etykietowanym blokiem Rust
+    !!! (`'hlib_build_body`), zeby wczesne wyjscia przy bledach
+    !!! (ponizej) mogly uzyc `break 'hlib_build_body;` zamiast
+    !!! goleg `return;` - `return;` bez wartosci wewnatrz tego bloku
+    !!! probowalby zwrocic `()` z `hlib_build`, ktore ma typ
+    !!! zwracany `HlibBuildResult`, co nie kompiluje sie (E0069).
+    !!! `break` z etykiety po prostu konczy TEN blok (tak jak
+    !!! zamierzone), a funkcja i tak konczy sie normalnym `end
+    !!! HlibBuildResult(ok, message, artifact_count, signed)`
+    !!! ponizej native-bloku.
     native {Rust} [
+        'hlib_build_body: {
         use sha2::{Digest, Sha256};
         use std::io::Write;
 
@@ -52,7 +63,7 @@ fun hlib_build(source_hcs_path: Str, so_path: Str, out_hlib_path: Str, lib_name:
             }
             Err(e) => {
                 message = format!("nie moge odczytac {}: {}", source_hcs_path, e);
-                return;
+                break 'hlib_build_body;
             }
         }
 
@@ -71,7 +82,7 @@ fun hlib_build(source_hcs_path: Str, so_path: Str, out_hlib_path: Str, lib_name:
                 }
                 Err(e) => {
                     message = format!("nie moge odczytac {}: {}", so_path, e);
-                    return;
+                    break 'hlib_build_body;
                 }
             }
         }
@@ -93,18 +104,18 @@ fun hlib_build(source_hcs_path: Str, so_path: Str, out_hlib_path: Str, lib_name:
                     use ed25519_dalek::Signer;
                     let key_bytes = match hex::decode(key_hex.trim()) {
                         Ok(b) => b,
-                        Err(e) => { message = format!("zly klucz podpisujacy: {}", e); return; }
+                        Err(e) => { message = format!("zly klucz podpisujacy: {}", e); break 'hlib_build_body; }
                     };
                     let arr: [u8; 32] = match key_bytes.try_into() {
                         Ok(a) => a,
-                        Err(_) => { message = "klucz podpisujacy musi miec 32 bajty (64 znaki hex)".to_string(); return; }
+                        Err(_) => { message = "klucz podpisujacy musi miec 32 bajty (64 znaki hex)".to_string(); break 'hlib_build_body; }
                     };
                     let signing_key = ed25519_dalek::SigningKey::from_bytes(&arr);
                     let sig = signing_key.sign(&checksums_bytes);
                     signature_bytes = Some(sig.to_bytes().to_vec());
                     signature_block = Some((hex::encode(signing_key.verifying_key().to_bytes()), "CHECKSUMS.sha256".to_string()));
                 }
-                Err(e) => { message = format!("nie moge odczytac klucza {}: {}", sign_key_path, e); return; }
+                Err(e) => { message = format!("nie moge odczytac klucza {}: {}", sign_key_path, e); break 'hlib_build_body; }
             }
         }
 
@@ -162,6 +173,7 @@ fun hlib_build(source_hcs_path: Str, so_path: Str, out_hlib_path: Str, lib_name:
             Err(e) => {
                 message = format!("nie moge zapisac {}: {}", out_hlib_path, e);
             }
+        }
         }
     ]
 
