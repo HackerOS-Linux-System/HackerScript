@@ -9,6 +9,8 @@ include <manifest>
 include <progress>
 include <net_helpers>
 include <vira>
+include <bytes_repo>
+include <bit_repo>
 
 !! ---- pypi: bezposrednio przez PyPI JSON API, bez `pip` --------------------
 
@@ -392,8 +394,12 @@ fun cmd_install_run(project_root: Str, source: Str, name: Str, version: Option<S
         install_jsr(dest.clone(), name.clone(), version.clone())?
     ] elif source == "vira" [
         install_vira(dest.clone(), name.clone(), version.clone())?
+    ] elif source == "bytes" [
+        install_bytes(dest.clone(), name.clone(), version.clone())?
+    ] elif source == "bit" [
+        install_bit(dest.clone(), name.clone(), version.clone())?
     ] else [
-        end err("nieznane zrodlo zaleznosci '" + source + "' (oczekiwano pypi/crates/npm/jsr/vira/std/core)")
+        end err("nieznane zrodlo zaleznosci '" + source + "' (oczekiwano pypi/crates/npm/jsr/vira/bytes/bit/std/core)")
     ]
 
     progress_success("zainstalowano " + source.clone() + ":" + name.clone() + " -> " + dest)
