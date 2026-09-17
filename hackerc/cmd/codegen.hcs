@@ -2880,8 +2880,109 @@ impl CodeGen [
             self.emit("}")
             end
         ]
+        !!! ZMIANA 0.4 - `native {H#} [ ... ]` i `native {Hacker Lang}
+        !!! [ ... ]`: w przeciwienstwie do `JavaScript` (interpreter
+        !!! wbudowany, statycznie linkowany przez rquickjs) i `C++`/
+        !!! `Rust` (kompilowane/wklejane build-time), TE dwa silniki
+        !!! NIE maja zadnego wbudowanego runtime'u w wygenerowanej
+        !!! binarce - kazde wywolanie bloku odpala ZEWNETRZNA binarke
+        !!! przez `std::process::Command` (podproces, jak `$ ... $`
+        !!! Zero-Cost Sandbox nizej), tak jak wyraznie zazadano: "H#
+        !!! dziala wszedzie, ale wymaga binarek h#+bytes w /usr/bin"
+        !!! (bez sprawdzania dystrybucji), a "Hacker Lang bedzie
+        !!! obslugiwany TYLKO jak wykryje HackerOS w /etc/os-release,
+        !!! uzywajac /usr/bin/bit + /usr/bin/hl". Zrodlo bloku jest
+        !!! zapisywane do pliku tymczasowego (`std::env::temp_dir()`,
+        !!! nazwa unikalna przez PID + numer bloku - kilka blokow w
+        !!! tym samym procesie nie nadpisuje sobie plikow) i
+        !!! uruchamiane: `h# preview <plik>` (interpreter H# -
+        !!! natychmiastowe wykonanie, parytet z tym jak `JavaScript`
+        !!! jest OD RAZU wykonywany przez QuickJS - `h# compile`
+        !!! byloby zle dopasowane, bo produkuje binarke/obiekt zamiast
+        !!! wykonac kod na miejscu) wzgl. `hl run <plik>` (pipeline
+        !!! JIT Hacker Lang - patrz README.adoc tego jezyka). Brak
+        !!! wymaganych binarek/HackerOS -> ostrzezenie na stderr +
+        !!! POMINIECIE bloku (bezpieczna degradacja, parytet z `$ ...
+        !!! $` przy braku CAP_SYS_ADMIN), NIE panika - `hackerc build`
+        !!! samo w sobie nie wymaga H#/Hacker Lang zainstalowanych,
+        !!! tylko WYKONANIE takiego bloku w runtime.
+        if engine == "H#" [
+            self.emit("{")
+            self.indent = self.indent + 1
+            self.emit("let __hks_hs_h = std::path::Path::new(\"/usr/bin/h#\").exists();")
+            self.emit("let __hks_hs_b = std::path::Path::new(\"/usr/bin/bytes\").exists();")
+            self.emit("if !__hks_hs_h || !__hks_hs_b {")
+            self.indent = self.indent + 1
+            self.emit("eprintln!(\"native {{H#}} [ ... ] blok: brak /usr/bin/h# i/lub /usr/bin/bytes - pomijam blok.\\nZainstaluj H# na HackerOS:\\n  hacker unpack h#\\n  hacker unpack h#-utils\\n(reszta krokow zostanie dopracowana w przyszlosci).\\nJezeli potrzebujesz, zapoznaj sie z kodem zrodlowym H# i bytes.\");")
+            self.indent = self.indent - 1
+            self.emit("} else {")
+            self.indent = self.indent + 1
+            self.emit("let __hks_hs_path = std::env::temp_dir().join(format!(\"hks_native_hsharp_{}_" + idx_text + ".h#\", std::process::id()));")
+            self.emit("if let Err(e) = std::fs::write(&__hks_hs_path, " + python_raw_string(raw) + ") {")
+            self.indent = self.indent + 1
+            self.emit("eprintln!(\"native {{H#}} [ ... ] blok: nie udalo sie zapisac pliku tymczasowego: {}\", e);")
+            self.indent = self.indent - 1
+            self.emit("} else {")
+            self.indent = self.indent + 1
+            self.emit("match std::process::Command::new(\"/usr/bin/h#\").arg(\"preview\").arg(&__hks_hs_path).status() {")
+            self.indent = self.indent + 1
+            self.emit("Ok(s) => { if !s.success() { eprintln!(\"native {{H#}} [ ... ] blok: 'h# preview' zakonczyl sie kodem {:?}\", s.code()); } }")
+            self.emit("Err(e) => { eprintln!(\"native {{H#}} [ ... ] blok: nie udalo sie uruchomic h#: {}\", e); }")
+            self.indent = self.indent - 1
+            self.emit("}")
+            self.emit("let _ = std::fs::remove_file(&__hks_hs_path);")
+            self.indent = self.indent - 1
+            self.emit("}")
+            self.indent = self.indent - 1
+            self.emit("}")
+            self.indent = self.indent - 1
+            self.emit("}")
+            end
+        ]
+        if engine == "Hacker Lang" [
+            self.emit("{")
+            self.indent = self.indent + 1
+            self.emit("let __hks_hl_os = std::fs::read_to_string(\"/etc/os-release\").map(|s| s.contains(\"HackerOS\")).unwrap_or(false);")
+            self.emit("if !__hks_hl_os {")
+            self.indent = self.indent + 1
+            self.emit("eprintln!(\"native {{Hacker Lang}} [ ... ] blok: wymaga HackerOS (nie znaleziono 'HackerOS' w /etc/os-release) - pomijam blok\");")
+            self.indent = self.indent - 1
+            self.emit("} else {")
+            self.indent = self.indent + 1
+            self.emit("let __hks_hl_bit = std::path::Path::new(\"/usr/bin/bit\").exists();")
+            self.emit("let __hks_hl_hl = std::path::Path::new(\"/usr/bin/hl\").exists();")
+            self.emit("if !__hks_hl_bit || !__hks_hl_hl {")
+            self.indent = self.indent + 1
+            self.emit("eprintln!(\"native {{Hacker Lang}} [ ... ] blok: brak /usr/bin/bit i/lub /usr/bin/hl na tym HackerOS - pomijam blok\");")
+            self.indent = self.indent - 1
+            self.emit("} else {")
+            self.indent = self.indent + 1
+            self.emit("let __hks_hl_path = std::env::temp_dir().join(format!(\"hks_native_hl_{}_" + idx_text + ".hl\", std::process::id()));")
+            self.emit("if let Err(e) = std::fs::write(&__hks_hl_path, " + python_raw_string(raw) + ") {")
+            self.indent = self.indent + 1
+            self.emit("eprintln!(\"native {{Hacker Lang}} [ ... ] blok: nie udalo sie zapisac pliku tymczasowego: {}\", e);")
+            self.indent = self.indent - 1
+            self.emit("} else {")
+            self.indent = self.indent + 1
+            self.emit("match std::process::Command::new(\"/usr/bin/hl\").arg(\"run\").arg(&__hks_hl_path).status() {")
+            self.indent = self.indent + 1
+            self.emit("Ok(s) => { if !s.success() { eprintln!(\"native {{Hacker Lang}} [ ... ] blok: 'hl run' zakonczyl sie kodem {:?}\", s.code()); } }")
+            self.emit("Err(e) => { eprintln!(\"native {{Hacker Lang}} [ ... ] blok: nie udalo sie uruchomic hl: {}\", e); }")
+            self.indent = self.indent - 1
+            self.emit("}")
+            self.emit("let _ = std::fs::remove_file(&__hks_hl_path);")
+            self.indent = self.indent - 1
+            self.emit("}")
+            self.indent = self.indent - 1
+            self.emit("}")
+            self.indent = self.indent - 1
+            self.emit("}")
+            self.indent = self.indent - 1
+            self.emit("}")
+            end
+        ]
         if engine != "JavaScript" [
-            self.emit("// native {" + engine + "} [ ... ] - nieobslugiwany silnik (dzis dostepne: \"JavaScript\", \"C++\", \"Rust\"), pomijam blok")
+            self.emit("// native {" + engine + "} [ ... ] - nieobslugiwany silnik (dzis dostepne: \"JavaScript\", \"C++\", \"Rust\", \"H#\", \"Hacker Lang\"), pomijam blok")
             end
         ]
         self.needs_native_js = true
@@ -3678,10 +3779,17 @@ impl CodeGen [
             end
         ]
         if source == "crates" [
+            !!! Nazwa paczki Cargo (`name`) moze zawierac `-` (np.
+            !!! `ed25519-dalek`) - w Cargo.toml to poprawne, ale Rust
+            !!! automatycznie mapuje `-` -> `_` dla identyfikatora
+            !!! modulu, wiec w `use ...;` MUSIMY uzyc wersji z `_`
+            !!! (str_replace_dash), inaczej `rustc` odrzuca skladnie
+            !!! ("expected one of `::`, `;`, or `as`, found `-`").
+            let rust_mod_name = str_replace_dash(name.clone())
             if details.len() > 0 [
-                self.emit("use " + name.clone() + "::{" + self.join_binds(details) + "};")
+                self.emit("use " + rust_mod_name + "::{" + self.join_binds(details) + "};")
             ] else [
-                self.emit("use " + name + "::*;")
+                self.emit("use " + rust_mod_name + "::*;")
             ]
             end
         ]
@@ -3722,6 +3830,29 @@ impl CodeGen [
         !!! `region [ ... ]` (biblioteka C/C++ jest zazwyczaj
         !!! statyczna po zbudowaniu przez `cc`, wiec typowo
         !!! `use <static>`).
+        !!! ZMIANA 0.4 - `get <bytes:nazwa>`/`get <bit:nazwa>`: parytet
+        !!! DOKLADNIE z `vira` (nie z `c`/`cpp`) - deklaruje zaleznosc od
+        !!! biblioteki natywnej pobranej/zbudowanej przez `virus install
+        !!! bytes|bit ...` (rejestry Bytes-Repository/index.json wzgl.
+        !!! bit-io/repo-list.json - patrz `virus/cmd/bytes_repo.hcs`/
+        !!! `virus/cmd/bit_repo.hcs`), podpinanej do linkera przez `virus
+        !!! build` (`build_wire_extern_dependencies` w
+        !!! `virus/cmd/build.hcs`, dokladnie tak jak dla "vira"). Sama
+        !!! deklaracja `get` tutaj NIE tworzy wywolywalnych sygnatur -
+        !!! do tego wciaz sluzy `get <extern:...> use <...>` +
+        !!! `region [ ... ]`, chyba ze pobrany artefakt to `.hlib`
+        !!! (HackerScript-owy format) - wtedy `virus install` sam
+        !!! wypisuje gotowy stub `get <extern:...> use <dynamic> region
+        !!! [ ... ]` (patrz `hlib_extract_for_import` w
+        !!! `hackerc/cmd/hlib.hcs`).
+        if source == "bytes" or source == "bit" [
+            let registry_label = "Bytes-Repository (H#)"
+            if source == "bit" [
+                registry_label = "bit-io (Hacker Lang)"
+            ]
+            self.emit("// get <" + source + ":" + name + "> - zaleznosc z rejestru " + registry_label + "; pobierz/zbuduj przez 'virus install " + source + " " + name + "' (patrz virus/cmd/" + source + "_repo.hcs), linkowana automatycznie przez 'virus build'; sygnatury FFI importuj osobnym 'get <extern:" + name + "> use <static|dynamic>' + 'region [ ... ]', chyba ze 'virus install' wygenerowal juz taki stub z pobranego .hlib")
+            end
+        ]
         if source == "c" or source == "cpp" [
             let lang_label = "C"
             if source == "cpp" [
