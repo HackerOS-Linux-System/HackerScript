@@ -714,7 +714,34 @@ fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, ne
     let i = 0
     let n = deps_names.len()
     while i < n [
-        deps_lines = deps_lines + deps_names[i] + " = \"" + deps_versions[i] + "\"\n"
+        !!! `ed25519-dalek` - `hlib.hcs::hlib_keygen` wola
+        !!! `SigningKey::generate(&mut OsRng)`, ktore w wersji 2.x
+        !!! jest schowane za opcjonalnym feature'em `rand_core`
+        !!! (`#[cfg(any(test, feature = "rand_core"))]` w
+        !!! signing.rs) - bez tego `cargo build` konczy sie
+        !!! `E0599: no function or associated item named 'generate'`.
+        !!! `ureq` (`get <std:http>`, `libs/std/lib/http.hcs`) - domyslnie
+        !!! (feature "tls") uzywa `webpki-roots`, czyli migawki
+        !!! zaufanych CA WBUDOWANEJ w binarke W CHWILI KOMPILACJI - na
+        !!! systemie z inna (np. starsza, przypieta pod stary `rustc`
+        !!! przy budowaniu samego hackerc/virus) wersja `rustls`/
+        !!! `webpki-roots` niz ta, ktorej Cargo akurat uzyje, zdarza sie
+        !!! `invalid peer certificate: UnknownIssuer` mimo poprawnego,
+        !!! aktualnego systemowego magazynu CA (zweryfikowane w praktyce
+        !!! przy `virus install bytes/bit` na GitHub - patrz PR o
+        !!! "bytes"/"bit"). Feature "native-certs" przelacza na
+        !!! `rustls-native-certs` (systemowy magazyn CA, zawsze
+        !!! aktualny wzgledem dystrybucji) - bezpieczniejszy domyslny
+        !!! wybor dla WSZYSTKICH uzytkownikow `get <std:http>`
+        !!! (pypi/crates/npm/jsr/vira/bytes/bit), nie tylko obejscie na
+        !!! potrzeby jednego srodowiska.
+        if deps_names[i] == "ureq" [
+            deps_lines = deps_lines + deps_names[i] + " = { version = \"" + deps_versions[i] + "\", features = [\"native-certs\"] }\n"
+        ] elif deps_names[i] == "ed25519-dalek" [
+            deps_lines = deps_lines + deps_names[i] + " = { version = \"" + deps_versions[i] + "\", features = [\"rand_core\"] }\n"
+        ] else [
+            deps_lines = deps_lines + deps_names[i] + " = \"" + deps_versions[i] + "\"\n"
+        ]
         i = i + 1
     ]
     !!! ZMIANA 0.3 - `native` `{C++}` `[ ... ]` (patrz `codegen.hcs::gen_native`)
