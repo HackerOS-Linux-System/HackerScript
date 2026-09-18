@@ -1,0 +1,146 @@
+name: "Zainstaluj zlb"
+description: >
+  Instaluje narzędzie 'zlb' (Zenit Linux Builder) w jednym z trzech trybów
+  wybieranych przez inputs.mode:
+    - latest-release -> pobiera najnowszą binarkę z GitHub Releases
+                         (releases/latest/download/zlb)
+    - version        -> pobiera KONKRETNĄ wersję z GitHub Releases
+                         (releases/download/<inputs.version>/zlb)
+    - source         -> buduje najnowszą wersję ze źródeł:
+                         git clone https://github.com/Zenit-Linux/zlb.git,
+                         `nimble install -d -y`, `janet build.janet`
+                         (wymaga: nim, nimble, curl, git, tar, gcc, janet).
+                         W TYM TRYBIE dodatkowo buduje TAK SAMO ze źródeł
+                         'zpm' (git clone https://github.com/Zenit-Linux/zpm.git
+                         + `nimble install -d -y` + `janet build.janet`) i
+                         wrzuca gotową binarkę na PATH (/usr/local/bin/zpm)
+                         -- zlb samo próbuje pobrać 'zpm' binarnie tylko gdy
+                         NIE znajdzie go już na PATH (patrz zlbpkg/tools.nim
+                         ::ensureZpm w repo zlb), więc podstawienie własnej,
+                         zbudowanej ze źródeł binarki TUTAJ wystarczy, żeby
+                         zlb jej użyło zamiast czegokolwiek ściągać.
+                         ZAŁOŻENIE: repo zpm ma tę samą strukturę builda co
+                         zlb (nimble + build.janet -> bin/zpm). Jeśli zpm
+                         faktycznie buduje się inaczej, popraw kroki
+                         "zpm ze źródeł: ..." poniżej.
+  Używane przez wszystkie workflowy zenita, które potrzebują 'zlb' w PATH.
+
+inputs:
+  mode:
+    description: "'latest-release' | 'version' | 'source'"
+    required: false
+    default: "latest-release"
+  version:
+    description: >
+      Wersja do pobrania z GitHub Releases (np. "v0.1"). Wymagane gdy
+      mode=version. Ignorowane dla pozostałych trybów.
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: "zlb: pobierz najnowszą wersję z GitHub Releases"
+      if: ${{ inputs.mode == 'latest-release' || inputs.mode == '' }}
+      shell: bash
+      run: |
+        curl -fsSL https://github.com/Zenit-Linux/zlb/releases/latest/download/zlb -o /usr/local/bin/zlb
+        chmod +x /usr/local/bin/zlb
+
+    - name: "zlb: pobierz konkretną wersję z GitHub Releases"
+      if: ${{ inputs.mode == 'version' }}
+      shell: bash
+      run: |
+        if [ -z "${{ inputs.version }}" ]; then
+          echo "::error::mode=version wymaga podania inputs.version (np. 'v0.1')"
+          exit 1
+        fi
+        curl -fsSL "https://github.com/Zenit-Linux/zlb/releases/download/${{ inputs.version }}/zlb" -o /usr/local/bin/zlb
+        chmod +x /usr/local/bin/zlb
+
+    - name: "zlb ze źródeł: zależności systemowe (curl git tar gcc)"
+      if: ${{ inputs.mode == 'source' }}
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y curl git tar gcc
+
+    - name: "zlb ze źródeł: zainstaluj Nim + nimble"
+      if: ${{ inputs.mode == 'source' }}
+      uses: jiro4989/setup-nim-action@v2
+      with:
+        nim-version: "2.2.0"
+
+    - name: "zlb ze źródeł: zainstaluj Janet (potrzebny do uruchomienia build.janet)"
+      if: ${{ inputs.mode == 'source' }}
+      shell: bash
+      run: |
+        sudo apt-get install -y janet || (curl -fsSL https://janet-lang.org/install.sh | sudo bash)
+
+    - name: "zlb ze źródeł: git clone Zenit-Linux/zlb"
+      if: ${{ inputs.mode == 'source' }}
+      shell: bash
+      run: |
+        rm -rf "${{ runner.temp }}/zlb-src"
+        git clone https://github.com/Zenit-Linux/zlb.git "${{ runner.temp }}/zlb-src"
+
+    - name: "zlb ze źródeł: nimble install (zależności, np. hcl_nim)"
+      if: ${{ inputs.mode == 'source' }}
+      shell: bash
+      working-directory: ${{ runner.temp }}/zlb-src
+      run: nimble install -d -y
+
+    - name: "zlb ze źródeł: janet build.janet"
+      if: ${{ inputs.mode == 'source' }}
+      shell: bash
+      working-directory: ${{ runner.temp }}/zlb-src
+      run: janet build.janet
+
+    - name: "zlb ze źródeł: zainstaluj zbudowaną binarkę do PATH"
+      if: ${{ inputs.mode == 'source' }}
+      shell: bash
+      run: |
+        cp "${{ runner.temp }}/zlb-src/bin/zlb" /usr/local/bin/zlb
+        chmod +x /usr/local/bin/zlb
+
+    # ---- od tego miejsca: 'zpm' budowany TAK SAMO ze źródeł, tylko gdy
+    # ---- mode=source. Zależności systemowe (curl/git/tar/gcc), Nim/nimble
+    # ---- i Janet są już zainstalowane przez kroki 'zlb ze źródeł:' powyżej.
+
+    - name: "zpm ze źródeł: git clone Zenit-Linux/zpm"
+      if: ${{ inputs.mode == 'source' }}
+      shell: bash
+      run: |
+        rm -rf "${{ runner.temp }}/zpm-src"
+        git clone https://github.com/Zenit-Linux/zpm.git "${{ runner.temp }}/zpm-src"
+
+    - name: "zpm ze źródeł: nimble install (zależności)"
+      if: ${{ inputs.mode == 'source' }}
+      shell: bash
+      working-directory: ${{ runner.temp }}/zpm-src
+      run: nimble install -d -y
+
+    - name: "zpm ze źródeł: janet build.janet"
+      if: ${{ inputs.mode == 'source' }}
+      shell: bash
+      working-directory: ${{ runner.temp }}/zpm-src
+      run: janet build.janet
+
+    - name: "zpm ze źródeł: zainstaluj zbudowaną binarkę do PATH"
+      if: ${{ inputs.mode == 'source' }}
+      shell: bash
+      run: |
+        cp "${{ runner.temp }}/zpm-src/bin/zpm" /usr/local/bin/zpm
+        chmod +x /usr/local/bin/zpm
+        # Od teraz zlbpkg/tools.nim::ensureZpm znajdzie 'zpm' przez
+        # findExe("zpm") na PATH i NIE będzie próbowało pobierać go
+        # binarnie z GitHub Releases.
+
+    - name: "zlb: weryfikacja zainstalowanej wersji"
+      shell: bash
+      run: zlb version
+
+    - name: "zpm: weryfikacja zainstalowanej wersji (tylko mode=source)"
+      if: ${{ inputs.mode == 'source' }}
+      shell: bash
+      run: zpm --version || zpm version || echo "::warning::nie udało się odczytać wersji 'zpm' -- sprawdź, czy CLI zpm faktycznie wspiera flagę --version/version"
