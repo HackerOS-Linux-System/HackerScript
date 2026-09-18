@@ -83,6 +83,18 @@ struct MatchArm [
 !!! project.hcs::resolve_include_path). Osobny od `GetImportStmt`/
 !!! `get <source:name>`, ktory pozostaje nietkniety - `include` nie ma
 !!! zrodla/wersji/`import <details>`, tylko jeden segment sciezki.
+!!! NOWOSC 0.4: drugi ksztalt tego samego wariantu,
+!!! `include <work:czlonek[::plik]>` (Str zaczyna sie od dokladnie
+!!! `"work:"`) - "prawdziwe" statyczne linkowanie zrodla INNEGO
+!!! czlonka workspace (bez kopiowania plikow), rozwiazywane WZGLEDEM
+!!! KORZENIA WORKSPACE zamiast katalogu biezacego pliku - patrz
+!!! `parse_include()` w parser.hcs i `resolve_include_path()` w
+!!! project.hcs. W odroznieniu od `get <work:...>` (ktory TAKZE
+!!! importuje ten sam plik, ale jako WLASNY, nazwany podmodul), efekt
+!!! koncowy na poziomie Rust jest identyczny (`use crate::<flat>::*;`
+!!! - patrz `gen_include`/`gen_get_import` w codegen.hcs) - roznica to
+!!! WYLACZNIE nazwa wygenerowanego modulu (prefiks `_hks_inc_` zamiast
+!!! `_hks_`) i brak `import <wybrane_nazwy>` w `include`.
 enum Stmt [
     LetStmt(Str, Option<TypeRef>, Option<Expr>, Bool),
     AssignStmt(Expr, Str, Expr),
