@@ -1,0 +1,54 @@
+include <work:hackerc::ast_nodes>
+include <work:hackerc::parser>
+include <work:hackerc::typecheck>
+include <work:hackerc::diagnostics>
+include <work:hackerc::transpiler>
+
+!!! Jak `parse()`, ale z tym samym preprocessingiem `direct [ ... ]`
+!!! co transpilacja - parytet z `parse_with_direct` w
+!!! `hackerc/cmd/main.hcs` (ktorego nie mozemy uzyc wprost, bo
+!!! `hackerc/cmd/main.hcs` samo w sobie ciagnie `project.hcs`/prawdziwy
+!!! `main()` z argv, niepotrzebne i niedzialajace w WASM) - dokladna
+!!! kopia logiki z `hackerc/cmd/playground.hcs::parse_source`
+!!! (ktorego smoke-testowa rola w `hackerc` zostaje bez zmian - to,
+!!! ze `playground/` teraz TEZ ma wlasna kopie tej JEDNEJ, trzyliniowej
+!!! funkcji, jest zamierzone: `parse_source` i `check_source` SA
+!!! wlasnym kodem `playground`a, w odroznieniu od `ast_nodes`/
+!!! `parser`/`typecheck`/`diagnostics`/`transpiler` powyzej, ktore SA
+!!! prawdziwie linkowane, nie kopiowane).
+fun parse_source(source: Str) -> Program [
+    let extraction = extract_direct_blocks(source)
+    end parse(extraction.stripped_source)
+]
+
+!!! Sprawdza `source` (zawartosc PLIKU .hcs jako string, NIE sciezka -
+!!! playground nie ma dostepu do systemu plikow uzytkownika, ani w
+!!! ogole zadnego systemu plikow w przegladarce) i zwraca gotowy do
+!!! wyswietlenia raport: `"OK (N warning(ow))"` przy braku bledow,
+!!! albo pelny raport diagnostyk (styl Rust/Elm - fragment kodu +
+!!! karetka, patrz `render_many`) zakonczony podsumowaniem liczby
+!!! bledow/warningow. Ta funkcja jest CALYM publicznym API playgrounda
+!!! - patrz `@wasm_export` ponizej i `playground/web/main.js`
+!!! (`wasm.check_source(src)`).
+@wasm_export
+fun check_source(source: Str) -> Str [
+    let program = parse_source(source)
+    let diags = check_program(program, [])
+    if diags.len() == 0 [
+        end "OK (0 warning(ow))"
+    ]
+    let report = render_many(source, "playground.hcs", diags.clone())
+    let errors = 0
+    let i = 0
+    let n = diags.len()
+    while i < n [
+        if diags[i].severity == "error" [
+            errors = errors + 1
+        ]
+        i = i + 1
+    ]
+    if errors > 0 [
+        end report + "\n\n" + (errors as Str) + " blad(ow), " + ((diags.len() - errors) as Str) + " warning(ow)"
+    ]
+    end report + "\n\nOK (" + (diags.len() as Str) + " warning(ow))"
+]
