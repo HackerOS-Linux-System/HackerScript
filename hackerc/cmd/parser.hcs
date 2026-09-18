@@ -298,15 +298,37 @@ impl Parser [
         end GetImportStmt(source, name, version, details)
     ]
 
-    !!! `include <sciezka>` - parytet z `parse_include()` (parser.py) -
-    !!! prostsze niz `get`: jeden segment, bez `source:`/`::wersja`/
-    !!! `import <details>`.
+    !! `include <sciezka>` - parytet z `parse_include()` (parser.py) -
+    !! prostsze niz `get`: jeden segment, bez `source:`/`::wersja`/
+    !! `import <details>`. NOWOSC 0.4 - drugi ksztalt, `include
+    !! <work:czlonek[::plik]>` (wykryty po natrafieniu na `Colon` PO
+    !! pierwszym segmencie, dokladnie jak w `parse_get_import()`
+    !! nizej) - "prawdziwe" statyczne linkowanie zrodla INNEGO czlonka
+    !! workspace, bez kopiowania plikow (patrz `resolve_include_path`
+    !! w project.hcs, ktora rozpoznaje ten ksztalt po prefiksie
+    !! "work:" w zwroconym Str). Rekonstruujemy jeden, plaski string
+    !! ("work:czlonek" albo "work:czlonek::plik") zamiast dodawac nowe
+    !! pole do `IncludeStmt` - `IncludeStmt` zostaje jednym `Str`, tak
+    !! jak bylo, zero zmian w kazdym innym miejscu, ktore go dopasowuje
+    !! (`project.hcs`/`codegen.hcs`).
     fun parse_include(self) -> Stmt [
         self.expect(Keyword, some("include"))
         self.expect(LAngle, none())
-        let path = self.read_angle_segment()
+        let first = self.read_angle_segment()
+        if self.check(Colon, none()) [
+            self.advance()
+            let member = self.read_angle_segment()
+            let raw = "work:" + member
+            if self.check(DColon, none()) [
+                self.advance()
+                let sub = self.read_angle_segment()
+                raw = raw + "::" + sub
+            ]
+            self.expect(RAngle, none())
+            end IncludeStmt(raw)
+        ]
         self.expect(RAngle, none())
-        end IncludeStmt(path)
+        end IncludeStmt(first)
     ]
 
     fun parse_type(self) -> TypeRef [
