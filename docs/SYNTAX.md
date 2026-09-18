@@ -130,12 +130,153 @@ get <crates:serde::1.0>                     !! prawdziwa zależność Cargo
 get <pypi:rich>                             !! dostępne tylko w direct[ ... ]
 get <npm:left-pad> / get <jsr:@std/path>    !! JS/TS (w budowie, patrz ROADMAP)
 get <vira:nazwa>                            !! biblioteka Vira typu "git" (.hcs)
+get <work:parser>                           !! czlonek workspace "parser" (0.4, cale lib/mod.hcs)
+get <work:parser::ast>                      !! ...jego podmodul lib/ast.hcs
 ```
 
 Zrodła obsługiwane dziś przez `get <źródło:nazwa[::wersja]>`: `std`,
 `core`, `selfhost` (tylko `include`, blokowane w `get`), `virus`,
-`vira`, `crates`, `pypi`, `npm`, `jsr` — oraz, od **0.3**, `extern`,
-`c`, `cpp` (patrz sekcja FFI niżej).
+`vira`, `work`, `hlib`, `bytes`, `bit`, `crates`, `pypi`, `npm`, `jsr`
+— oraz, od **0.3**, `extern`, `c`, `cpp` (patrz sekcja FFI niżej).
+
+### `get <work:członek[::plik]>` — import z workspace (nowość 0.4)
+
+Odpowiednik Rustowego `use nazwa_membera::modul::*;` dla dowolnego
+członka `[workspace] -> members` z `Virus.hk` — nie tylko `core`/`std`
+(które mają własne, krótsze aliasy `get <core:...>`/`get <std:...>`,
+działające identycznie i nadal zalecane dla nich dwóch).
+
+```
+!! w dowolnym pliku .hcs, gdziekolwiek w workspace:
+get <work:parser>                    !! => <workspace_root>/parser/lib/mod.hcs
+get <work:parser::ast>               !! => <workspace_root>/parser/lib/ast.hcs
+get <work:parser> import <parse_ast> !! import wybranych nazw, jak przy std/core
+```
+
+**Kiedy członek jest importowalny w ten sposób.** Każdy członek
+workspace ma jeden z dwóch kształtów (albo oba naraz), rozpoznawany
+wyłącznie po zawartości jego własnego katalogu — **bez** żadnego pola
+w `Virus.hk` (sekcja `[build]` z takim polem została usunięta w 0.4,
+patrz niżej):
+
+| Kształt        | Wymagany plik      | Budowany przez     | Importowalny przez        |
+|-----------------|---------------------|---------------------|-----------------------------|
+| "binarka"       | `cmd/main.hcs` (`fun main()`) | `virus build`       | nie (uruchamiany, nie importowany) |
+| "biblioteka"    | `lib/mod.hcs`       | nie (nie ma `cmd/`) | `get <work:nazwa[::plik]>` |
+
+`hackerc`/`virus` same są dziś "binarkami" (mają tylko `cmd/main.hcs`),
+`libs/core`/`libs/std` są "bibliotekami" (mają tylko `lib/mod.hcs`).
+Nic nie stoi na przeszkodzie, żeby przyszły członek miał **oba**
+naraz — byłby wtedy jednocześnie samodzielnym narzędziem i biblioteką
+dla reszty workspace.
+
+Rozwiązywanie ścieżki (`hackerc/cmd/project.hcs::find_workspace_root`)
+idzie w górę drzewa katalogów od pliku, w którym jest napisany `get
+<work:...>`, szukając najbliższego przodka mającego
+`<nazwa_membera>/lib` jako katalog — działa więc identycznie
+niezależnie od tego, z którego miejsca w workspace go użyjesz.
+
+### `include <work:członek[::plik]>` — statyczne linkowanie bez kopiowania (nowość 0.4)
+
+Drugi kształt zwykłego `include <ścieżka>` (który wciąż działa bez
+zmian, względem katalogu bieżącego pliku). Ten łączy dwie rzeczy:
+semantykę `include` (plik jest scalany **bez prefiksu**, jak Rustowe
+`mod` — w przeciwieństwie do `get`, który tworzy nazwany, osobny
+podmoduł) z rozwiązywaniem ścieżki `get <work:...>` (względem korzenia
+workspace, nie bieżącego katalogu).
+
+```
+!! playground/lib/mod.hcs:
+include <work:hackerc::ast_nodes>   !! => hackerc/cmd/ast_nodes.hcs, scalony bez prefiksu
+include <work:hackerc::lexer>
+include <work:hackerc::parser>
+include <work:hackerc::typecheck>
+include <work:hackerc::diagnostics>
+
+!! wszystkie funkcje z tych plikow (parse, check_program, ...) sa juz
+!! dostepne bez prefiksu, dokladnie tak jak przy zwyklym
+!! `include <lexer>` w obrebie tego samego katalogu:
+fun check_source(src: Str) -> Str [
+    let toks = tokenize(src)
+    ...
+]
+```
+
+**Po co to istnieje, skoro jest już `get <work:...>`.** Oba w
+generowanym Rust kończą się identycznie: `use crate::<flat>::*;`
+(`gen_include`/`gen_get_import` w `codegen.hcs`) — jedyna różnica to
+brak `import <wybrane_nazwy>` przy `include` (zawsze pełny glob) i
+inny prefiks generowanej nazwy modułu (`_hks_inc_` zamiast `_hks_`, by
+nigdy nie kolidować z `get`). To jest właśnie **prawdziwe statyczne
+linkowanie**: kod `hackerc`a (parser, typecheck, diagnostyki...) trafia
+skompilowany **wprost do crate'a** `playground` (patrz sekcja
+"`@wasm_export`" niżej) — zero kopiowania plików, zero duplikowania
+źródła między `hackerc/cmd/` a `playground/lib/` — dokładnie jak
+wtedy, gdy `mod` w Rust wskazuje na plik spoza własnego katalogu
+(`#[path = "..."]`), tylko bez potrzeby takiej adnotacji.
+
+Rozwiązywanie ścieżki: `hackerc/cmd/project.hcs::resolve_include_path`
+rozpoznaje prefiks `"work:"`, po czym używa dokładnie tej samej pary
+funkcji co `get <work:...>` (`find_workspace_root` +
+`work_module_file_path`) — szuka w górę drzewa katalogów, zaczynając
+od pliku z `include`, aż znajdzie `<przodek>/<członek>/lib`.
+
+### `@wasm_export` i `virus build --wasm` (nowość 0.4)
+
+Marker tekstowy (na wzór istniejącego `@hot_reload`) przed
+`fun nazwa(...) [ ... ]` na najwyższym poziomie pliku — oznacza
+funkcję do wyeksportowania z crate'a do JavaScript przez
+[`wasm-bindgen`](https://rustwasm.github.io/wasm-bindgen/):
+
+```
+@wasm_export
+fun check_source(source: Str) -> Str [
+    ...
+]
+```
+
+Skutek w wygenerowanym Ruście: `#[wasm_bindgen]` tuż przed `pub fn`
+(`codegen.hcs::gen_fun`) + `use wasm_bindgen::prelude::*;` w nagłówku
+crate'a. Jak przy `@hot_reload`, ekstrakcja dzieje się na surowym
+tekście PRZED tokenizacją (`transpiler.hcs::
+extract_wasm_export_markers`) — AST (`FunDecl`) pozostaje całkowicie
+nieświadome markera. **Ograniczenie** (to samo, co realny
+`wasm-bindgen` ma zawsze — nie dodatkowe od nas): funkcje generyczne
+nie są wspierane — kompilują się normalnie, ale bez atrybutu, z
+ostrzeżeniem jako komentarz w wygenerowanym Ruście.
+
+Gdy co najmniej jedna funkcja w projekcie jest oznaczona
+`@wasm_export`, `hackerc build`/`virus build` generuje `Cargo.toml` w
+kształcie `[lib]` (`crate-type = ["cdylib", "rlib"]`, `path =
+"src/lib.rs"`) zamiast zwykłego `[[bin]]` (`src/main.rs`) —
+automatycznie, bez żadnej flagi (patrz `project.hcs::cargo_toml_text`).
+
+`virus build --wasm` (`TargetWasm` w `virus/cmd/build.hcs`) kompiluje
+ten crate na `wasm32-unknown-unknown` (`cargo build --target
+wasm32-unknown-unknown --release`), po czym — jeśli `wasm-bindgen`
+(CLI, **osobny** program od crate'a/cargo, instalowany przez `cargo
+install wasm-bindgen-cli`) jest zainstalowany — uruchamia go, żeby
+wygenerować glue `.js`/`.d.ts` + finalny, przetworzony `..._bg.wasm`
+gotowy pod `import` w przeglądarce. Wersja CLI **musi** zgadzać się z
+wersją `wasm-bindgen` w `Cargo.toml` (`"0.2"`) — niedopasowanie kończy
+się twardym błędem CLI, to ograniczenie całego ekosystemu
+`wasm-bindgen`, nie coś specyficznego dla `virus`. Brak CLI nie jest
+błędem krytycznym: surowy `.wasm` (bez glue) i tak trafia do
+`cache/build/`, z ostrzeżeniem jak go dokończyć ręcznie.
+
+Zobacz `playground/` (`playground/lib/mod.hcs` + `playground/web/`) -
+działający przykład: `check_source` oznaczone `@wasm_export`, budowane
+z `virus build --wasm` uruchomionym w `playground/`.
+
+
+
+Do 0.3 `Virus.hk` mógł mieć sekcję `[build] -> entry => <ścieżka>`,
+nadpisującą, który plik jest punktem wejścia. Od **0.4** ta sekcja
+została **całkowicie usunięta** — plik wejściowy dowolnego budowalnego
+członka/projektu to zawsze, bez wyjątku, `cmd/main.hcs` (dokładny
+odpowiednik tego, jak Cargo samo znajduje `src/main.rs`, bez żadnego
+pola w `Cargo.toml`). Jeśli w starym `Virus.hk` sekcja `[build]` nadal
+występuje, jest po prostu ignorowana (nieznane sekcje nie są błędem).
 
 `using <wersja>` na początku pliku (albo `[package] using` w
 `Virus.hk`) deklaruje wymaganą wersję kompilatora `hackerc`.
