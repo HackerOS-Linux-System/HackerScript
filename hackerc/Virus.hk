@@ -1,13 +1,10 @@
 [package]
 -> name        => hackerc
--> version     => 0.3
--> using       => 0.3
--> description => Samo-hostowany transpilator HackerScript -> Rust (bootstrap/hackerc-self/, 11 plikow .hcs) - CLI: check/lint/build/fmt.
+-> version     => 0.4
+-> using       => 0.4
+-> description => Samo-hostowany transpilator HackerScript -> Rust (bootstrap/hackerc-self/, 12 plikow .hcs) - CLI: check/lint/build/fmt/hlib.
 
 [dependencies]
 -> std
 --> io => "*"
 --> fs => "*"
-
-[build]
--> entry => cli.hcs
