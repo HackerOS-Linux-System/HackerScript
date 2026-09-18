@@ -20,8 +20,9 @@ enum BuildTarget [
 struct BuildOptions [
     target: BuildTarget,
     !! Jesli podano `virus build <plik.hcs>` - zbuduj TYLKO ten plik
-    !! jako entry point, ignorujac [build].entry z Virus.hk (szybka
-    !! iteracja).
+    !! jako entry point, ignorujac konwencyjny cmd/main.hcs (ZMIANA
+    !! 0.4: dawniej "[build].entry z Virus.hk", usuniete - patrz
+    !! find_cmd_entry() w manifest.hcs) - szybka iteracja.
     single_file: Option<Str>
 ]
 
@@ -81,44 +82,75 @@ fun build_compile_and_copy(cache: CacheDirs, crate_dir: Str, name: Str, release:
     end ok(dest)
 ]
 
+!!! NOWOSC 0.4 - odpowiednik `build_compile_and_copy` powyzej, dla
+!!! `TargetWasm` (`virus build --wasm`). `virus`/`hackerc` sa OSOBNYMI
+!!! binarkami (`hackerc_build_crate` wola `hackerc` jako podproces -
+!!! patrz `hackerc_bridge.hcs`), wiec `virus` NIE MA bezposredniego
+!!! dostepu do `ProjectResult::needs_wasm_bindgen` (to zyje TYLKO w
+!!! procesie `hackerc`) - zamiast tego, PO tym jak `hackerc build` juz
+!!! zapisal crate na dysk, `virus` samo sprawdza wygenerowany
+!!! `Cargo.toml`: obecnosc `"crate-type"` = `hackerc` wykryl >= 1
+!!! `@wasm_export` i wygenerowal `[lib]` (patrz `cargo_toml_text()` w
+!!! project.hcs) - brak = zwykly `[[bin]]`, ktory NIE MA SENSU
+!!! kompilowac na `wasm32-unknown-unknown` (skompilowalby sie, ale bez
+!!! zadnej funkcji eksportowanej do JS - prawie na pewno pomylka
+!!! uzytkownika: brak `@wasm_export` w zrodle).
+fun build_compile_wasm_and_copy(cache: CacheDirs, crate_dir: Str, name: Str, release: Bool) -> Result<Str, Str> [
+    progress_step(2, 2, "kompilacja (cargo build --target wasm32-unknown-unknown)")
+    match read_file(path_join(crate_dir.clone(), "Cargo.toml")) [
+        Ok(toml_text) -> [
+            if not str_contains(toml_text, "crate-type") [
+                end err("`virus build --wasm` wymaga co najmniej jednej funkcji `@wasm_export` w zrodle (patrz docs/SYNTAX.md) - wygenerowany Cargo.toml nie ma sekcji [lib]/crate-type, wiec nie ma nic do wyeksportowania do JS. Dodaj '@wasm_export' przed 'fun <nazwa>(...) [ ... ]', ktora ma byc wolana z przegladarki.")
+            ]
+        ]
+        Err(e) -> [
+            end err("nie mozna odczytac wygenerowanego " + path_join(crate_dir.clone(), "Cargo.toml") + ": " + e)
+        ]
+    ]
+
+    let wasm_glue_dir = path_join(cache.build.clone(), name.clone() + "-wasm")
+    let outcome = hackerc_compile_crate_wasm(crate_dir, name.clone(), release, wasm_glue_dir.clone())?
+
+    let raw_dest = path_join(cache.build.clone(), path_basename(outcome.raw_wasm_path.clone()))
+    match copy_file(outcome.raw_wasm_path.clone(), raw_dest.clone()) [
+        Ok(_v) -> [
+        ]
+        Err(e) -> [
+            end err("nie mozna skopiowac surowego .wasm: " + e)
+        ]
+    ]
+
+    if outcome.bindgen_ran [
+        progress_success("zbudowano " + wasm_glue_dir.clone() + " (glue JS + .wasm gotowe pod przegladarke)")
+        end ok(wasm_glue_dir)
+    ]
+    progress_success("zbudowano " + raw_dest.clone() + " (surowy .wasm - zainstaluj 'wasm-bindgen-cli' i uruchom ponownie po glue JS)")
+    end ok(raw_dest)
+]
+
 !!! Sciezka do pliku wejsciowego DANEGO CZLONKA workspace, TYLKO jesli
 !!! jest naprawde budowalny jako osobna binarka - `none()` gdy: brak
-!!! wlasnego `Virus.hk`, manifest sie nie parsuje, `[build].entry` nie
-!!! istnieje na dysku, ALBO plik entry nie zawiera `fun main(` (czyli
-!!! to biblioteka do importowania przez `get<...>`/`include<...>`, jak
-!!! `libs/core`/`libs/std` - NIE osobno budowalny projekt). Parytet z
-!!! tym, jak `cargo build` w workspace kompiluje biblioteki (.rlib) bez
-!!! [[bin]], ale nie probuje ich "uruchamiac" jako binarki - u nas
-!!! `--library` (patrz `TargetLibrary`) nie jest jeszcze
-!!! zaimplementowane, wiec takich czlonkow NIE DA SIE dzis w ogole
-!!! skompilowac - sa wiec pomijane, nie budowane wcale.
+!!! wlasnego `Virus.hk`, ALBO `cmd/main.hcs` nie istnieje na dysku
+!!! (czyli to biblioteka do importowania przez `get<work:...>` /
+!!! `get<core:...>` / `get<std:...>`, jak `libs/core`/`libs/std` - NIE
+!!! osobno budowalny projekt). Parytet z tym, jak `cargo build` w
+!!! workspace kompiluje biblioteki (.rlib) bez [[bin]], ale nie probuje
+!!! ich "uruchamiac" jako binarki - u nas `--library` (patrz
+!!! `TargetLibrary`) nie jest jeszcze zaimplementowane, wiec takich
+!!! czlonkow NIE DA SIE dzis w ogole skompilowac - sa wiec pomijane,
+!!! nie budowane wcale.
+!!! ZMIANA 0.4 - dawniej ta funkcja parsowala `Virus.hk` czlonka po to
+!!! tylko, zeby odczytac `[build].entry` (usuniete, patrz
+!!! manifest.hcs) i sprawdzic, czy plik pod tamta sciezka zawiera `fun
+!!! main(` - teraz konwencja jest sztywna (zawsze `cmd/main.hcs`), wiec
+!!! wystarczy `find_cmd_entry()`; nie trzeba juz nawet parsowac calego
+!!! manifestu tutaj (parsuje go pozniej, w calosci, `cmd_build_run`).
 fun workspace_member_buildable_entry(member_root: Str) -> Option<Str> [
     let manifest_path = path_join(member_root.clone(), "Virus.hk")
     if not path_exists(manifest_path.clone()) [
         end none()
     ]
-    match parse_manifest_file(manifest_path) [
-        Ok(m) -> [
-            let entry = path_join(member_root, m.build.entry)
-            if not path_exists(entry.clone()) [
-                end none()
-            ]
-            match read_file(entry.clone()) [
-                Ok(src) -> [
-                    if str_contains(src, "fun main(") [
-                        end some(entry)
-                    ]
-                    end none()
-                ]
-                Err(_e) -> [
-                    end none()
-                ]
-            ]
-        ]
-        Err(_e) -> [
-            end none()
-        ]
-    ]
+    end find_cmd_entry(member_root)
 ]
 
 !!! `virus build` na korzeniu workspace (`[workspace] -> members`
@@ -126,7 +158,7 @@ fun workspace_member_buildable_entry(member_root: Str) -> Option<Str> [
 !!! uruchamialny `fun main()` (patrz `workspace_member_buildable_entry`),
 !!! wywolujac dla kazdego z nich TEN SAM `cmd_build_run` z JEGO
 !!! WLASNYM katalogiem (wlasny Virus.hk -> wlasna wersja `using`,
-!!! wlasny `[build].entry`) - dokladnie tak, jak `cargo build` w
+!!! zawsze wlasny `cmd/main.hcs`) - dokladnie tak, jak `cargo build` w
 !!! workspace kompiluje kazdego czlonka wg jego wlasnego Cargo.toml.
 !!! Czlonkowie BEZ budowalnego entry (biblioteki, np. `libs/core`/
 !!! `libs/std`) sa pomijani z komunikatem informacyjnym, nie bledem -
@@ -570,17 +602,27 @@ fun cmd_build_run(project_root: Str, opts: BuildOptions) -> Result<Str, Str> [
 
     let hackerc_bin = hackerc_ensure(cache.clone(), version)?
 
+    !! ZMIANA 0.4 - `manifest.build.entry` usuniete (patrz manifest.hcs);
+    !! bez `--single-file` szukamy teraz zawsze `cmd/main.hcs` przez
+    !! `find_cmd_entry()`.
     let entry = ""
     match opts.single_file.clone() [
         Some(f) -> [
             entry = path_join(project_root.clone(), f)
         ]
         None -> [
-            entry = path_join(project_root.clone(), manifest.build.entry.clone())
+            match find_cmd_entry(project_root.clone()) [
+                Some(e) -> [
+                    entry = e
+                ]
+                None -> [
+                    end err("nie znaleziono pliku wejsciowego - brak " + path_join(manifest_source_dir(project_root.clone()), "main.hcs") + " (kazdy budowalny projekt/czlonek musi miec cmd/main.hcs z fun main())")
+                ]
+            ]
         ]
     ]
     if not path_exists(entry.clone()) [
-        end err("nie znaleziono pliku wejsciowego " + entry + " ([build].entry w Virus.hk)")
+        end err("nie znaleziono pliku wejsciowego " + entry)
     ]
 
     build_warn_missing_dependencies(cache.clone(), manifest.clone())
@@ -605,7 +647,7 @@ fun cmd_build_run(project_root: Str, opts: BuildOptions) -> Result<Str, Str> [
             end err("`virus build --library` (.so/.rlib/.a) wymaga zmiany [[bin]] na [lib] w wygenerowanym Cargo.toml - nie zaimplementowane, patrz docs/ROADMAP.md")
         ]
         TargetWasm -> [
-            end err("`virus build --wasm` wymaga targetu wasm32-unknown-unknown i wasm-bindgen - nie zaimplementowane, patrz docs/ROADMAP.md")
+            end build_compile_wasm_and_copy(cache, crate_dir, manifest.package.name, true)
         ]
         TargetJar -> [
             end err("`virus build --jar` nie jest jeszcze zaimplementowane, patrz docs/ROADMAP.md")
