@@ -118,7 +118,11 @@ fun flat_include_module_name(path: Str) -> Str [
     let n = p.len()
     while i < n [
         let c = p.char_at(i)
-        if c == "-" or c == "/" [
+        !! ZMIANA 0.4: ":" dopisane do zamienianych znakow - potrzebne
+        !! dla nowego "work:czlonek::plik" (patrz resolve_include_path/
+        !! parse_include), ktore inaczej wygenerowaloby nazwe modulu
+        !! zawierajaca dwukropki - NIEPOPRAWNA jako identyfikator Rust.
+        if c == "-" or c == "/" or c == ":" [
             out = out + "_"
         ] else [
             out = out + c
@@ -1596,7 +1600,18 @@ struct CodeGen [
     !! jest wpisywane do `self.sigs.functions` (patrz "Ograniczenia" w
     !! docs/ROADMAP.md), wiec zwykla sciezka w `gen_call()` by tego nie
     !! zlapala - potrzebny osobny check (patrz `gen_call()`).
-    extern_fn_names: Dict<Str, Bool>
+    extern_fn_names: Dict<Str, Bool>,
+    !! NOWOSC 0.4 - jak `hot_reload_input_names`/`needs_hot_reload`, ale
+    !! dla `@wasm_export` (patrz `extract_wasm_export_markers()` w
+    !! transpiler.hcs i `gen_fun()` nizej) - `wasm_export_names`
+    !! wypelnione RAZ, na starcie (parytet z `hot_reload_input_names`),
+    !! `needs_wasm_bindgen` ustawiane w `gen_fun()` przy PIERWSZYM
+    !! trafieniu, zeby `project.hcs::build_project` wiedzialo, czy
+    !! dopisac `use wasm_bindgen::prelude::*;` na poczatku crate'a i
+    !! `wasm-bindgen = "0.2"` do Cargo.toml (patrz
+    !! `cargo_toml_text()`/`insert_mod_declarations()` w project.hcs).
+    wasm_export_names: Dict<Str, Bool>,
+    needs_wasm_bindgen: Bool
 ]
 
 impl CodeGen [
@@ -1819,7 +1834,7 @@ impl CodeGen [
             !!! ktora sama jest uogolnieniem `_gen_return_expr`'owej
             !!! poprawki (dla `return`) na KAZDA pozycje wymagajaca
             !!! wlasnosci (argument/`let`). Bug znaleziony przy uzyciu
-            !!! skompilowanego stage1 do zbudowania cli.hcs w tej sesji.
+            !!! skompilowanego stage1 do zbudowania main.hcs w tej sesji.
             end "(" + rendered + ").map(|b| *b)"
         ]
         let t = self.infer_type(a)
@@ -3603,6 +3618,30 @@ impl CodeGen [
         let gen_head = self.generic_head(type_params)
         self.env_vars = dict()
 
+        !! NOWOSC 0.4 - `@wasm_export` (patrz
+        !! `extract_wasm_export_markers()` w transpiler.hcs) - parytet z
+        !! blokiem `is_marked_hot` powyzej, ale BEZ przechwytywania
+        !! calego cialka funkcji (`#[wasm_bindgen]` to zwykly atrybut
+        !! Rusta nad normalnie wygenerowana `pub fn`, nie osobna sciezka
+        !! kodegenu jak `gen_hot_reload_fun`). Jedyny twardy warunek:
+        !! `wasm-bindgen` nie wspiera funkcji generycznych - w tym
+        !! (rzadkim) przypadku funkcja i tak kompiluje sie normalnie,
+        !! tylko bez atrybutu (ostrzezenie jako komentarz w
+        !! wygenerowanym Ruscie, ten sam styl co `is_marked_hot`
+        !! powyzej dla niewspieranej sygnatury).
+        let is_wasm_export = false
+        match self.wasm_export_names.fetch(name.clone()) [
+            Some(_v) -> [
+                is_wasm_export = true
+            ]
+            None -> [
+            ]
+        ]
+        if is_wasm_export and type_params.len() > 0 [
+            self.emit("// @wasm_export \"" + name + "\" zignorowane: wasm-bindgen nie wspiera funkcji generycznych - kompiluje sie normalnie, bez #[wasm_bindgen]")
+            is_wasm_export = false
+        ]
+
         let i = 0
         let n = params.len()
         while i < n [
@@ -3632,6 +3671,10 @@ impl CodeGen [
         ]
 
         self.current_ret_type = ret_type
+        if is_wasm_export [
+            self.emit("#[wasm_bindgen]")
+            self.needs_wasm_bindgen = true
+        ]
         self.emit("pub fn " + name + gen_head + "(" + params_str + ")" + ret + " {")
         self.indent = self.indent + 1
         let str_param_names: List<Str> = []
@@ -3769,7 +3812,14 @@ impl CodeGen [
     ]
 
     fun gen_get_import(self, source: Str, name: Str, version: Option<Str>, details: List<Str>) [
-        if source == "std" or source == "core" or source == "selfhost" or source == "virus" or source == "vira" [
+        !!! `work` DODANE w 0.4 (patrz `find_workspace_root`/
+        !!! `work_module_file_path` w project.hcs) - `get <work:...>`
+        !!! zachowuje sie TU identycznie jak `std`/`core`/`vira`: modul
+        !!! zostal juz gdzies indziej sparsowany i wlaczony do tego
+        !!! samego crate'a (patrz Discovery.resolve), wiec tu trzeba
+        !!! juz tylko wyemitowac `use crate::<flat_module_name>::*;`
+        !!! (albo `::{a, b};` dla `get <work:x> import <a::b>`).
+        if source == "std" or source == "core" or source == "selfhost" or source == "virus" or source == "vira" or source == "work" [
             let module = flat_module_name(source, name.clone(), version)
             if details.len() > 0 [
                 self.emit("use crate::" + module + "::{" + self.join_binds(details) + "};")
@@ -4105,10 +4155,10 @@ impl CodeGen [
 !!! konstruktora bylo by niezgodnoscia typow (`&Signatures` vs
 !!! `Signatures`) - **bug znaleziony i naprawiony w TEJ sesji**, ten sam
 !!! rodzaj co `extra_variant_names.clone()` w typecheck.hcs (krok 5/N).
-fun new_codegen(sigs: Signatures, boxed_fields: Dict<Str, Str>, mut_params: Dict<Str, Bool>, method_mut_params: Dict<Str, Bool>, variant_arity: Dict<Str, Int>, no_default_structs: Dict<Str, Bool>, direct_blocks: Dict<Str, Str>, native_blocks: Dict<Str, Str>, native_engines: Dict<Str, Str>, sandbox_blocks: Dict<Str, Str>, hot_reload_names: Dict<Str, Bool>) -> CodeGen [
+fun new_codegen(sigs: Signatures, boxed_fields: Dict<Str, Str>, mut_params: Dict<Str, Bool>, method_mut_params: Dict<Str, Bool>, variant_arity: Dict<Str, Int>, no_default_structs: Dict<Str, Bool>, direct_blocks: Dict<Str, Str>, native_blocks: Dict<Str, Str>, native_engines: Dict<Str, Str>, sandbox_blocks: Dict<Str, Str>, hot_reload_names: Dict<Str, Bool>, wasm_export_names: Dict<Str, Bool>) -> CodeGen [
     let env_vars: Dict<Str, Option<TypeRef>> = dict()
     let empty_hr_bodies: Dict<Str, Str> = dict()
-    end CodeGen(sigs.clone(), env_vars, variant_arity, boxed_fields, method_mut_params, mut_params, [], none(), [], 0, no_default_structs, false, direct_blocks, false, native_blocks, native_engines, false, sandbox_blocks, hot_reload_names, false, empty_hr_bodies, [], false, dict(), none(), none(), false, dict(), [], dict())
+    end CodeGen(sigs.clone(), env_vars, variant_arity, boxed_fields, method_mut_params, mut_params, [], none(), [], 0, no_default_structs, false, direct_blocks, false, native_blocks, native_engines, false, sandbox_blocks, hot_reload_names, false, empty_hr_bodies, [], false, dict(), none(), none(), false, dict(), [], dict(), wasm_export_names, false)
 ]
 
 !!! Punkt wejscia - parytet z `CodeGen.gen_program()`. Liczy WSZYSTKIE
@@ -4141,7 +4191,8 @@ fun gen_program(prog: Program) -> List<Str> [
     let empty_native_engines: Dict<Str, Str> = dict()
     let empty_sandbox_blocks: Dict<Str, Str> = dict()
     let empty_hot_reload_names: Dict<Str, Bool> = dict()
-    let gen = new_codegen(sigs, info.boxed_fields, mparams, mmparams, varity, ndstructs, empty_direct_blocks, empty_native_blocks, empty_native_engines, empty_sandbox_blocks, empty_hot_reload_names)
+    let empty_wasm_export_names: Dict<Str, Bool> = dict()
+    let gen = new_codegen(sigs, info.boxed_fields, mparams, mmparams, varity, ndstructs, empty_direct_blocks, empty_native_blocks, empty_native_engines, empty_sandbox_blocks, empty_hot_reload_names, empty_wasm_export_names)
 
     let i = 0
     let n = prog.body.len()
