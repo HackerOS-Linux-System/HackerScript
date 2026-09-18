@@ -1,4 +1,4 @@
-using <0.3>
+using <0.4>
 
 !! ---- get<extern:...> use<...> + region: prawdziwa libm --------
 
@@ -46,7 +46,7 @@ fun demo_native_cpp() [
 ]
 
 fun main() [
-    log("HackerScript FFI 0.3 - demo")
+    log("HackerScript FFI 0.4 - demo")
     demo_extern_region()
     demo_native_cpp()
 ]
