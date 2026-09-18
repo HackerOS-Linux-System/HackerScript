@@ -15,8 +15,19 @@ include <typeinfer>
 !!! `virus/cmd/bytes_repo.hcs`/`virus/cmd/bit_repo.hcs`), a podpiecie
 !!! do linkera `virus build` (patrz `build_wire_extern_dependencies`
 !!! w `virus/cmd/build.hcs`).
+!!! ZMIANA 0.4 (2): dodano "work" - `get <work:member[::plik]>`,
+!!! ogolny import DOWOLNEGO czlonka workspace z wlasnym lib/mod.hcs
+!!! (patrz `find_workspace_root` w project.hcs i docs/SYNTAX.md) -
+!!! zachowuje sie w typecheck jak "vira"/"core"/"std" (prawdziwy modul
+!!! .hcs, nie sama deklaracja linkowania jak "extern"/"c"/"cpp").
+!!! Przy okazji dopisano tez "hlib" - PRZEOCZENIE sprzed 0.4: `get
+!!! <hlib:...>` byl juz w pelni obslugiwany przez `gen_get_import`/
+!!! `Discovery.resolve` (project.hcs/codegen.hcs), ale brakowalo go
+!!! tutaj, wiec poprawny kod `get <hlib:nazwa>` dostawal falszywy
+!!! blad E0003 (ten sam typ pomylki, ktory ZMIANA 0.3 wyzej naprawila
+!!! juz raz dla "npm"/"jsr").
 fun is_known_get_source(s: Str) -> Bool [
-    end s == "pypi" or s == "crates" or s == "std" or s == "core" or s == "selfhost" or s == "virus" or s == "vira" or s == "npm" or s == "jsr" or s == "extern" or s == "c" or s == "cpp" or s == "bytes" or s == "bit"
+    end s == "pypi" or s == "crates" or s == "std" or s == "core" or s == "selfhost" or s == "virus" or s == "vira" or s == "npm" or s == "jsr" or s == "extern" or s == "c" or s == "cpp" or s == "bytes" or s == "bit" or s == "hlib" or s == "work"
 ]
 
 fun is_builtin_func(name: Str) -> Bool [
@@ -390,10 +401,14 @@ struct Checker [
 ]
 
 impl Checker [
-    !!! E0003 - parytet z `_check_get`.
+    !!! E0003 - parytet z `_check_get`. ZMIANA 0.4 - komunikat
+    !!! zaktualizowany, zeby wymienial WSZYSTKIE zrodla faktycznie
+    !!! rozpoznawane przez `is_known_get_source` (byl juz niepelny od
+    !!! chwili dodania "bytes"/"bit"/"hlib" w 0.4 - brakowalo ich tutaj,
+    !!! mimo ze funkcja juz je akceptowala; teraz + "work").
     fun check_get(self, source: Str, name: Str) [
         if not is_known_get_source(source) [
-            self.diags.push(Diagnostic("error", "E0003", "nieznane zrodlo '" + source + "' w 'get <" + source + ":" + name + ">' (dozwolone: c, core, cpp, crates, extern, jsr, npm, pypi, selfhost, std, vira, virus)", 0, 0, 1, ""))
+            self.diags.push(Diagnostic("error", "E0003", "nieznane zrodlo '" + source + "' w 'get <" + source + ":" + name + ">' (dozwolone: bit, bytes, c, core, cpp, crates, extern, hlib, jsr, npm, pypi, selfhost, std, vira, virus, work)", 0, 0, 1, ""))
         ]
     ]
 
