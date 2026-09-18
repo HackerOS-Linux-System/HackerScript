@@ -29,7 +29,14 @@ struct TranspileResult [
     extern_link_specs: List<Str>,
     !! DODANE - patrz `CodeGen::native_cpp_sources`/`native_cpp_order`.
     native_cpp_sources: Dict<Str, Str>,
-    native_cpp_order: List<Str>
+    native_cpp_order: List<Str>,
+    !! NOWOSC 0.4 - patrz `CodeGen::needs_wasm_bindgen`/
+    !! `extract_wasm_export_markers()` - analog `needs_pyo3` (naglowek
+    !! `use wasm_bindgen::prelude::*;`), ale dla `@wasm_export`;
+    !! `project.hcs::build_project` czyta to, zeby dopisac `wasm-bindgen
+    !! = "0.2"` do Cargo.toml i `[lib] crate-type = ["cdylib", "rlib"]`
+    !! zamiast `[[bin]]` (patrz `cargo_toml_text()`).
+    needs_wasm_bindgen: Bool
 ]
 
 !!! ZMIANA 0.3 - skanuje najwyzszy poziom `prog` w poszukiwaniu
@@ -812,6 +819,72 @@ fun extract_hot_reload_markers(source: Str) -> HotReloadExtraction [
     end HotReloadExtraction(out, names)
 ]
 
+struct WasmExportExtraction [
+    stripped_source: Str,
+    names: List<Str>
+]
+
+!!! NOWOSC 0.4 - `@wasm_export` przed `fun nazwa(...) [ ... ]` na
+!!! najwyzszym poziomie - CELOWY, DOKLADNY klon
+!!! `extract_hot_reload_markers` powyzej (ten sam `text_marker_scan`,
+!!! tylko inny `marker`/inny typ wyniku): tak jak `@hot_reload`, dziala
+!!! na surowym tekscie PRZED tokenizacja - usuwa `@wasm_export` ze
+!!! zrodla i zapamietuje nazwe funkcji, ktora po nim nastepuje.
+!!! `codegen.hcs::gen_fun` dostaje ta liste jako `Dict<Str,Bool>`
+!!! (parytet z `hot_reload_names`) i, dla kazdej funkcji na tej
+!!! liscie, dokleja `#[wasm_bindgen]` PRZED wygenerowanym `pub fn` -
+!!! patrz `codegen.hcs::gen_fun`/`CodeGen.needs_wasm_bindgen`. W
+!!! odroznieniu od `@hot_reload`, `@wasm_export` NIE ma ogranicznia co
+!!! do parametrow/typu zwracanego (v1 wspiera funkcje o sygnaturach,
+!!! ktore `wasm-bindgen` umie odwzorowac 1:1 - `Str`/`Int`/`Float`/
+!!! `Bool`/`Void` - to samo ograniczenie co realny `wasm-bindgen` ma
+!!! zawsze, nie dodatkowe od nas; zlozone typy (`struct`/`enum`/
+!!! `List`/`Dict`) NIE sa dzis odwzorowywane - kompiluja sie normalnie
+!!! (jak przy `@hot_reload` v1), ale `wasm-bindgen` odrzuci je na
+!!! etapie `cargo build --target wasm32-unknown-unknown`, nie
+!!! wczesniej - patrz `docs/ROADMAP.md`).
+fun extract_wasm_export_markers(source: Str) -> WasmExportExtraction [
+    let names: List<Str> = []
+    let out = ""
+    let i = 0
+    let n = source.len()
+    let marker = "@wasm_export"
+    let mlen = marker.len()
+    while i < n [
+        let found_at = text_marker_scan(source, i, marker)
+        if found_at == -1 [
+            out = out + source.slice(i, n)
+            i = n
+        ] else [
+            out = out + source.slice(i, found_at)
+            let after = found_at + mlen
+            let fk = after
+            while fk < n and (source.char_at(fk) == " " or source.char_at(fk) == "\t" or source.char_at(fk) == "\n" or source.char_at(fk) == "\r") [
+                fk = fk + 1
+            ]
+            if fk + 3 <= n and source.slice(fk, fk + 3) == "fun" and (fk + 3 >= n or not is_direct_ident_char(source.char_at(fk + 3))) [
+                let nk = fk + 3
+                while nk < n and (source.char_at(nk) == " " or source.char_at(nk) == "\t") [
+                    nk = nk + 1
+                ]
+                let name_start = nk
+                while nk < n and is_direct_ident_char(source.char_at(nk)) [
+                    nk = nk + 1
+                ]
+                if nk > name_start [
+                    names.push(source.slice(name_start, nk))
+                ] else [
+                    log("[transpiler.hcs] @wasm_export: nie znaleziono nazwy funkcji po 'fun'")
+                ]
+            ] else [
+                log("[transpiler.hcs] @wasm_export: oczekiwano 'fun <nazwa>(...)' zaraz po markerze")
+            ]
+            i = after
+        ]
+    ]
+    end WasmExportExtraction(out, names)
+]
+
 struct SandboxExtraction [
     stripped_source: Str,
     blocks: List<Str>
@@ -1030,7 +1103,7 @@ fun hot_reload_runtime_block(names: List<Str>, default_source_path: Str) -> List
     end out
 ]
 
-fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native_blocks: List<Str>, native_engines: List<Str>, sandbox_blocks: List<Str>, hot_reload_names: List<Str>, default_source_path: Str, extra: ExtraSignatures) -> TranspileResult [
+fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native_blocks: List<Str>, native_engines: List<Str>, sandbox_blocks: List<Str>, hot_reload_names: List<Str>, wasm_export_names: List<Str>, default_source_path: Str, extra: ExtraSignatures) -> TranspileResult [
     let local_sigs = collect_signatures(prog.clone())
     let sigs = merge_signatures_with_extra(local_sigs, extra)
     let local_mut = compute_mut_params(prog.clone())
@@ -1044,7 +1117,8 @@ fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native
     let native_engine_dict = direct_blocks_to_dict(native_engines)
     let sandbox_dict = direct_blocks_to_dict(sandbox_blocks)
     let hot_reload_dict = names_to_bool_dict(hot_reload_names)
-    let gen = new_codegen(sigs, info.boxed_fields, mut_params, method_mut_params, varity, ndstructs, direct_dict, native_dict, native_engine_dict, sandbox_dict, hot_reload_dict)
+    let wasm_export_dict = names_to_bool_dict(wasm_export_names)
+    let gen = new_codegen(sigs, info.boxed_fields, mut_params, method_mut_params, varity, ndstructs, direct_dict, native_dict, native_engine_dict, sandbox_dict, hot_reload_dict, wasm_export_dict)
 
     let i = 0
     let n = prog.body.len()
@@ -1056,6 +1130,9 @@ fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native
     let header: List<Str> = ["// Plik wygenerowany automatycznie przez hackerc (HackerScript -> Rust).", "// NIE EDYTUJ RECZNIE - edytuj zrodlo .hcs i uruchom 'virus build' ponownie.", "#![allow(non_snake_case, unused_mut, dead_code)]"]
     if gen.needs_pyo3 [
         header.push("use pyo3::prelude::*;")
+    ]
+    if gen.needs_wasm_bindgen [
+        header.push("use wasm_bindgen::prelude::*;")
     ]
     header.push("")
 
@@ -1095,7 +1172,7 @@ fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native
     ]
     rust_code = rust_code + "\n"
 
-    end TranspileResult(rust_code, gen.needs_pyo3, gen.needs_native_js, gen.needs_sandbox, gen.needs_hot_reload, gen.hot_reload_bodies, gen.hot_reload_order, gen.needs_native_cpp, collect_extern_link_specs(prog), gen.native_cpp_sources, gen.native_cpp_order)
+    end TranspileResult(rust_code, gen.needs_pyo3, gen.needs_native_js, gen.needs_sandbox, gen.needs_hot_reload, gen.hot_reload_bodies, gen.hot_reload_order, gen.needs_native_cpp, collect_extern_link_specs(prog), gen.native_cpp_sources, gen.native_cpp_order, gen.needs_wasm_bindgen)
 ]
 
 !!! Transpiluje zrodlo `.hcs` -> `TranspileResult` (kod Rust + info czy
@@ -1128,8 +1205,9 @@ fun transpile_source_full(source: Str, filename: Str, module_name: Str, extra: E
     let native_extraction = extract_native_blocks(extraction.stripped_source, native_dirname(filename))
     let sandbox_extraction = extract_sandbox_blocks(native_extraction.stripped_source)
     let hot_extraction = extract_hot_reload_markers(sandbox_extraction.stripped_source)
-    let prog = parse(hot_extraction.stripped_source)
-    end transpile_program_with_extra(prog, extraction.blocks, native_extraction.blocks, native_extraction.engines, sandbox_extraction.blocks, hot_extraction.names, filename, extra)
+    let wasm_extraction = extract_wasm_export_markers(hot_extraction.stripped_source)
+    let prog = parse(wasm_extraction.stripped_source)
+    end transpile_program_with_extra(prog, extraction.blocks, native_extraction.blocks, native_extraction.engines, sandbox_extraction.blocks, hot_extraction.names, wasm_extraction.names, filename, extra)
 ]
 
 !!! Skrot: zwraca tylko kod Rust (bez `needs_pyo3`) - parytet z
