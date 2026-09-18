@@ -9,7 +9,7 @@ include <hlib>
 get <std:io> import <file_readable>
 get <std:term> import <c_bold_green::c_bold_red::c_bold_cyan::c_red::c_gray::print_progress_line>
 
-const VERSION: Str = "0.3"
+const VERSION: Str = "0.4"
 
 !!! DODANE w tej rundzie (patrz docs/ROADMAP.md) - `hackerc` byl do tej
 !!! pory calkowicie monochromatyczny (`log("hackerc: ...", ...)`).
