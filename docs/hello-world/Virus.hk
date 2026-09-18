@@ -1,12 +1,9 @@
 [package]
 name = "hello-world"
 version = "0.0"
-using = "0.3"
+using = "0.4"
 authors = ["HackerOS Team <hackeros068@gmail.com>"]
 description = "Przykladowy projekt HackerScript pokazujacy podstawowa skladnie."
 
 [dependencies]
 # "pypi:rich" = "*"
-
-[build]
-entry = "cmd/main.hcs"
