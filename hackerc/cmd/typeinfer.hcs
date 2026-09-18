@@ -227,7 +227,7 @@ fun types_equal(a: Option<TypeRef>, b: Option<TypeRef>) -> Bool [
                     !!! mimo ze `types_equal` na SAMYM `Any` (gdyby
                     !!! porownywane bezposrednio) zwrocilby `true`. Bug
                     !!! znaleziony przy uzyciu skompilowanego stage1
-                    !!! (samo-hostowanego hackerc) do zbudowania cli.hcs -
+                    !!! (samo-hostowanego hackerc) do zbudowania main.hcs -
                     !!! Pythonowy `typecheck.py`/`typeinfer.py` NIE MIAL tego
                     !!! bledu (tam `_types_equal` jest juz rekurencyjne,
                     !!! patrz `typeinfer.py::_types_equal`) - `typeinfer.hcs`
@@ -371,7 +371,7 @@ fun infer_ident_call_type(name: Str, env: TypeEnv) -> Option<TypeRef> [
 !!! `elif isinstance(callee, A.Attr): ... env.sigs.methods.get((target_t.name,
 !!! callee.name))` w typeinfer.py. BRAK tego fallbacku byl bugiem
 !!! znalezionym przy uzyciu skompilowanego stage1 (samo-hostowanego
-!!! hackerc) do zbudowania cli.hcs w tej sesji - `formatter.hcs::fmt_expr`
+!!! hackerc) do zbudowania main.hcs w tej sesji - `formatter.hcs::fmt_expr`
 !!! wola `self.fmt_expr(...)` (metode uzytkownika), a bez tego fallbacku
 !!! `infer_expr_type` zwracal `None` dla takiego wywolania, co psulo
 !!! wykrywanie konkatenacji Str (`expr_is_strish`) w `op + self.fmt_expr(
