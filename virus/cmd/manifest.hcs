@@ -1,6 +1,6 @@
 get <std:hk> import <hk_parse::hk_resolve_interpolations::hk_format_number>
 get <std:path> import <path_join>
-get <std:string> import <str_ends_with>
+get <std:string> import <str_ends_with::str_contains>
 get <std:json> import <JsonValue::JsonEntry>
 
 !!! Jedna zaleznosc z `[dependencies]`/`[dev-dependencies]` -
@@ -29,10 +29,20 @@ struct WorkspaceSection [
     members: List<Str>
 ]
 
-!!! `[build]`.
-struct BuildSection [
-    entry: Str
-]
+!!! ZMIANA 0.4 - sekcja `[build]` (byla tu: `struct BuildSection [ entry:
+!!! Str ]` + `default_build_section()` + pole `build: BuildSection` w
+!!! `Manifest` nizej) ZOSTALA CALKOWICIE USUNIETA z formatu `.hk`.
+!!! Powod: byla to JEDYNA sekcja w calym Virus.hk pozwalajaca
+!!! nadpisac konwencje "plik startowy = cmd/main.hcs", a w praktyce (2
+!!! na 6 rzeczywistych manifestow w tym repo, `hackerc/Virus.hk` i
+!!! posrednio korzen) byla uzywana zeby wskazac plik o INNEJ nazwie
+!!! (`cli.hcs`) w INNYM katalogu (bez `cmd/` wcale) - co samo w sobie
+!!! bylo bledem (`entry => cli.hcs` nigdy nie wskazywalo na istniejacy
+!!! plik). Zamiast to naprawiac polem, ktore i tak nikt nie powinien
+!!! zmieniac, usuwamy je: entry point jest teraz ZAWSZE, bez wyjatku,
+!!! `cmd/main.hcs` (dokladny analog `src/main.rs` w Cargo) - patrz
+!!! `find_cmd_entry()` nizej, ktora zastepuje kazde dawne odczytanie
+!!! `manifest.build.entry`.
 
 !!! Caly `Virus.hk` (albo dowolny plik `.hk` o tym samym ksztalcie)
 !!! sparsowany do wygodnej, typowanej struktury.
@@ -40,14 +50,7 @@ struct Manifest [
     package: PackageSection,
     dependencies: List<Dependency>,
     dev_dependencies: List<Dependency>,
-    workspace: WorkspaceSection,
-    build: BuildSection
-]
-
-!!! Domyslny `[build] -> entry` gdy sekcja/klucz nie wystepuje w pliku -
-!!! parytet z `impl Default for BuildSection` (Rust).
-fun default_build_section() -> BuildSection [
-    end BuildSection("cmd/main.hcs")
+    workspace: WorkspaceSection
 ]
 
 !!! Szuka `key` w liscie par `entries` (JsonObject rozpakowany) - `none()`
@@ -182,7 +185,7 @@ fun manifest_require_map(entries: List<JsonEntry>, key: Str, err_msg: Str) -> Re
 
 !!! Jak `manifest_require_map`, ale BEZ bledu - brakujaca/zla sekcja
 !!! daje po prostu pusta liste (dla sekcji OPCJONALNYCH: dependencies/
-!!! dev-dependencies/workspace/build).
+!!! dev-dependencies/workspace - `build` usunieta w 0.4).
 fun manifest_optional_map(entries: List<JsonEntry>, key: Str) -> List<JsonEntry> [
     match manifest_find_entry(entries, key) [
         Some(v) -> [
@@ -294,17 +297,13 @@ fun parse_manifest_str(source: Str, origin: Str) -> Result<Manifest, Str> [
     let dev_dependencies = manifest_collect_dependencies(manifest_optional_map(root_entries.clone(), "dev-dependencies"))
     let workspace = WorkspaceSection(manifest_get_str_array(manifest_optional_map(root_entries.clone(), "workspace"), "members"))
 
-    let build_entries = manifest_optional_map(root_entries.clone(), "build")
-    let build = default_build_section()
-    match manifest_get_str(build_entries, "entry") [
-        Some(v) -> [
-            build = BuildSection(v)
-        ]
-        None -> [
-        ]
-    ]
+    !!! ZMIANA 0.4 - sekcja [build] nie jest juz odczytywana wcale (patrz
+    !!! komentarz przy usunietej `BuildSection` wyzej) - nawet jesli
+    !!! nadal wystepuje w jakims starym pliku `.hk`, po prostu jest
+    !!! ignorowana (parser .hk nie traktuje nieznanych sekcji jako
+    !!! bledu - parytet z `#[serde(deny_unknown_fields)]` OFF).
 
-    end ok(Manifest(package, dependencies, dev_dependencies, workspace, build))
+    end ok(Manifest(package, dependencies, dev_dependencies, workspace))
 ]
 
 !!! Wczytuje i parsuje `Virus.hk` (albo dowolny plik `.hk` o tym samym
@@ -353,4 +352,22 @@ fun manifest_walk_hcs_files(dir: Str) -> List<Str> [
         ]
     ]
     end out
+]
+
+!!! NOWOSC 0.4 - zastepuje usuniete `[build] -> entry`. Plik wejsciowy
+!!! (binarny, uruchamialny) czlonka/projektu w `project_root` to
+!!! ZAWSZE, bez wyjatku i bez zadnej konfiguracji, `cmd/main.hcs` -
+!!! dokladny analog tego, jak `cargo` samo znajduje `src/main.rs` bez
+!!! zadnego pola w `Cargo.toml`. `none()`, gdy ten plik nie istnieje -
+!!! wtedy `project_root` jest BIBLIOTEKA (jak `libs/core`/`libs/std` -
+!!! maja `lib/mod.hcs`, nie `cmd/main.hcs`) albo w ogole nie jest
+!!! budowalnym czlonkiem - `workspace_member_buildable_entry` w
+!!! virus/cmd/build.hcs po prostu pomija taki czlonek przy `virus
+!!! build` na calym workspace, tak jak wczesniej.
+fun find_cmd_entry(project_root: Str) -> Option<Str> [
+    let entry = path_join(manifest_source_dir(project_root), "main.hcs")
+    if path_exists(entry.clone()) [
+        end some(entry)
+    ]
+    end none()
 ]
