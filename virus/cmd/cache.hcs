@@ -1,3 +1,4 @@
+include <manifest>
 get <std:path> import <path_join::path_dirname>
 get <std:fs> import <create_dir_ok::remove_dir_all_ok>
 
@@ -53,10 +54,14 @@ fun cache_hackerc_binary(cache: CacheDirs, version: Str) -> Str [
     end path_join(path_join(cache.env, "hackerc-" + version), "hackerc")
 ]
 
-!!! Szuka `Virus.hk` zaczynajac od `start` i idac w gore drzewa
-!!! katalogow (tak jak `cargo` szuka `Cargo.toml`) - `none()`, jesli
-!!! zaden katalog nadrzedny go nie ma (dotarto do korzenia sciezki).
-fun find_project_root(start: Str) -> Option<Str> [
+!!! Szuka NAJBLIZSZEGO `Virus.hk` zaczynajac od `start` i idac w gore
+!!! drzewa katalogow (tak jak `cargo` szuka NAJBLIZSZEGO `Cargo.toml`) -
+!!! `none()`, jesli zaden katalog nadrzedny go nie ma (dotarto do
+!!! korzenia sciezki). To NIE JEST jeszcze `find_project_root` - to
+!!! tylko pierwszy krok (patrz `find_project_root` nizej, ktora
+!!! dodatkowo sprawdza, czy ten katalog jest CZLONKIEM jakiegos
+!!! workspace polozonego wyzej).
+fun find_nearest_manifest_dir(start: Str) -> Option<Str> [
     let dir = start
     while true [
         if path_exists(path_join(dir.clone(), "Virus.hk")) [
@@ -69,4 +74,97 @@ fun find_project_root(start: Str) -> Option<Str> [
         dir = parent
     ]
     end none()
+]
+
+!!! Czy `[workspace] -> members` manifestu w `workspace_dir` (sciezka
+!!! bezwzgledna) wymienia `member_dir` (tez sciezka bezwzgledna) - PO
+!!! ODWZOROWANIU kazdego wpisu wzgledem `workspace_dir`
+!!! (`path_join(workspace_dir, member)`). Manifest, ktorego nie da sie
+!!! sparsowac (albo bez sekcji `[workspace]`) po prostu NIE roscii sobie
+!!! praw do niczego - `false`, bez bledu (ten sam styl co reszta
+!!! modulu cache - blad w odczycie manifestu nigdy nie powinien wysadzic
+!!! `virus cache`/`virus build`).
+fun workspace_claims_member(workspace_dir: Str, member_dir: Str) -> Bool [
+    match parse_manifest_file(path_join(workspace_dir.clone(), "Virus.hk")) [
+        Ok(m) -> [
+            let i = 0
+            let n = m.workspace.members.len()
+            while i < n [
+                let candidate = path_join(workspace_dir.clone(), m.workspace.members[i].clone())
+                if candidate == member_dir [
+                    end true
+                ]
+                i = i + 1
+            ]
+            end false
+        ]
+        Err(_e) -> [
+            end false
+        ]
+    ]
+]
+
+!!! NAPRAWA BLEDU (0.4): idac w gore od `member_dir` (najblizszy
+!!! `Virus.hk` znaleziony przez `find_nearest_manifest_dir`), sprawdza
+!!! KAZDEGO przodka - nie tylko bezposredniego rodzica - pod katem
+!!! wlasnego `Virus.hk` z sekcja `[workspace]`, ktora roscii sobie
+!!! prawa do `member_dir` (przez `workspace_claims_member`, zawsze
+!!! wzgledem ORYGINALNEGO `member_dir`, nie jakiejs posredniej
+!!! sciezki). Zapamietuje NAJDALSZEGO (najwyzej polozonego) takiego
+!!! przodka i zwraca go jako prawdziwy korzen cache'a.
+!!!
+!!! Przyklad z tego wlasnie repo: dla `member_dir = <repo>/libs/core`
+!!! zarowno `<repo>/libs/Virus.hk` ([workspace] -> members =
+!!! ["core","std"]) JAK I `<repo>/Virus.hk` ([workspace] -> members =
+!!! [..., "libs/core", ...]) rosciila sobie prawa do tego katalogu -
+!!! bierzemy TEN DALSZY (`<repo>`), bo to on jest prawdziwym korzeniem
+!!! calego drzewa.
+!!!
+!!! Dlaczego to w ogole byl blad: `virus`/`hackerc` w tym repo maja
+!!! WLASNE, osobne pliki `Virus.hk` (hackerc/Virus.hk, virus/Virus.hk,
+!!! libs/core/Virus.hk, libs/std/Virus.hk) - to sa jednoczesnie
+!!! prawidlowe, samodzielne manifesty (kazdy z nich da sie zbudowac/
+!!! sparsowac z osobna) I czlonkowie wiekszego workspace w korzeniu
+!!! repo. PRZED ta poprawka, `find_project_root("hackerc/cmd")` (czyli
+!!! kazde `virus <cokolwiek>` odpalone z wnetrza `hackerc/`) zatrzymywalo
+!!! sie na NAJBLIZSZYM `Virus.hk` (`hackerc/Virus.hk`) i tworzylo
+!!! WLASNY `hackerc/cache/` - analogicznie `virus/cache/` z wnetrza
+!!! `virus/`, i osobny `cache/` w korzeniu przy odpaleniu stamtad -
+!!! TRZY (albo wiecej, liczac libs/core i libs/std) rozne katalogi
+!!! `cache/` dla JEDNEGO workspace, zamiast jednego wspolnego (tak jak
+!!! `cargo` w workspace ZAWSZE dzieli jeden `target/` w korzeniu,
+!!! niezaleznie z ktorego czlonka sie go odpali). Od teraz kazde z tych
+!!! miejsc uzywa TEGO SAMEGO, jedynego `<repo>/cache/`.
+fun climb_to_workspace_root(member_dir: Str) -> Str [
+    let best = member_dir
+    let ancestor = path_dirname(best.clone())
+    let prev = best.clone()
+    while ancestor.len() > 0 and ancestor != prev [
+        if path_exists(path_join(ancestor.clone(), "Virus.hk")) [
+            if workspace_claims_member(ancestor.clone(), member_dir.clone()) [
+                best = ancestor.clone()
+            ]
+        ]
+        prev = ancestor.clone()
+        ancestor = path_dirname(ancestor.clone())
+    ]
+    end best
+]
+
+!!! Szuka korzenia PROJEKTU/WORKSPACE zaczynajac od `start` i idac w
+!!! gore drzewa katalogow (tak jak `cargo` szuka `Cargo.toml`) -
+!!! `none()`, jesli zaden katalog nadrzedny nie ma `Virus.hk` (dotarto
+!!! do korzenia sciezki). Od 0.4: to JEDYNY, WSPOLNY korzen `cache/`
+!!! dla calego workspace, NIE zawsze po prostu "najblizszy Virus.hk" -
+!!! patrz `climb_to_workspace_root` (naprawa duplikujacego sie
+!!! `cache/`).
+fun find_project_root(start: Str) -> Option<Str> [
+    match find_nearest_manifest_dir(start) [
+        Some(dir) -> [
+            end some(climb_to_workspace_root(dir))
+        ]
+        None -> [
+            end none()
+        ]
+    ]
 ]
