@@ -1,7 +1,5 @@
 [package]
 -> name        => playground
--> version     => 0.1
--> using       => 0.1
-
-[build]
--> entry => cmd/main.hcs
+-> version     => 0.4
+-> using       => 0.4
+-> description => Checker HackerScript (parser+typecheck+diagnostyki) skompilowany do WASM - patrz cmd/main.hcs i web/. Buduj: `virus build --wasm` w tym katalogu.
