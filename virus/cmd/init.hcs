@@ -6,8 +6,18 @@ include <progress>
 const DEFAULT_MAIN_HCS: Str = "!! Witaj w HackerScript!\n\nfun main() [\n    log(\"Hello, HackerScript!\")\n    end\n]\n"
 
 !!! Tresc domyslnego `Virus.hk` dla nowego projektu o nazwie `pkg_name`.
+!!! ZMIANA 0.4 - dwie poprawki naraz:
+!!!   1) `-> using => 1.2` bylo BLEDNE od zawsze (nie istnieje i nigdy
+!!!      nie istniala wersja jezyka "1.2" - realna linia wydan to 0.1
+!!!      -> 0.2 -> 0.3 -> 0.4, patrz DEFAULT_HACKERC_VERSION w
+!!!      hackerc_bridge.hcs, ktora mial ten sam typ bledu) - poprawione
+!!!      na aktualna wersje.
+!!!   2) sekcja `[build] -> entry => cmd/main.hcs` USUNIETA - byla i
+!!!      tak zawsze rowna jedynej teraz dopuszczalnej wartosci
+!!!      (`cmd/main.hcs`, patrz find_cmd_entry() w manifest.hcs), wiec
+!!!      byla czystym szumem w kazdym nowym projekcie.
 fun init_default_manifest(pkg_name: Str) -> Str [
-    end "[package]\n-> name        => " + pkg_name + "\n-> version     => 0.0.1\n-> using       => 1.2\n-> edition     => 2026\n\n[dependencies]\n! -> pypi\n! --> rich => \"*\"\n\n[build]\n-> entry => cmd/main.hcs\n"
+    end "[package]\n-> name        => " + pkg_name + "\n-> version     => 0.0.1\n-> using       => 0.4\n-> edition     => 2026\n\n[dependencies]\n! -> pypi\n! --> rich => \"*\"\n"
 ]
 
 !!! `true` = sukces. `name` = jawnie podana nazwa pakietu (`virus init
