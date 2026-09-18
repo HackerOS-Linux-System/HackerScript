@@ -9,6 +9,15 @@ get <std:string> import <str_join::str_split::str_trim::str_starts_with>
 const CARGO_TOML_HEADER: Str = "[package]\nname = \""
 const CARGO_TOML_MID: Str = "\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\n[[bin]]\nname = \""
 const CARGO_TOML_TAIL: Str = "\"\npath = \"src/main.rs\"\n\n[dependencies]\n"
+!! NOWOSC 0.4 - wariant `[lib]` (cdylib+rlib) zamiast `[[bin]]`, dla
+!! `@wasm_export`/`virus build --wasm` (patrz `cargo_toml_text()` nizej
+!! i `virus/cmd/build.hcs`). "rlib" obok "cdylib" pozwala TEZ uzyc
+!! tego samego crate'a jako zwyklej zaleznosci Rust (np. w testach
+!! poza wasm) - "cdylib" samo jest wymagane przez `wasm-bindgen`. Bez
+!! `name = "..."` (w odroznieniu od `[[bin]]` wyzej) - Cargo domyslnie
+!! nazywa `[lib]` jak `[package]` (z myslnikami zamienionymi na `_`),
+!! wiec crate_name jest tu potrzebny TYLKO RAZ (w `[package] -> name`).
+const CARGO_TOML_WASM_MID: Str = "\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\", \"rlib\"]\npath = \"src/lib.rs\"\n\n[dependencies]\n"
 
 !!! Splaszczona, deterministyczna nazwa modulu Rust dla `get <std:...>`
 !!! / `get <core:...>` / `get <selfhost:...>`. MUSI byc identyczna po
@@ -100,7 +109,7 @@ fun path_parent(p: Str) -> Str [
 !!! plik-znacznik jak wczesniej (patrz historia w bootstrap/README.md).
 !!! Rozwiazuje `d` do sciezki BEZWZGLEDNEJ (parytet z Python `.resolve()`)
 !!! - NAPRAWA BUGA: bez tego, dla `d` bedacego "gola" wzgledna nazwa
-!!! pliku (np. "cli.hcs") lub pustym stringiem (patrz `path_parent`),
+!!! pliku (np. "main.hcs") lub pustym stringiem (patrz `path_parent`),
 !!! `find_libs_root`/`find_bootstrap_root` moglyby sprawdzic co
 !!! najwyzej JEDEN katalog wzgledem CWD i sie poddac - zamiast
 !!! faktycznie wejsc w gore PRAWDZIWEGO drzewa katalogow az do korzenia
@@ -215,6 +224,66 @@ fun vira_module_file_path(vira_root: Str, name: Str, version: Option<Str>) -> St
     end path + ".hcs"
 ]
 
+!!! NOWOSC 0.4 - szuka korzenia CALEGO workspace dla
+!!! `get <work:member[::plik]>` (analog Rustowego `use
+!!! nazwa_membera::modul::*;` dla czlonka `cargo`-owego workspace,
+!!! patrz docs/SYNTAX.md), zaczynajac od `start` i idac w gore. W
+!!! przeciwienstwie do `find_libs_root` (zawsze szuka JEDNEGO,
+!!! ustalonego katalogu `libs/core`) tu szukana nazwa (`member_name`)
+!!! jest DOWOLNA - wiec sprawdzamy, dla kazdego kandydata na korzen
+!!! `d`, czy `<d>/<member_name>/lib` istnieje jako katalog - TA SAMA
+!!! lekka heurystyka "sondowania katalogu", bez parsowania Virus.hk
+!!! (celowo - `hackerc` moze byc wywolywany samodzielnie, bez `virus`,
+!!! wiec nie moze zakladac jego obecnosci ani konkretnego ksztaltu
+!!! manifestu; parsowanie PRAWDZIWEGO `[workspace] -> members` -
+!!! zeby wychwycic pomylki w nazwie czy pozwolic/zabronic importu -
+!!! jest zadaniem `virus`, patrz `virus/cmd/manifest.hcs` i
+!!! `virus/cmd/cache.hcs::workspace_claims_member`).
+!!!
+!!! Konwencja: czlonek workspace jest importowalny przez
+!!! `get <work:...>` WTEDY I TYLKO WTEDY, gdy ma `<czlonek>/lib/mod.hcs`
+!!! (DOKLADNIE ten sam ksztalt co `libs/core`/`libs/std` - ktore same
+!!! sa zreszta importowalne TEZ przez `get <work:core>`/
+!!! `get <work:std>`, `find_libs_root` zostaje jako krotszy,
+!!! dedykowany alias dla nich dwoch). Czlonek z samym `cmd/main.hcs`
+!!! (binarka, patrz `find_cmd_entry` w virus/cmd/manifest.hcs) NIE jest
+!!! importowalny w ten sposob - to swiadomy podzial (jak w opisie
+!!! [workspace] w Virus.hk): "binarki" sa budowane osobno, "biblioteki"
+!!! sa wspoldzielone przez `get <work:...>`; czlonek MOZE miec oba
+!!! ksztalty naraz (wlasny `cmd/main.hcs` I `lib/mod.hcs`), jesli ma
+!!! byc jednoczesnie samodzielnym narzedziem i biblioteka dla innych.
+fun find_workspace_root(start: Str, member_name: Str) -> Option<Str> [
+    let d = to_absolute_dir(start)
+    let prev_d = "\0no-such-dir"
+    while d != prev_d [
+        let candidate = path_join_safe(d.clone(), member_name.clone() + "/lib")
+        if dir_exists(candidate) [
+            end some(d)
+        ]
+        prev_d = d.clone()
+        d = path_parent(d)
+    ]
+    end none()
+]
+
+!!! `<workspace_root>/<member>/lib/<wersja-jako-plik>.hcs` - analog
+!!! `vira_module_file_path`, dla `get <work:member[::plik]>`. Brak `::`
+!!! (samo `get <work:member>`) laduje w `<member>/lib/mod.hcs` -
+!!! DOKLADNIE parytet z tym, jak `get <std:nazwa>` bez `::` lądowałoby
+!!! w `libs/std/lib/mod.hcs`.
+fun work_module_file_path(workspace_root: Str, member: Str, version: Option<Str>) -> Str [
+    let path = workspace_root + "/" + member + "/lib/"
+    match version [
+        Some(v) -> [
+            path = path + v
+        ]
+        None -> [
+            path = path + "mod"
+        ]
+    ]
+    end path + ".hcs"
+]
+
 !!! Szuka archiwum `.hlib` dla `get <hlib:name[::version]>`, w tej
 !!! kolejnosci:
 !!!   1. `<vira_root>/<name>/<name>.hlib` i `<vira_root>/<name>/dist/<name>.hlib`
@@ -285,14 +354,14 @@ struct QueueItem [
 
 !!! Doklejenie `rest` DO `base` jako sciezka - jak Python `pathlib.Path
 !!! (base) / rest` (ktorego uzywa oryginal - `project.py`): dla PUSTEGO
-!!! `base` (plik zrodlowy bez katalogu, np. `src = "cli.hcs"` -
+!!! `base` (plik zrodlowy bez katalogu, np. `src = "main.hcs"` -
 !!! `path_parent` zwraca `""`) zwraca `rest` WPROST (BEZ wiodacego "/"),
 !!! zamiast naiwnej konkatenacji `base + "/" + rest`, ktora dla pustego
 !!! `base` dawalaby BLEDNIE `"/" + rest` - SCIEZKE BEZWZGLEDNA OD
 !!! KORZENIA SYSTEMU PLIKOW zamiast wzglednej do biezacego katalogu.
 !!! NAPRAWA BUGA: patrz historia w bootstrap/README.md - `include <...>`
 !!! szukalo w "/nazwa.hcs" zamiast we wlasciwym katalogu, gdy plik
-!!! zrodlowy byl podany BEZ katalogu (np. `hackerc build cli.hcs`
+!!! zrodlowy byl podany BEZ katalogu (np. `hackerc build main.hcs`
 !!! uruchomione z wewnatrz `bootstrap/hackerc-self/`).
 fun path_join_safe(base: Str, rest: Str) -> Str [
     if base.len() == 0 [
@@ -301,10 +370,82 @@ fun path_join_safe(base: Str, rest: Str) -> Str [
     end base + "/" + rest
 ]
 
+!!! Indeks pierwszego wystapienia `needle` w `s`, albo `-1` - reczny
+!!! skan znak po znaku (jezyk nie ma jeszcze wbudowanego
+!!! `str.find()`/`str_index_of` dostepnego bez `get <std:string>`,
+!!! ktorego ten plik (`hackerc`, nie `virus`) celowo nie importuje -
+!!! patrz uwaga przy `find_libs_root` o "sondowaniu katalogu bez
+!!! zaleznosci od virus"). Uzywana WYLACZNIE przez
+!!! `resolve_include_path` do rozbicia `"czlonek::plik"` na dwie
+!!! czesci dla `include <work:...>` (NOWOSC 0.4).
+fun find_substr(s: Str, needle: Str) -> Int [
+    let sn = s.len()
+    let nn = needle.len()
+    if nn == 0 or nn > sn [
+        end -1
+    ]
+    let i = 0
+    while i <= sn - nn [
+        let j = 0
+        let matched = true
+        while j < nn [
+            if s.char_at(i + j) != needle.char_at(j) [
+                matched = false
+                j = nn
+            ]
+            j = j + 1
+        ]
+        if matched [
+            end i
+        ]
+        i = i + 1
+    ]
+    end -1
+]
+
 !!! Parytet z `resolve_include_path` (project.py) - rozwiazuje `include
 !!! <raw_path>` na prawdziwy plik `.hcs`, WZGLEDEM `base_dir`. Kolejnosc
 !!! jak Rustowe `mod nazwa;` (plik przed katalogiem).
+!!! NOWOSC 0.4 - drugi ksztalt: `raw_path` zaczynajacy sie od `"work:"`
+!!! (patrz `parse_include()` w parser.hcs) to `include
+!!! <work:czlonek[::plik]>` - "prawdziwe" statyczne linkowanie zrodla
+!!! INNEGO czlonka workspace BEZ kopiowania plikow. W odroznieniu od
+!!! zwyklego `include <sciezka>` (zawsze wzgledem `base_dir`, czyli
+!!! katalogu PLIKU z tym `include`), ten ksztalt jest rozwiazywany
+!!! WZGLEDEM KORZENIA WORKSPACE - dokladnie ta sama para funkcji, co
+!!! `get <work:...>` uzywa: `find_workspace_root` (szuka w gore
+!!! `<przodek>/<czlonek>/lib`, zaczynajac od `base_dir`) +
+!!! `work_module_file_path` (`<korzen>/<czlonek>/lib/<plik lub
+!!! "mod">.hcs`) - patrz definicje obu przy `find_libs_root` powyzej.
+!!! Przyklad: `playground/lib/mod.hcs` z `include <work:hackerc::
+!!! ast_nodes>` dostaje PRAWDZIWY `hackerc/cmd/ast_nodes.hcs`
+!!! wkompilowany do WLASNEGO crate'a playground (jeden binarny plik
+!!! wynikowy/`.wasm`, zero duplikacji zrodla) - tak jak `mod` w Rust
+!!! moze wskazywac na plik spoza wlasnego katalogu przez `#[path =
+!!! "..."]`, tylko bez potrzeby takiej adnotacji.
 fun resolve_include_path(raw_path: Str, base_dir: Str) -> Option<Str> [
+    if raw_path.len() >= 5 and raw_path.slice(0, 5) == "work:" [
+        let rest = raw_path.slice(5, raw_path.len())
+        let member = rest
+        let subpath: Option<Str> = none()
+        let sep = find_substr(rest, "::")
+        if sep >= 0 [
+            member = rest.slice(0, sep)
+            subpath = some(rest.slice(sep + 2, rest.len()))
+        ]
+        match find_workspace_root(base_dir, member.clone()) [
+            Some(wr) -> [
+                let candidate = work_module_file_path(wr, member, subpath)
+                if file_readable(candidate.clone()) [
+                    end some(candidate)
+                ]
+                end none()
+            ]
+            None -> [
+                end none()
+            ]
+        ]
+    ]
     if raw_path.len() >= 4 and raw_path.slice(raw_path.len() - 4, raw_path.len()) == ".hcs" [
         let candidate = path_join_safe(base_dir, raw_path)
         if file_readable(candidate.clone()) [
@@ -336,7 +477,11 @@ fun flat_include_module_name(path: Str) -> Str [
     let n = p.len()
     while i < n [
         let c = p.char_at(i)
-        if c == "-" or c == "/" [
+        !! ZMIANA 0.4: ":" dopisane do zamienianych znakow - potrzebne
+        !! dla nowego "work:czlonek::plik" (patrz resolve_include_path/
+        !! parse_include), ktore inaczej wygenerowaloby nazwe modulu
+        !! zawierajaca dwukropki - NIEPOPRAWNA jako identyfikator Rust.
+        if c == "-" or c == "/" or c == ":" [
             out = out + "_"
         ] else [
             out = out + c
@@ -355,7 +500,10 @@ struct DiscoveredFile [
     native_blocks: List<Str>,
     native_engines: List<Str>,
     sandbox_blocks: List<Str>,
-    hot_reload_names: List<Str>
+    hot_reload_names: List<Str>,
+    !! NOWOSC 0.4 - patrz `extract_wasm_export_markers()` w
+    !! transpiler.hcs, parytet z `hot_reload_names` obok.
+    wasm_export_names: List<Str>
 ]
 
 struct ProjectResult [
@@ -373,7 +521,14 @@ struct ProjectResult [
     !! ZMIANA 0.3 - patrz `TranspileResult::needs_native_cpp`/
     !! `extern_link_specs` w transpiler.hcs.
     needs_native_cpp: Bool,
-    extern_links_path: Option<Str>
+    extern_links_path: Option<Str>,
+    !! NOWOSC 0.4 - parytet z `needs_hot_reload` powyzej, ale dla
+    !! `@wasm_export`/`wasm-bindgen`. `virus/cmd/build.hcs` czyta to
+    !! przy `virus build --wasm`, zeby ostrzec, gdy w calym projekcie
+    !! nie ma ani jednej `@wasm_export` funkcji (crate zbudowalby sie,
+    !! ale eksportowalby zero funkcji do JS - prawie na pewno pomylka
+    !! uzytkownika, nie celowy wybor).
+    needs_wasm_bindgen: Bool
 ]
 
 !!! Wewnetrzny akumulator odkrytych plikow + kolejki BFS importow -
@@ -398,8 +553,9 @@ impl Discovery [
                 let native_extraction = extract_native_blocks(extraction.stripped_source, native_dirname(path))
                 let sandbox_extraction = extract_sandbox_blocks(native_extraction.stripped_source)
                 let hot_extraction = extract_hot_reload_markers(sandbox_extraction.stripped_source)
-                let prog = parse(hot_extraction.stripped_source)
-                self.files.push(DiscoveredFile(path, flat_name, source_tag, prog, extraction.blocks, native_extraction.blocks, native_extraction.engines, sandbox_extraction.blocks, hot_extraction.names))
+                let wasm_extraction = extract_wasm_export_markers(hot_extraction.stripped_source)
+                let prog = parse(wasm_extraction.stripped_source)
+                self.files.push(DiscoveredFile(path, flat_name, source_tag, prog, extraction.blocks, native_extraction.blocks, native_extraction.engines, sandbox_extraction.blocks, hot_extraction.names, wasm_extraction.names))
                 end true
             ]
             Err(e) -> [
@@ -410,9 +566,15 @@ impl Discovery [
     ]
 
     !!! Faza 1 (discovery): parsuje `entry` + rekurencyjnie kazdy
-    !!! zaimportowany modul `std`/`core`/`selfhost`/`vira` - BFS po
-    !!! `GetImportStmt`. Parytet z `_resolve_project_files`.
+    !!! zaimportowany modul `std`/`core`/`selfhost`/`vira`/`work` - BFS
+    !!! po `GetImportStmt`. Parytet z `_resolve_project_files`.
     !!! `vira_root` DODANE w tej rundzie (patrz `find_vira_cache_root`).
+    !!! `work` (NOWOSC 0.4, patrz `find_workspace_root`) NIE dostaje
+    !!! wlasnego parametru "root" tutaj - w przeciwienstwie do
+    !!! `vira_root`/`libs_root`/`bootstrap_root` (policzonych RAZ dla
+    !!! calego `entry`), korzen workspace zalezy od NAZWY CZLONKA (innej
+    !!! dla kazdego `get <work:...>`), wiec jest liczony na biezaco w
+    !!! petli nizej.
     fun resolve(self, entry: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, vira_root: Option<Str>) [
         let added = self.parse_and_add(entry.clone(), "main", "main")
         if not added [
@@ -453,6 +615,25 @@ impl Discovery [
                                 ]
                                 None -> [
                                     self.warnings.push("get <vira:" + iname.clone() + "> - nie znaleziono katalogu cache/libs/vira/ - uruchom `virus install vira " + iname.clone() + "` (modul " + flat.clone() + " nie zostanie zbudowany)")
+                                ]
+                            ]
+                        ] elif isource == "work" [
+                            !!! NOWOSC 0.4 - w odroznieniu od `vira_root`/
+                            !!! `libs_root` (policzone RAZ, dla calego
+                            !!! `entry`, przed petla), korzen workspace
+                            !!! zalezy tu od `iname` (nazwy CZLONKA) -
+                            !!! wiec liczymy go na biezaco, per import,
+                            !!! zaczynajac szukanie od katalogu pliku,
+                            !!! ktory ten import napisal (`base_dir`) -
+                            !!! dziala wiec tak samo z dowolnego miejsca
+                            !!! w workspace, nie tylko z korzenia.
+                            match find_workspace_root(base_dir.clone(), iname.clone()) [
+                                Some(wr) -> [
+                                    mod_file = work_module_file_path(wr, iname.clone(), iversion.clone())
+                                    have_root = true
+                                ]
+                                None -> [
+                                    self.warnings.push("get <work:" + iname.clone() + "> - nie znaleziono czlonka workspace \"" + iname.clone() + "\" z wlasnym lib/mod.hcs (szukano <przodek>/" + iname.clone() + "/lib w gore od " + base_dir.clone() + ") - modul " + flat.clone() + " nie zostanie zbudowany")
                                 ]
                             ]
                         ] elif isource == "hlib" [
@@ -523,8 +704,13 @@ impl Discovery [
 ]
 
 !!! Dopisuje do `queue` kazdy `GetImportStmt` (dla `std`/`core`/
-!!! `selfhost`/`virus`/`vira`) i kazdy `IncludeStmt` na najwyzszym
-!!! poziomie `prog` - parytet z `module_stmts()` (project.py).
+!!! `selfhost`/`virus`/`vira`/`work`/`hlib`) i kazdy `IncludeStmt` na
+!!! najwyzszym poziomie `prog` - parytet z `module_stmts()`
+!!! (project.py). `work` DODANE w 0.4 (patrz `find_workspace_root`
+!!! powyzej) - `get <work:member[::plik]>`, ogolny odpowiednik Rustowego
+!!! `use nazwa_membera::...;` dla DOWOLNEGO czlonka workspace majacego
+!!! `lib/mod.hcs` (nie tylko `core`/`std`, ktore maja wlasne,
+!!! krotsze aliasy `get <core:...>`/`get <std:...>`).
 !!! `base_dir` (katalog pliku `prog` pochodzi z) jest doczepiany do
 !!! kazdego elementu - potrzebny pozniej WYLACZNIE dla `IncludeStmt`.
 !!! `vira` DODANE w tej rundzie - TYLKO dla bibliotek Vira typu "git"
@@ -548,7 +734,7 @@ fun collect_module_imports(prog: Program, base_dir: Str, queue: List<QueueItem>)
         let s = prog.body[i].clone()
         match s.clone() [
             GetImportStmt(source, name, version, details) -> [
-                if source == "std" or source == "core" or source == "selfhost" or source == "virus" or source == "vira" or source == "hlib" [
+                if source == "std" or source == "core" or source == "selfhost" or source == "virus" or source == "vira" or source == "hlib" or source == "work" [
                     queue.push(QueueItem(s, base_dir.clone()))
                 ]
             ]
@@ -697,7 +883,7 @@ fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_roo
     end ProjectSignatures(sigs, disc.warnings)
 ]
 
-fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, needs_sandbox: Bool, needs_hot_reload: Bool, needs_native_cpp: Bool, deps_names: List<Str>, deps_versions: List<Str>) -> Str [
+fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, needs_sandbox: Bool, needs_hot_reload: Bool, needs_native_cpp: Bool, needs_wasm_bindgen: Bool, deps_names: List<Str>, deps_versions: List<Str>) -> Str [
     let deps_lines = ""
     if needs_pyo3 [
         deps_lines = deps_lines + "pyo3 = { version = \"0.22\", features = [\"auto-initialize\"] }\n"
@@ -710,6 +896,13 @@ fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, ne
     ]
     if needs_hot_reload [
         deps_lines = deps_lines + "libloading = \"0.8\"\n"
+    ]
+    !! NOWOSC 0.4 - `wasm-bindgen` dla `@wasm_export` (patrz
+    !! `CARGO_TOML_WASM_MID` powyzej i `virus/cmd/build.hcs`, gdzie
+    !! `virus build --wasm` faktycznie kompiluje ten crate na
+    !! `wasm32-unknown-unknown`).
+    if needs_wasm_bindgen [
+        deps_lines = deps_lines + "wasm-bindgen = \"0.2\"\n"
     ]
     let i = 0
     let n = deps_names.len()
@@ -753,6 +946,14 @@ fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, ne
     let build_deps_section = ""
     if needs_native_cpp [
         build_deps_section = "\n[build-dependencies]\ncc = \"1\"\n"
+    ]
+    !! NOWOSC 0.4 - `[lib]` (cdylib+rlib, `src/lib.rs`) zamiast `[[bin]]`
+    !! (`src/main.rs`) gdy ten crate ma co najmniej jedna funkcje
+    !! `@wasm_export` - patrz `CARGO_TOML_WASM_MID` powyzej i
+    !! `build_project()` nizej (decyduje, czy pisac `src/main.rs` czy
+    !! `src/lib.rs`, dokladnie w parze z ta galezia).
+    if needs_wasm_bindgen [
+        end CARGO_TOML_HEADER + crate_name + CARGO_TOML_WASM_MID + deps_lines + build_deps_section
     ]
     end CARGO_TOML_HEADER + crate_name + CARGO_TOML_MID + crate_name + CARGO_TOML_TAIL + deps_lines + build_deps_section
 ]
@@ -904,6 +1105,9 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     let needs_native_js = false
     let needs_sandbox = false
     let needs_hot_reload = false
+    !! NOWOSC 0.4 - patrz `TranspileResult::needs_wasm_bindgen`/
+    !! `CodeGen::needs_wasm_bindgen` (parytet z `needs_pyo3` powyzej).
+    let needs_wasm_bindgen = false
     !!! ZMIANA 0.3 - patrz `TranspileResult::needs_native_cpp`/
     !!! `extern_link_specs` (transpiler.hcs) i `collect_extern_link_specs`.
     let needs_native_cpp = false
@@ -924,7 +1128,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     let fn_ = disc.files.len()
     while fi < fn_ [
         let df = disc.files[fi].clone()
-        let r = transpile_program_with_extra(df.program.clone(), df.blocks.clone(), df.native_blocks.clone(), df.native_engines.clone(), df.sandbox_blocks.clone(), df.hot_reload_names.clone(), df.path.clone(), extra)
+        let r = transpile_program_with_extra(df.program.clone(), df.blocks.clone(), df.native_blocks.clone(), df.native_engines.clone(), df.sandbox_blocks.clone(), df.hot_reload_names.clone(), df.wasm_export_names.clone(), df.path.clone(), extra)
 
         if r.needs_pyo3 [
             needs_pyo3 = true
@@ -937,6 +1141,9 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
         ]
         if r.needs_native_cpp [
             needs_native_cpp = true
+        ]
+        if r.needs_wasm_bindgen [
+            needs_wasm_bindgen = true
         ]
         let eli = 0
         let eln = r.extern_link_specs.len()
@@ -1028,6 +1235,15 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     ]
 
     entry_rust = insert_mod_declarations(entry_rust, mod_names)
+    !! NOWOSC 0.4 - `needs_wasm_bindgen` jest w pelni znane dopiero TU
+    !! (po petli po wszystkich plikach) - dopiero teraz przełączamy
+    !! docelowa sciezke pliku wejsciowego z `src/main.rs` na
+    !! `src/lib.rs`, w parze z `cargo_toml_text(...)` nizej (ktora
+    !! dostaje ten sam `needs_wasm_bindgen` i pisze `[lib] -> path =
+    !! "src/lib.rs"` zamiast `[[bin]] -> path = "src/main.rs"`).
+    if needs_wasm_bindgen [
+        main_rs_path = src_dir + "/lib.rs"
+    ]
     match write_file(main_rs_path.clone(), entry_rust) [
         Ok(_v) -> [
         ]
@@ -1037,7 +1253,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     ]
 
     let cargo_toml_path = out_dir + "/Cargo.toml"
-    let cargo_text = cargo_toml_text(crate_name, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, needs_native_cpp, crates_names.clone(), crates_versions.clone())
+    let cargo_text = cargo_toml_text(crate_name, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, needs_native_cpp, needs_wasm_bindgen, crates_names.clone(), crates_versions.clone())
     match write_file(cargo_toml_path.clone(), cargo_text) [
         Ok(_v) -> [
         ]
@@ -1169,7 +1385,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
         ]
     ]
 
-    end ProjectResult(out_dir, main_rs_path, module_files, cargo_toml_path, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, crates_names, crates_versions, warnings, needs_native_cpp, extern_links_path)
+    end ProjectResult(out_dir, main_rs_path, module_files, cargo_toml_path, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, crates_names, crates_versions, warnings, needs_native_cpp, extern_links_path, needs_wasm_bindgen)
 ]
 
 !!! Demonstracyjne uzycie - `flat_module_name`/`module_file_path` na
