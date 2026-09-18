@@ -1,4 +1,4 @@
-using <0.3>
+using <0.4>
 
 !! Zwraca sume dwoch liczb calkowitych.
 fun add(a: Int, b: Int) -> Int [
