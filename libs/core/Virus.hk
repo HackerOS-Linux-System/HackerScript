@@ -1,8 +1,5 @@
 [package]
 -> name        => core
--> version     => 0.3
--> using       => 0.3
--> description => core: alternatywne systemy pamieci HackerScript (areny i inne), 100% .hcs.
-
-[build]
--> entry => lib/mod.hcs
+-> version     => 0.4
+-> using       => 0.4
+-> description => core: alternatywne systemy pamieci HackerScript (areny i inne), 100% .hcs. Biblioteka - brak cmd/, importowalna przez `get <core:...>` (aliast dedykowany) i `get <work:core::...>` (ogolny, 0.4).
