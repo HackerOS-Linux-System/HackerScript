@@ -1,8 +1,5 @@
 [package]
 -> name        => std
--> version     => 0.3
--> using       => 0.3
--> description => std: biblioteka standardowa HackerScript (100% .hcs).
-
-[build]
--> entry => lib/mod.hcs
+-> version     => 0.4
+-> using       => 0.4
+-> description => std: biblioteka standardowa HackerScript (100% .hcs). Biblioteka - brak cmd/, importowalna przez `get <std:...>` (alias dedykowany) i `get <work:std::...>` (ogolny, 0.4).
