@@ -1,5 +1,5 @@
 get <std:path> import <path_join>
-get <std:string> import <str_trim>
+get <std:string> import <str_trim::str_contains>
 get <std:process> import <run_command_checked::command_succeeds>
 get <std:fs> import <create_dir_ok>
 include <cache>
@@ -11,7 +11,11 @@ include <progress>
 !!! `hackerc` (0.1 -> 0.2 -> 0.3, patrz README.adoc,
 !!! <<historia-wersji>>) ani z przykladowym URL-em wydania GitHub
 !!! ponizej (`v0.0.1`) - naprawione tutaj.
-const DEFAULT_HACKERC_VERSION: Str = "0.3"
+!!! ZMIANA 0.4 - kolejna, analogiczna aktualizacja tej samej stalej:
+!!! 0.3 -> 0.4 (patrz "Historia wersji" w README.adoc, wpis 0.4 -
+!!! `get <work:...>`, usuniete `[build]`, naprawiony wspolny `cache/`
+!!! workspace).
+const DEFAULT_HACKERC_VERSION: Str = "0.4"
 
 !!! Nazwa assetu wydania GitHub - dokladnie `hackerc` (BEZ przyrostka
 !!! platformy) - te wydania sa dzis buildowane TYLKO dla Linux x86_64
@@ -186,4 +190,114 @@ fun hackerc_compile_crate(crate_dir: Str, crate_name: Str, release: Bool) -> Res
         end err("kompilacja zakonczyla sie (podobno) sukcesem, ale nie znaleziono binarki " + built + " - sprawdz [[bin]].name w Cargo.toml. Wyjscie cargo:\n" + build_result)
     ]
     end ok(built)
+]
+
+!!! Cargo zamienia `-` na `_` w NAZWIE PLIKU artefaktu `[lib]`
+!!! (`crate-name` w Cargo.toml moze miec myslniki, ale wynikowy
+!!! `libnazwa.wasm`/`libnazwa.rlib` juz nie) - w odroznieniu od
+!!! `[[bin]]` (ktorego nazwa pliku binarnego jest DOKLADNIE taka, jak
+!!! `name` w Cargo.toml, myslniki wlacznie - patrz `hackerc_compile_
+!!! crate` wyzej, gdzie `built` uzywa `crate_name` WPROST). Potrzebne
+!!! WYLACZNIE przez `hackerc_compile_crate_wasm` nizej - nazwy
+!!! projektow HackerScript i tak zwykle nie maja myslnikow, ale to
+!!! poprawne zawsze, nie tylko "zwykle".
+fun replace_dash_local(s: Str) -> Str [
+    let out = ""
+    let i = 0
+    let n = s.len()
+    while i < n [
+        let c = s.char_at(i)
+        if c == "-" [
+            out = out + "_"
+        ] else [
+            out = out + c
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+!!! Wynik `hackerc_compile_crate_wasm` - surowy `.wasm` (zawsze,
+!!! `raw_wasm_path`) + opcjonalnie przetworzony `wasm-bindgen` glue
+!!! (`glue_dir`/`bindgen_ran`, patrz komentarz przy funkcji nizej).
+struct WasmBuildOutcome [
+    raw_wasm_path: Str,
+    glue_dir: Option<Str>,
+    bindgen_ran: Bool
+]
+
+!!! NOWOSC 0.4 - jak `hackerc_compile_crate` wyzej, ale dla `virus
+!!! build --wasm` (crate wygenerowany jako `[lib]` cdylib+rlib przez
+!!! `hackerc build`, gdy zrodlo ma >=1 `@wasm_export` - patrz
+!!! `TranspileResult::needs_wasm_bindgen`/`ProjectResult::
+!!! needs_wasm_bindgen` w hackerc/cmd/project.hcs). Dwa NIEZALEZNE
+!!! kroki:
+!!!   (1) `cargo build --target wasm32-unknown-unknown [--release]` -
+!!!       surowy `.wasm`, jeszcze BEZ glue JS - eksportuje surowe
+!!!       funkcje `extern "C"`, nieuzywalne wprost z przegladarki bez
+!!!       recznego (de)serializowania pamieci linear.
+!!!   (2) `wasm-bindgen <surowy.wasm> --target web --out-dir <out_dir>`
+!!!       (CLI, OSOBNY program od `cargo`/`rustc`) - generuje
+!!!       `.js`/`.d.ts` glue + finalny, przetworzony `..._bg.wasm` -
+!!!       `playground/web/main.js` importuje TEN wynik, nie surowy
+!!!       plik z kroku (1).
+!!! Krok (2) wymaga `wasm-bindgen-cli` zainstalowanego OSOBNO
+!!! (`cargo install wasm-bindgen-cli --version <TA SAMA wersja, co
+!!! "wasm-bindgen = ..." w Cargo.toml> - niedopasowana wersja konczy
+!!! sie twardym bledem CLI, to ZNANE ograniczenie calego ekosystemu
+!!! wasm-bindgen, nie cos specyficznego dla `virus`) - jesli nie jest
+!!! zainstalowany, krok (2) jest POMIJANY z `bindgen_ran = false`
+!!! (surowy `.wasm` z kroku (1) i tak jest zwracany - nadaje sie do
+!!! dalszej, recznej obrobki), tym samym stylem co brak `cargo`/
+!!! kompilatora C++ gdzie indziej w tym pliku: nigdy twardy blad za
+!!! brak NARZEDZIA POMOCNICZEGO, ktorego `virus` samo nie instaluje.
+fun hackerc_compile_crate_wasm(crate_dir: Str, crate_name: Str, release: Bool, out_dir: Str) -> Result<WasmBuildOutcome, Str> [
+    if not command_succeeds("cargo", ["--version"]) [
+        end err("budowanie wymaga zainstalowanego Rust (cargo) - crate wygenerowany w " + crate_dir + " nie zostal skompilowany. Zainstaluj Rust: https://rustup.rs")
+    ]
+
+    let cargo_args: List<Str> = ["build", "--target", "wasm32-unknown-unknown", "--manifest-path", path_join(crate_dir.clone(), "Cargo.toml")]
+    if release [
+        cargo_args.push("--release")
+    ]
+    match run_command_checked("cargo", cargo_args) [
+        Ok(_out) -> [
+        ]
+        Err(e) -> [
+            if str_contains(e, "wasm32-unknown-unknown") [
+                end err(e + "\n\npodpowiedz: doinstaluj target przez 'rustup target add wasm32-unknown-unknown'")
+            ]
+            end err(e)
+        ]
+    ]
+
+    let profile_dir = "debug"
+    if release [
+        profile_dir = "release"
+    ]
+    let lib_file_stem = replace_dash_local(crate_name)
+    let raw_wasm = path_join(path_join(path_join(path_join(crate_dir, "target"), "wasm32-unknown-unknown"), profile_dir), lib_file_stem + ".wasm")
+    if not path_exists(raw_wasm.clone()) [
+        end err("kompilacja zakonczyla sie (podobno) sukcesem, ale nie znaleziono " + raw_wasm + " - sprawdz sekcje [lib] w Cargo.toml (nazwa artefaktu = nazwa pakietu z '-' zamienionym na '_')")
+    ]
+
+    if not command_succeeds("wasm-bindgen", ["--version"]) [
+        log("virus build --wasm: surowy " + raw_wasm + " gotowy, ale 'wasm-bindgen' (CLI) nie jest zainstalowany - pomijam generowanie glue JS. Zainstaluj: cargo install wasm-bindgen-cli --version 0.2.<x> (ta sama wersja co 'wasm-bindgen' w Cargo.toml) i uruchom ponownie.")
+        end ok(WasmBuildOutcome(raw_wasm, none(), false))
+    ]
+
+    match create_dir_ok(out_dir.clone()) [
+        Ok(_v) -> [
+        ]
+        Err(_e) -> [
+        ]
+    ]
+    match run_command_checked("wasm-bindgen", [raw_wasm.clone(), "--target", "web", "--out-dir", out_dir.clone()]) [
+        Ok(_o) -> [
+            end ok(WasmBuildOutcome(raw_wasm, some(out_dir), true))
+        ]
+        Err(e) -> [
+            end err("'wasm-bindgen' (CLI) nie powiodlo sie - najczestsza przyczyna: jego wersja nie zgadza sie z 'wasm-bindgen = \"0.2\"' w Cargo.toml (napraw: cargo install wasm-bindgen-cli --version <dokladna wersja z Cargo.lock>). Blad oryginalny:\n" + e)
+        ]
+    ]
 ]
