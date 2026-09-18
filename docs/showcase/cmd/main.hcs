@@ -1,4 +1,4 @@
-using <0.3>
+using <0.4>
 
 get <std:string> import <str_trim::str_contains::str_starts_with::str_ends_with::str_replace::str_repeat::str_split::str_join>
 
@@ -245,7 +245,7 @@ fun demo_manual() [
     ]
 ]
 
-!! ---- 8. FFI 0.3: get<extern:...> use<...> + region ---------------
+!! ---- 8. FFI 0.4: get<extern:...> use<...> + region ---------------
 
 get <extern:m> use <dynamic>
 region [
@@ -260,16 +260,16 @@ get <c:sqlite3>
 get <cpp:fmt>
 
 fun demo_ffi_extern() [
-    sekcja("8. FFI 0.3 - get<extern:...> use<...> + region")
+    sekcja("8. FFI 0.4 - get<extern:...> use<...> + region")
     log("sqrt(16.0) =", sqrt(16.0))
     log("pow(2.0, 10.0) =", pow(2.0, 10.0))
     log("fabs(-3.5) =", fabs(-3.5))
 ]
 
-!! ---- 9. FFI 0.3: blok kompilowanego build-time C++ -------------
+!! ---- 9. FFI 0.4: blok kompilowanego build-time C++ -------------
 
 fun demo_native_cpp() [
-    sekcja("9. FFI 0.3 - kompilowany build-time blok C++")
+    sekcja("9. FFI 0.4 - kompilowany build-time blok C++")
     native {C++} [
         #include <cstdio>
         int suma = 0;
