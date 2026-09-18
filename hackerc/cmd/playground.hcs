@@ -5,8 +5,8 @@ include <diagnostics>
 include <transpiler>
 
 !!! Jak `parse()`, ale z tym samym preprocessingiem `direct [ ... ]`
-!!! co transpilacja - parytet z `parse_with_direct` w cli.hcs (ktorego
-!!! nie mozemy uzyc wprost, bo `cli.hcs` samo w sobie ciagnie
+!!! co transpilacja - parytet z `parse_with_direct` w main.hcs (ktorego
+!!! nie mozemy uzyc wprost, bo `main.hcs` samo w sobie ciagnie
 !!! `project.hcs`/prawdziwy `main()` z argv, niepotrzebne i niedzialajace
 !!! w WASM).
 fun parse_source(source: Str) -> Program [
@@ -41,10 +41,16 @@ fun check_source(source: Str) -> Str [
     end report + "\n\nOK (" + (diags.len() as Str) + " warning(ow))"
 ]
 
-!!! Smoke-test do `hackerc build`/`cargo run` (weryfikacja PRZED
-!!! zapakowaniem do WASM - patrz playground-wasm/README.md) - NIE jest
-!!! czescia finalnego API playgrounda (to robi `check_source` przez
-!!! wasm-bindgen, patrz playground-wasm/src/lib.rs).
+!!! Smoke-test do `hackerc build`/`cargo run` (weryfikacja logiki
+!!! parsowania/sprawdzania PRZED opakowaniem w WASM) - w 0.4 ta sama
+!!! logika zyje juz NAPRAWDE, linkowana statycznie (nie kopiowana) w
+!!! `playground/cmd/main.hcs` (patrz `include <work:hackerc::...>` w
+!!! docs/SYNTAX.md), gdzie `check_source` ma `@wasm_export` i jest
+!!! faktycznie budowana przez `virus build --wasm` (patrz
+!!! `playground/web/README.md`). Ta funkcja tutaj zostaje jako
+!!! szybki smoke-test SAMEGO `hackerc` (`hackerc build
+!!! hackerc/cmd/playground.hcs && cargo run`), bez potrzeby
+!!! `virus`/workspace/WASM.
 fun main() [
     log(check_source("fun main() [\n    log(\"hello\")\n    end\n]"))
     log("---")
