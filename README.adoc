@@ -12,13 +12,18 @@ niewielkiego fragmentu kodu, ktory nigdy nie bedzie wymagal wydajnosci.
 
 [cols="1,3"]
 |===
-| Status | *Bootstrap osiagniety + FFI 0.3* - `hackerc` (transpilator) i `virus`
-(menedzer pakietow/narzedzie budowania) sa dzis w calosci napisane w
-samym HackerScript (`.hcs`), nie w Pythonie/Rust jak w wersji `0.0.1`.
-Od `0.3` dochodzi przeprojektowane FFI: `get <extern:...> use
-<static\|dynamic>` + `region [ ... ]`, `get <c:...>`/`get <cpp:...>`
-oraz `native {C++} [ ... ]`.
-| Wersja | `0.3` (ta - self-hostujaca sie, wydawana na GitHub
+| Status | *Bootstrap osiagniety + FFI 0.3 + workspace 0.4* - `hackerc`
+(transpilator) i `virus` (menedzer pakietow/narzedzie budowania) sa
+dzis w calosci napisane w samym HackerScript (`.hcs`), nie w
+Pythonie/Rust jak w wersji `0.0.1`. Od `0.3` dochodzi przeprojektowane
+FFI: `get <extern:...> use <static\|dynamic>` + `region [ ... ]`, `get
+<c:...>`/`get <cpp:...>` oraz `native {C++} [ ... ]`. Od `0.4`:
+`get <work:czlonek[::plik]>` (import DOWOLNEGO czlonka workspace,
+nie tylko `core`/`std`), sekcja `[build]` w `Virus.hk` **usunieta**
+(plik wejsciowy jest teraz zawsze `cmd/main.hcs`, bez konfiguracji),
+oraz naprawiony blad z duplikujacym sie `cache/` w workspace (patrz
+<<historia-wersji>>).
+| Wersja | `0.4` (ta - self-hostujaca sie, wydawana na GitHub
 Releases) - `0.0.1` to *zamrozona* wersja startowa sprzed bootstrapu
 (patrz <<historia-wersji>>).
 | Licencja | MIT (c) 2026 HackerOS Team
@@ -54,7 +59,9 @@ samego FFI: `get<extern:...> use<...> + region`, `get<c:...>`/
 `get<cpp:...>`, i kompilowany build-time blok C++) - dzialajace
 przyklady, wszystkie zweryfikowane realna kompilacja i uruchomieniem
 (patrz naglowkowy komentarz kazdego pliku po instrukcje budowania).
-Oraz `docs/SYNTAX.md` - pelny opis skladni.
+Oraz `docs/SYNTAX.md` - pelny opis skladni (w tym, od `0.4`,
+`get <work:czlonek[::plik]>` - import dowolnego czlonka workspace) i
+`docs/ROADMAP.md` - pelna, szczera lista tego co jeszcze brakuje.
 
 == Struktura repozytorium
 
@@ -71,11 +78,11 @@ HackerScript/
     project.hcs             wielo-plikowe skladanie projektu, Cargo.toml
     formatter.hcs            formater kodu .hcs
     diagnostics.hcs          renderowanie bledow w stylu rustc (podkreslona linia)
-    cli.hcs                  CLI: build/check/lint/fmt (kolorowe, z paskiem postepu)
+    main.hcs                 CLI: build/check/lint/fmt (kolorowe, z paskiem postepu) - do 0.3: cli.hcs
     playground.hcs           demo/checker uzywany przez playground WASM
   virus/cmd/             menedzer pakietow i build tool, W CALOSCI w HackerScript
     main.hcs                 CLI: init/build/check/lint/fmt/install/remove/repair/clean
-    manifest.hcs              parser formatu .hk (Virus.hk - NIE TOML)
+    manifest.hcs              parser formatu .hk (Virus.hk - NIE TOML) - [build] usuniete w 0.4
     install.hcs               pobieranie zaleznosci z PyPI/crates.io/npm/JSR
     hackerc_bridge.hcs         resolve+download hackerc wg `using <wersja>`
     build.hcs / check.hcs / lint.hcs / fmt.hcs / cache.hcs / cache_cmd.hcs
@@ -86,13 +93,16 @@ HackerScript/
     std/lib/                fs, io, string, math, path, json, toml, hk, env,
                              process, http, term (KOLORY + PASEK POSTEPU - nowe),
                              result, cybersecurity/ (constant_time_eq, shannon_entropy)
-  playground/             checker HackerScript skompilowany do WASM (przegladarka)
+  playground/             checker HackerScript skompilowany do WASM (przegladarka, 0.4)
+    cmd/main.hcs            statycznie linkuje hackerc przez get<work:...>, @wasm_export check_source
+    web/                    index.html + main.js - dzialajaca strona w stylu Rust Playground
+    web/README.md           dokladne kroki budowania (virus build --wasm + wasm-bindgen-cli)
   docs/
     hello-world/            minimalny dzialajacy przyklad (.hk + .hcs)
     module-demo/            przyklad systemu modulow (get <core:...>)
-    showcase/               ogromny, jednoplikowy przeglad jezyka (0.3)
+    showcase/               ogromny, jednoplikowy przeglad jezyka (0.3/0.4)
     ffi-demo/               samodzielny przyklad FFI 0.3 (extern/region/c/cpp)
-    SYNTAX.md                 pelny opis skladni
+    SYNTAX.md                 pelny opis skladni (w tym get <work:...>, 0.4)
     ROADMAP.md                 co jeszcze brakuje (szczegolowo, per-plik)
   scripts/                install.sh/remove.sh (HackerOS) + skrypty .hl
   .github/workflows/      CI (buduje I URUCHAMIA wygenerowany crate) + Release
@@ -148,6 +158,24 @@ nie menedzer pakietow). Uruchomiony na korzeniu z `[workspace]` w
 `Virus.hk` (patrz glowny `/Virus.hk` tego repo) buduje KAZDEGO
 czlonka majacego wlasny, uruchamialny plik wejsciowy - analogicznie
 do `cargo build` w workspace Cargo.
+. **(0.4)** Plik wejsciowy KAZDEGO budowalnego czlonka/projektu jest
+teraz ZAWSZE `cmd/main.hcs` - sekcja `[build] -> entry => <sciezka>`,
+pozwalajaca to kiedys nadpisac, zostala **calkowicie usunieta** z
+formatu `.hk` (dokladny analog tego, jak Cargo samo znajduje
+`src/main.rs`, bez zadnego pola w `Cargo.toml`) - patrz
+`find_cmd_entry()` w `virus/cmd/manifest.hcs`.
+. **(0.4)** `get <work:czlonek[::plik]>` -> importuje `lib/mod.hcs`
+(albo `lib/<plik>.hcs`) DOWOLNEGO czlonka `[workspace] -> members`,
+nie tylko uprzywilejowanych `core`/`std` (ktore maja wlasne, krotsze
+aliasy `get <core:...>`/`get <std:...>`, dzialajace identycznie) -
+analog Rustowego `use nazwa_membera::modul::*;` w workspace Cargo.
+Patrz `docs/SYNTAX.md`.
+. **(0.4)** `cache/` jest teraz NAPRAWDE wspolny dla calego workspace,
+niezaleznie z ktorego czlonka odpalisz `virus` (`hackerc/`, `virus/`,
+`libs/core/`, `libs/std/` czy korzenia) - wczesniej kazdy z nich (majac
+WLASNY, poprawny `Virus.hk`) dostawal WLASNY, osobny `cache/` zamiast
+dzielic jeden z korzeniem, dokladnie tak jak `cargo` w workspace zawsze
+dzieli jeden `target/`. Patrz `virus/cmd/cache.hcs`.
 
 == Szybki start
 
@@ -156,7 +184,7 @@ do `cargo build` w workspace Cargo.
 # hackerc i virus sa binarkami natywnymi (self-hosted) - najprosciej
 # pobrac gotowe wydanie:
 curl -L --fail -o hackerc \
-  https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v0.3/hackerc
+  https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v0.4/hackerc
 chmod +x hackerc
 
 ./hackerc check docs/hello-world/Virus.hk
@@ -215,16 +243,40 @@ Rusta. Pierwsze wydanie publikowane binarnie na GitHub Releases pod
 "Kolorowe CLI i pasek postepu" wyzej.
 
 | `0.3`
-| *Ta wersja.* Przeprojektowane FFI: stare, jedno-funkcyjne
+| *Przeprojektowane FFI.* Stare, jedno-funkcyjne
 `extern "lib" fun nazwa(...)` zastapione przez
 `get <extern:sciezka> use <static\|dynamic>` + `region [ ... ]`
 (dowolnie wiele sygnatur naraz, powiazanych z jedna biblioteka).
 Dolozono `get <c:nazwa>`/`get <cpp:nazwa>` (zaleznosci C/C++ budowane
 przez crate `cc`) oraz `native {C++} [ ... ]` (analog
 `native {JavaScript}`, ale kompilowany build-time zamiast
-interpretowany). Mechanizm `using <wersja>` pobiera teraz `v0.3`
-(patrz "Szybki start" wyzej). Pelny opis nowej skladni:
-`docs/SYNTAX.md`, sekcja "FFI: extern/region/c/cpp".
+interpretowany). Mechanizm `using <wersja>` pobieral wtedy `v0.3`.
+Pelny opis skladni: `docs/SYNTAX.md`, sekcja "FFI:
+extern/region/c/cpp".
+
+| `0.4`
+| *Ta wersja. Workspace + porzadki + WASM.* Szesc zmian:
+`get <work:czlonek[::plik]>` i `include <work:czlonek[::plik]>` -
+ogolny import/statyczne linkowanie DOWOLNEGO czlonka
+`[workspace] -> members` (nie tylko `core`/`std`), analog Rustowego
+`use nazwa_membera::...;`; sekcja `[build]` w `Virus.hk` **calkowicie
+usunieta** - plik wejsciowy jest teraz zawsze `cmd/main.hcs`, bez
+zadnej konfiguracji (przy okazji naprawiono realny blad: `[build]
+-> entry => cli.hcs` w `hackerc/Virus.hk` nigdy nie wskazywalo na
+istniejacy plik, wiec `hackerc` byl po cichu pomijany przy `virus
+build` na calym workspace - plik przemianowany na `cmd/main.hcs`);
+naprawiony `cache/` - wczesniej kazdy czlonek workspace majacy
+WLASNY `Virus.hk` (`hackerc/`, `virus/`, `libs/core/`, `libs/std/`)
+dostawal WLASNY, osobny katalog `cache/` zamiast dzielic jeden
+wspolny z korzeniem, jak `cargo` dzieli jeden `target/` w calym
+workspace; oraz `@wasm_export` + `virus build --wasm` - pierwszy
+dzialajacy pipeline do WASM, uzyty w nowym `playground/`
+(`playground/cmd/main.hcs` linkuje statycznie caly checker `hackerc`a
+przez `include <work:hackerc::...>`, `playground/web/` to gotowa
+strona w stylu Rust Playground). Mechanizm `using <wersja>` pobiera
+teraz `v0.4`. Pelny opis: `docs/SYNTAX.md` (sekcje "`get <work:...>`",
+"`include <work:...>`", "`@wasm_export`") i `docs/ROADMAP.md` (sekcja
+"Zrobione w 0.4").
 |===
 
 == Status projektu
@@ -246,11 +298,13 @@ wielokrotnym uzyciu tej samej zmiennej).
 Pelna, szczera lista tego co jeszcze brakuje - braki jezykowe
 bootstrapu (iteracja po `Dict`, `Set`, numery linii w AST, prawdziwe
 `ParseError`, `log()` dla struct/enum), uproszczenia per-plik
-(`codegen.hcs`/`typeinfer.hcs`/`project.hcs`/`cli.hcs`/
+(`codegen.hcs`/`typeinfer.hcs`/`project.hcs`/`main.hcs`/
 `formatter.hcs`/`parser.hcs`), luki w `libs/std` poza rdzeniem, oraz
-gapy w swiezo dodanym FFI 0.3 (kompilacja wlasnego zrodla `.c`/`.cpp`
-z projektu przez `cc` zamiast linkowania systemowej biblioteki dla
-`get <c:...>`/`get <cpp:...>`) - jest w *`docs/ROADMAP.md`*.
+gapy w FFI 0.3/0.4 (kompilacja wlasnego zrodla `.c`/`.cpp` z projektu
+przez `cc` zamiast linkowania systemowej biblioteki dla
+`get <c:...>`/`get <cpp:...>`) - jest w *`docs/ROADMAP.md`*, razem z
+lista tego, co juz naprawiono w `0.4` (wspolny `cache/` dla
+workspace, usuniecie `[build]`, `get <work:...>`).
 
 == Dokumentacja
 
