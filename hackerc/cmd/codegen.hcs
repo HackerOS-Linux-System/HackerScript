@@ -138,7 +138,17 @@ fun str_replace_dash(s: Str) -> Str [
     let n = s.len()
     while i < n [
         let c = s.char_at(i)
-        if c == "-" [
+        !! NAPRAWIONY BUG (ta runda, znaleziony realnym buildem, ten
+        !! sam co przy `replace_dash` w project.hcs - patrz
+        !! docs/ROADMAP.md) - `name` w `get <std:podkatalog/plik>`
+        !! moze zawierac "/". Ta funkcja jest ZDUBLOWANA kopia
+        !! `project.hcs::replace_dash` (codegen.hcs nie moze
+        !! `include <project>` bez cyklu - `project.hcs` juz
+        !! `include <codegen>`), wiec MUSI byc naprawiona ODDZIELNIE -
+        !! `flat_module_name` w OBU plikach musi produkowac
+        !! IDENTYCZNE nazwy modulow, inaczej `use crate::X::{...}`
+        !! (tu) i `mod X;`/nazwa pliku (project.hcs) sie rozjada.
+        if c == "-" or c == "/" [
             out = out + "_"
         ] else [
             out = out + c
@@ -625,21 +635,117 @@ fun char_indexed_str_params(body: List<Stmt>, str_param_names: List<Str>, sigs: 
         ]
         hi = hi + 1
     ]
+    !! NAPRAWIONY BUG (ta runda, znaleziony realnym buildem - patrz
+    !! docs/ROADMAP.md) - `__hks_chars_X` to Vec<char> zbudowany RAZ,
+    !! na poczatku funkcji, z WARTOSCI X W TYM MOMENCIE. Jesli X jest
+    !! zmienna LOKALNA (nie parametrem) i zostaje PRZYPISANA PONOWNIE
+    !! (`AssignStmt`) gdziekolwiek w ciele funkcji, KAZDE kolejne
+    !! `.slice()`/`.char_at()` na X nadal czyta ze STAREGO cache -
+    !! dajac cichy zly wynik zamiast bledu kompilacji (zaobserwowane w
+    !! `virus/cmd/build.hcs::vira_split_dir_libname`: `name =
+    !! name.slice(3, ...)` [usuniecie "lib"], potem `name =
+    !! name.slice(0, dot)` [obciecie do kropki] - DRUGIE `.slice()`
+    !! po cichu indeksowalo w ORYGINALNA, nieobcieta nazwe, dajac np.
+    !! "libhe" zamiast "hello" dla "libhello.a"). Naprawa: zmienne
+    !! bedace celem `AssignStmt` GDZIEKOLWIEK w ciele NIGDY nie trafiaja
+    !! do cachowanego zbioru - dostaja bezpieczna, zawsze-swieza sciezke
+    !! `.chars().skip().take().collect()` (patrz `gen_call`), kosztem
+    !! wydajnosci (ten sam kompromis co juz istnial dla parametrow NIE
+    !! w `char_cache_params` - `char_indexed_str_params` to zawsze
+    !! optymalizacja typu "bezpiecznie pomin, gdy niepewne", nie
+    !! wymog poprawnosci).
+    let assigned_hits = collect_assigned_names(body)
+    let assigned: Dict<Str, Bool> = dict()
+    let ai = 0
+    let an = assigned_hits.len()
+    while ai < an [
+        assigned.insert(assigned_hits[ai].clone(), true)
+        ai = ai + 1
+    ]
     let out: Dict<Str, Bool> = dict()
     let j = 0
     let n = str_names.len()
     while j < n [
         let pname = str_names[j].clone()
-        match counts.fetch(pname.clone()) [
-            Some(c2) -> [
-                if c2 >= 2 [
-                    out.insert(pname, true)
+        if not assigned.contains(pname.clone()) [
+            match counts.fetch(pname.clone()) [
+                Some(c2) -> [
+                    if c2 >= 2 [
+                        out.insert(pname, true)
+                    ]
                 ]
-            ]
-            None -> [
+                None -> [
+                ]
             ]
         ]
         j = j + 1
+    ]
+    end out
+]
+
+!!! Odpowiednik `walk_stmts_for_char_indexing` (ta sama rekurencyjna
+!!! struktura po wszystkich wariantach `Stmt`), ale zbiera nazwy
+!!! zmiennych bedacych CELEM `AssignStmt` (`x = ...`), a nie uzyciem
+!!! `.char_at`/`.slice` - patrz naprawa w `char_indexed_str_params`
+!!! wyzej.
+fun collect_assigned_names(body: List<Stmt>) -> List<Str> [
+    let out: List<Str> = []
+    let i = 0
+    let n = body.len()
+    while i < n [
+        out.extend(collect_assigned_names_stmt(body[i].clone()))
+        i = i + 1
+    ]
+    end out
+]
+
+fun collect_assigned_names_stmt(node: Stmt) -> List<Str> [
+    let out: List<Str> = []
+    let s = node.clone()
+    match s [
+        AssignStmt(target, op, value) -> [
+            let nm = expr_as_ident_name(target)
+            if nm != "" [
+                out.push(nm)
+            ]
+        ]
+        IfStmt(cond, body2, elifs, else_body) -> [
+            out.extend(collect_assigned_names(body2))
+            let i2 = 0
+            let n2 = elifs.len()
+            while i2 < n2 [
+                let arm = elifs[i2].clone()
+                out.extend(collect_assigned_names(arm.body))
+                i2 = i2 + 1
+            ]
+            match else_body [
+                Some(eb) -> [
+                    out.extend(collect_assigned_names(eb))
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        WhileStmt(cond, body3) -> [
+            out.extend(collect_assigned_names(body3))
+        ]
+        ForStmt(var, iterable, body4) -> [
+            out.extend(collect_assigned_names(body4))
+        ]
+        ManualBlock(body5) -> [
+            out.extend(collect_assigned_names(body5))
+        ]
+        MatchStmt(subject, arms) -> [
+            let i3 = 0
+            let n3 = arms.len()
+            while i3 < n3 [
+                let arm2 = arms[i3].clone()
+                out.extend(collect_assigned_names(arm2.body))
+                i3 = i3 + 1
+            ]
+        ]
+        _ -> [
+        ]
     ]
     end out
 ]
@@ -1611,7 +1717,27 @@ struct CodeGen [
     !! `wasm-bindgen = "0.2"` do Cargo.toml (patrz
     !! `cargo_toml_text()`/`insert_mod_declarations()` w project.hcs).
     wasm_export_names: Dict<Str, Bool>,
-    needs_wasm_bindgen: Bool
+    needs_wasm_bindgen: Bool,
+    !! ROZBUDOWA (ta runda, patrz docs/FAST_DIRECT.md) - `fast direct
+    !! {backend} [ ... ]`, parytet z `direct_blocks`/`native_engines`
+    !! wyzej. Dwa osobne Dict (nie jeden struct) z tego samego powodu co
+    !! `native_blocks`/`native_engines` - brak tupli w tym bootstrapie.
+    fast_direct_blocks: Dict<Str, Str>,
+    fast_direct_backends: Dict<Str, Str>,
+    !! ROZBUDOWA (ta runda, patrz docs/JAVA.md) - `native {java}
+    !! [ ... ]`, parytet z `native_cpp_sources`/`native_cpp_order`
+    !! wyzej (Dict+List zamiast Dict samego w sobie - brak `.keys()`,
+    !! patrz "Ograniczenia" w typeinfer.hcs). Klucz to nazwa
+    !! SYNTETYCZNEJ klasy Javy (`HksNativeJavaN`), wartosc to CALY jej
+    !! tekst zrodlowy `.java` (nie sam surowy blok - patrz gen_native).
+    needs_native_java: Bool,
+    native_java_sources: Dict<Str, Str>,
+    native_java_order: List<Str>,
+    !! `get <java:sciezka.jar>` - wpisy classpath (kolejnosc zachowana,
+    !! duplikaty dozwolone - `virus build` sam je odduplikuje przy
+    !! skladaniu `-cp`) potrzebne PRZY KOMPILACJI `native {java}
+    !! [ ... ]` (javac -cp) I w runtime (`-Djava.class.path`).
+    java_classpath_entries: List<Str>
 ]
 
 impl CodeGen [
@@ -2137,6 +2263,35 @@ impl CodeGen [
         if ident_name == "read_file" and args.len() == 1 [
             end "std::fs::read_to_string(&" + self.gen_expr(args[0]) + ").map_err(|e| e.to_string())"
         ]
+        !! ROZBUDOWA (ta runda, patrz docs/LSP.md) - czytanie ZE STDIN,
+        !! potrzebne dla `hackerc lsp`/`virus lsp` (ramkowanie JSON-RPC:
+        !! naglowki linia po linii az do pustej linii, potem DOKLADNIE
+        !! `Content-Length` bajtow tresci). Oba dziela ten sam globalny
+        !! uchwyt `std::io::stdin()` (w Ruscie to jest bezpieczne -
+        !! wewnetrzny `BufReader` jest wspoldzielony przez `Mutex`
+        !! POMIEDZY kolejnymi `.lock()`, wiec kolejne wywolania
+        !! `read_stdin_line`/`read_stdin_exact` w tym samym procesie
+        !! NIE gubia/nie duplikuja bajtow - to jedyny powod, dla
+        !! ktorego to w ogole dziala poprawnie jako dwie OSOBNE funkcje
+        !! wbudowane zamiast jednego uchwytu przekazywanego jawnie).
+        if ident_name == "read_stdin_line" and args.len() == 0 [
+            end "(|| -> Option<String> {\n        use std::io::BufRead;\n        let mut __hks_line = String::new();\n        let __hks_n = std::io::stdin().lock().read_line(&mut __hks_line).unwrap_or(0);\n        if __hks_n == 0 {\n            return None;\n        }\n        if __hks_line.ends_with('\\n') {\n            __hks_line.pop();\n            if __hks_line.ends_with('\\r') {\n                __hks_line.pop();\n            }\n        }\n        Some(__hks_line)\n    })()"
+        ]
+        if ident_name == "read_stdin_exact" and args.len() == 1 [
+            end "(|| -> Option<String> {\n        use std::io::Read;\n        let __hks_n = (" + self.gen_expr(args[0]) + ") as usize;\n        let mut __hks_buf = vec![0u8; __hks_n];\n        match std::io::stdin().lock().read_exact(&mut __hks_buf) {\n            Ok(_) => Some(String::from_utf8_lossy(&__hks_buf).to_string()),\n            Err(_) => None,\n        }\n    })()"
+        ]
+        !! `write_stdout(s)` - patrz docs/LSP.md - zapis DOKLADNYCH
+        !! bajtow `s` na stdout, BEZ dopisanego "\n" (w odroznieniu od
+        !! `log`/`println!`) i z jawnym `flush()` - w LSP po stdio
+        !! ramka odpowiedzi MUSI miec dokladnie tyle bajtow, ile
+        !! zapowiada jej wlasny naglowek `Content-Length`, a proces
+        !! podlaczony przez pipe (nie terminal) ma w Ruscie stdout
+        !! PELNI BUFOROWANE (nie liniowo), wiec bez recznego `flush()`
+        !! druga strona (edytor) nie dostalaby bajtow wcale, dopoki
+        !! bufor by sie nie zapelnil albo proces nie zakonczyl.
+        if ident_name == "write_stdout" and args.len() == 1 [
+            end "{\n        use std::io::Write;\n        print!(\"{}\", " + self.gen_expr(args[0]) + ");\n        let _ = std::io::stdout().flush();\n    }"
+        ]
         if ident_name == "args" and args.len() == 0 [
             end "std::env::args().skip(1).collect::<Vec<String>>()"
         ]
@@ -2203,6 +2358,31 @@ impl CodeGen [
             let program_expr2 = self.gen_expr(args[0])
             let args_expr2 = self.gen_expr(args[1])
             end "(|| -> String {\n        let __hks_cmd_out2 = match std::process::Command::new(&" + program_expr2 + ")\n            .args(" + args_expr2 + ")\n            .output() {\n            Ok(o) => o,\n            Err(e) => return e.to_string(),\n        };\n        let mut __hks_combined = String::from_utf8_lossy(&__hks_cmd_out2.stdout).to_string();\n        __hks_combined.push_str(&String::from_utf8_lossy(&__hks_cmd_out2.stderr));\n        __hks_combined\n    })()"
+        ]
+        !! ROZBUDOWA (ta runda, patrz docs/VIRUS.md - "virus lsp") -
+        !! `run_command_inherit(program, argumenty) -> Int` -
+        !! `Stdio::inherit()` na WSZYSTKICH trzech strumieniach dziecka
+        !! (w odroznieniu od `run_command`/`run_command_combined`
+        !! wyzej, ktore uzywaja `.output()` i WIDLY buforuja caly
+        !! stdout/stderr w pamieci, oddajac go dopiero PO zakonczeniu
+        !! procesu) - dziecko pisze/czyta BEZPOSREDNIO do/z
+        !! prawdziwego stdin/stdout/stderr rodzica, bez posrednictwa.
+        !! Zwraca kod wyjscia (-1, jesli procesu w ogole nie dalo sie
+        !! uruchomic - np. brak pliku).
+        if ident_name == "run_command_inherit" and args.len() == 2 [
+            let program_expr3 = self.gen_expr(args[0])
+            let args_expr3 = self.gen_expr(args[1])
+            end "(|| -> i64 {\n        match std::process::Command::new(&" + program_expr3 + ")\n            .args(" + args_expr3 + ")\n            .stdin(std::process::Stdio::inherit())\n            .stdout(std::process::Stdio::inherit())\n            .stderr(std::process::Stdio::inherit())\n            .status() {\n            Ok(s) => s.code().unwrap_or(-1) as i64,\n            Err(_) => -1,\n        }\n    })()"
+        ]
+        !! ROZBUDOWA (ta runda, patrz docs/ROADMAP.md sekcja 4) -
+        !! `sha256_hex(tekst)` - skrot SHA-256 tekstu, jako szesnastkowy
+        !! Str. `sha2`/`hex` sa juz sprawdzonymi zaleznosciami tego
+        !! bootstrapu (`hlib.hcs` uzywa ich od dawna, przez `native
+        !! {Rust}(...)` - to jest PIERWSZE miejsce, gdzie ten sam crate
+        !! trafia do zwyklego builtina zamiast recznie doklejanego
+        !! bloku).
+        if ident_name == "sha256_hex" and args.len() == 1 [
+            end "{\n        let mut __hks_hasher = Sha256::new();\n        __hks_hasher.update((" + self.gen_expr(args[0]) + ").as_bytes());\n        hex::encode(__hks_hasher.finalize())\n    }"
         ]
         if ident_name == "http_get" and args.len() == 1 [
             !!! http_get(url) -> Result<Str, Str> - get <std:http>.
@@ -2305,6 +2485,20 @@ impl CodeGen [
             ]
         ]
 
+        !! ROZBUDOWA (ta runda, naprawa regresji) - ten check MUSI byc
+        !! PRZED `self.sigs.functions.fetch(...)` nizej, nie po nim
+        !! (jak bylo wczesniej) - odkad `region` jest wpisywane do
+        !! `self.sigs.functions` (dla arity-checkow w typecheck, patrz
+        !! `typeinfer.hcs::collect_signatures`), funkcja z `region`
+        !! JEST TEZ znajdowana przez `self.sigs.functions.fetch(...)`
+        !! nizej - ktory (bez tego checku najpierw) generowalby
+        !! wywolanie BEZ `unsafe { ... }`, co `rustc` odrzuca dla
+        !! `extern "C"` (E0133). Znalezione i naprawione realnym
+        !! buildem w tej rundzie (patrz docs/ROADMAP.md).
+        if ident_name != "" and self.extern_fn_names.contains(ident_name.clone()) [
+            end "unsafe { " + ident_name + "(" + self.gen_args_list(args) + ") }"
+        ]
+
         if ident_name != "" and self.sigs.structs.contains(ident_name.clone()) [
             end ident_name + "::new(" + self.gen_args_list(args) + ")"
         ]
@@ -2321,7 +2515,11 @@ impl CodeGen [
         if shape.is_method_call [
             end shape.target_rendered + "." + shape.method_name + "(" + self.gen_args_list(args) + ")"
         ]
-        !! DODANE - wywolanie funkcji zadeklarowanej w `region [ ... ]`
+        !! Ten drugi check ponizej jest teraz NIEOSIAGALNY dla funkcji z
+        !! `region` (zawsze zlapane przez check wyzej, PRZED
+        !! `self.sigs.functions.fetch`) - zostaje jako zabezpieczenie
+        !! (defense in depth), gdyby jakas przyszla zmiana usuniela
+        !! wpis z `self.sigs.functions` dla ktoregos backendu FFI.
         !! (patrz `gen_region()`) - `extern "C"` w Ruscie jest zawsze
         !! `unsafe fn`, wiec samo `nazwa(args)` by sie nie skompilowalo.
         !! `region` nie jest wpisywane do `self.sigs.functions` (ten
@@ -2810,6 +3008,59 @@ impl CodeGen [
         self.emit("}")
     ]
 
+    !!! `fast direct {backend}(...)` - patrz docs/FAST_DIRECT.md.
+    !!! UCZCIWIE (Etap pilotazowy, tylko 2 z 19 backendow z tego
+    !!! dokumentu): prawdziwe statyczne linkowanie PyPy (albo
+    !!! specjalizowanych silnikow typu `numba`/`jax`/...) NIE JEST tu
+    !!! zaimplementowane - nie istnieje sprawdzona, dajaca sie tu
+    !!! zweryfikowac biblioteka do statycznego osadzenia PyPy w
+    !!! binarce Rust. Zamiast UDAWAC dzialajaca implementacje:
+    !!!   - `{numpy}` DZIALA NAPRAWDE, ale jako CIENKI ALIAS na ten sam
+    !!!     mechanizm co zwykle `direct(...)` (PyO3 + CPython,
+    !!!     `Python::with_gil`/`py.run_bound`) - "fast" w nazwie NIE
+    !!!     oznacza dzis zadnej realnej roznicy wydajnosciowej wzgledem
+    !!!     `direct(...)`; to jedynie osobna, WALIDOWANA skladnia,
+    !!!     przygotowana pod przyszla, prawdziwa specjalizacje per
+    !!!     backend (patrz plan grup w docs/FAST_DIRECT.md).
+    !!!   - Pozostale 18 backendow (w tym `{pypy}`) dają BLAD KOMPILACJI
+    !!!     Rusta z jasnym komunikatem (`compile_error!`), zamiast po
+    !!!     cichu dzialac inaczej niz deklaruje nazwa backendu - patrz
+    !!!     `docs/ROADMAP.md`, sekcja 8, gdzie ten stan jest wprost
+    !!!     nazwany.
+    fun gen_fast_direct(self, idx_text: Str) [
+        let raw = ""
+        match self.fast_direct_blocks.fetch(idx_text) [
+            Some(r) -> [
+                raw = r
+            ]
+            None -> [
+            ]
+        ]
+        let backend = ""
+        match self.fast_direct_backends.fetch(idx_text) [
+            Some(b) -> [
+                backend = b
+            ]
+            None -> [
+            ]
+        ]
+        if backend == "numpy" [
+            self.needs_pyo3 = true
+            self.emit("{")
+            self.indent = self.indent + 1
+            self.emit("Python::with_gil(|py| -> PyResult<()> {")
+            self.indent = self.indent + 1
+            self.emit("py.run_bound(" + python_raw_string(raw) + ", None, None)?;")
+            self.emit("Ok(())")
+            self.indent = self.indent - 1
+            self.emit("}).expect(\"fast direct {numpy} block failed\");")
+            self.indent = self.indent - 1
+            self.emit("}")
+            end
+        ]
+        self.emit("compile_error!(" + rust_string_literal("fast direct {" + backend + "} nie ma jeszcze prawdziwej implementacji w hackerc (tylko backend numpy dziala dzis naprawde, jako alias zwyklego direct(...) - patrz docs/FAST_DIRECT.md i docs/ROADMAP.md sekcja 8) - uzyj zwyklego direct(...) (CPython przez PyO3) zamiast fast direct {" + backend + "}.") + ");")
+    ]
+
     !!! `native` `{Silnik}` `[ ... ]` - analog `gen_direct`, ale dla
     !!! surowego kodu w innym jezyku niz Python. Do wersji 0.2: TYLKO
     !!! `JavaScript` (silnik: QuickJS przez `rquickjs`, statycznie
@@ -2887,6 +3138,42 @@ impl CodeGen [
         !!! wiec nie trzeba tu niczego dodatkowo sygnalizowac
         !!! (`needs_native_rust` nie istnieje - w odroznieniu od JS/C++
         !!! ten silnik nie potrzebuje wlasnej flagi/runtime).
+        !!! ROZBUDOWA (ta runda, patrz docs/JAVA.md) - `native {java}
+        !!! [ ... ]`: jak `{C++}` (kompilacja BUILD-TIME), ale
+        !!! URUCHAMIANE w EMBEDDED JVM w runtime (crate `jni`,
+        !!! `InitArgsBuilder`/`JavaVM::new`) zamiast bycia zlinkowanym
+        !!! wprost - Java (w odroznieniu od C/C++) nie ma pojecia
+        !!! "wolnostojacej funkcji `extern "C"`" - kazdy kod Javy MUSI
+        !!! byc CIALEM METODY jakiejs klasy. Surowy tekst bloku staje
+        !!! sie wiec cialem statycznej metody `run()` SYNTETYCZNEJ
+        !!! klasy publicznej `HksNativeJavaN` - `virus build` kompiluje
+        !!! ja `javac`iem do `java_classes/` (patrz
+        !!! `virus/cmd/build.hcs`), a ten kod w runtime laduje jedna,
+        !!! WSPOLNA (na caly PROCES - JNI pozwala na TYLKO JEDNA JVM na
+        !!! proces) embedded JVM przez `hks_get_jvm()` (funkcja pomocnicza
+        !!! emitowana raz w naglowku pliku, patrz transpiler.hcs) i
+        !!! wywoluje `HksNativeJavaN.run()`.
+        !!! UCZCIWIE (ograniczenie tej rundy, patrz docs/ROADMAP.md) -
+        !!! `hks_get_jvm()` jest emitowane RAZ NA PLIK `.hcs` (jak
+        !!! `needs_pyo3`), wiec bloki `native {java}(...)` w ROZNYCH
+        !!! plikach TEGO SAMEGO projektu moga probowac stworzyc DRUGA
+        !!! JVM (JNI to odrzuci w runtime) - bezpieczne SA bloki w
+        !!! JEDNYM pliku.
+        if engine == "java" [
+            self.needs_native_java = true
+            let class_name = "HksNativeJava" + idx_text
+            let java_src = "public class " + class_name + " {\n    public static void run() throws Exception {\n" + raw + "\n    }\n}\n"
+            self.native_java_sources.insert(class_name.clone(), java_src)
+            self.native_java_order.push(class_name.clone())
+            self.emit("{")
+            self.indent = self.indent + 1
+            self.emit("let __hks_jvm = hks_get_jvm();")
+            self.emit("let mut __hks_jenv = __hks_jvm.attach_current_thread().expect(\"nie mozna podlaczyc watku do embedded JVM (native java)\");")
+            self.emit("__hks_jenv.call_static_method(\"" + class_name + "\", \"run\", \"()V\", &[]).expect(\"blok native java (" + class_name + ") zakonczyl sie bledem\");")
+            self.indent = self.indent - 1
+            self.emit("}")
+            end
+        ]
         if engine == "Rust" [
             self.emit("{")
             self.indent = self.indent + 1
@@ -2997,7 +3284,12 @@ impl CodeGen [
             end
         ]
         if engine != "JavaScript" [
-            self.emit("// native {" + engine + "} [ ... ] - nieobslugiwany silnik (dzis dostepne: \"JavaScript\", \"C++\", \"Rust\", \"H#\", \"Hacker Lang\"), pomijam blok")
+            !! Rozbite na dwa literaly ("native " osobno od "{") -
+            !! patrz identyczna naprawa i wyjasnienie w
+            !! `formatter.hcs::fmt_fast_direct_block` (ten sam
+            !! mechanizm samo-uszkodzenia dla `native {silnik}(...)`,
+            !! nie tylko dla `fast direct {...}`).
+            self.emit("// native " + "{" + engine + "}" + " [ ... ] - nieobslugiwany silnik (dzis dostepne: \"JavaScript\", \"C++\", \"Rust\", \"H#\", \"Hacker Lang\", \"java\"), pomijam blok")
             end
         ]
         self.needs_native_js = true
@@ -3110,6 +3402,15 @@ impl CodeGen [
         if shape.is_call and shape.ident_name == "__native__" and shape.args.len() == 1 [
             let idx_text = self.expr_number_lit_value(shape.args[0].clone())
             self.gen_native(idx_text)
+            end
+        ]
+        !! ROZBUDOWA (ta runda, patrz docs/FAST_DIRECT.md) - `fast
+        !! direct {backend} [ ... ]` -> `__fast_direct__(N)` (patrz
+        !! `transpiler.hcs::extract_fast_direct_blocks`), dokladnie
+        !! rownolegle do `__direct__`/`__native__` wyzej.
+        if shape.is_call and shape.ident_name == "__fast_direct__" and shape.args.len() == 1 [
+            let idx_text = self.expr_number_lit_value(shape.args[0].clone())
+            self.gen_fast_direct(idx_text)
             end
         ]
         if shape.is_call and shape.ident_name == "__sandbox__" and shape.args.len() == 1 [
@@ -3819,7 +4120,7 @@ impl CodeGen [
         !!! samego crate'a (patrz Discovery.resolve), wiec tu trzeba
         !!! juz tylko wyemitowac `use crate::<flat_module_name>::*;`
         !!! (albo `::{a, b};` dla `get <work:x> import <a::b>`).
-        if source == "std" or source == "core" or source == "selfhost" or source == "virus" or source == "vira" or source == "work" [
+        if source == "std" or source == "core" or source == "selfhost" or source == "virus" or source == "vira" or source == "work" or source == "hlib" [
             let module = flat_module_name(source, name.clone(), version)
             if details.len() > 0 [
                 self.emit("use crate::" + module + "::{" + self.join_binds(details) + "};")
@@ -3911,6 +4212,23 @@ impl CodeGen [
             self.emit("// get <" + source + ":" + name + "> - zaleznosc " + lang_label + ", kompilowana/linkowana przez 'virus build' (crate 'cc'); sygnatury importuj osobnym 'get <extern:" + name + "> use <static>' + 'region [ ... ]'")
             end
         ]
+        !! ROZBUDOWA (ta runda, patrz docs/JAVA.md) - `get <java:
+        !! sciezka.jar>`: dopisuje `sciezka.jar` do classpath uzywanego
+        !! PRZY KOMPILACJI (`javac -cp`) i w RUNTIME
+        !! (`-Djava.class.path`) dla `native {java}(...)` blokow w TYM
+        !! SAMYM pliku - w odroznieniu od `c`/`cpp` (ktore linkuja
+        !! SYSTEMOWA biblioteke po NAZWIE), tu `name` to zawsze SCIEZKA
+        !! do konkretnego pliku `.jar` (Java nie ma odpowiednika
+        !! "systemowej biblioteki po nazwie" - classpath to zawsze
+        !! jawne pliki/katalogi). Samo `get <java:...>` NIE tworzy
+        !! zadnych wywolywalnych sygnatur - do wywolywania Javy sluzy
+        !! WYLACZNIE `native {java}(...)` (kod Javy, nie deklaracje
+        !! FFI jak `region` dla C/C++).
+        if source == "java" [
+            self.java_classpath_entries.push(name.clone())
+            self.emit("// get <java:" + name + "> - dopisane do classpath dla 'native {java}(...)' w tym pliku; kompilacja/pakowanie robi 'virus build' (patrz virus/cmd/build.hcs, docs/JAVA.md)")
+            end
+        ]
         self.emit("// get <" + source + ":" + name + "> - nieznane zrodlo, pomijam import")
     ]
 
@@ -3929,6 +4247,55 @@ impl CodeGen [
     !!! `virus build` (patrz `virus/cmd/build.hcs`), TAK JAK dla
     !!! starego `extern "lib" fun` - `region` samo w sobie generuje
     !!! TYLKO deklaracje FFI, nie linkowanie.
+!!! Wyciaga "gola" nazwe biblioteki z pelnej sciezki `get
+!!! <extern:sciezka>` (np. "native/libhello.a" -> "hello") - dla
+!!! atrybutu `#[link(name = "...")]` w `gen_region` nizej. Rust
+!!! ZAWSZE oczekuje tu SAMEJ NAZWY (bez katalogu, bez prefiksu "lib",
+!!! bez rozszerzenia) - katalog do wyszukiwania (`-L`) to osobna
+!!! sprawa, zalatwiana przez `virus build`
+!!! (`vira_split_dir_libname` w virus/cmd/build.hcs - TA SAMA logika,
+!!! zduplikowana tutaj recznie, bo codegen.hcs nie ma dostepu do kodu
+!!! virus/cmd/*.hcs, to osobna binarka). NAPRAWIONY BUG (ta runda,
+!!! znaleziony realnym buildem - patrz docs/ROADMAP.md): `gen_region`
+!!! wczesniej uzywal calej sciezki WPROST jako `#[link(name=...)]`,
+!!! co dawalo Rustowi/linkerowi doslownie zla nazwe biblioteki (np.
+!!! "native/libhello.a" zamiast "hello") - `cargo build` mimo to
+!!! przechodzil (Rust nie waliduje istnienia biblioteki na etapie
+!!! kompilacji), a dopiero LINKOWANIE koncowej binarki failowalo z
+!!! "cannot find -lnative/libhello.a".
+    fun extern_lib_link_name(self, path: Str) -> Str [
+    let last_slash = -1
+    let i = 0
+    let n = path.len()
+    while i < n [
+        if path.char_at(i) == "/" [
+            last_slash = i
+        ]
+        i = i + 1
+    ]
+    let filename = path
+    if last_slash >= 0 [
+        filename = path.slice(last_slash + 1, path.len())
+    ]
+    let name = filename
+    if name.len() >= 3 and name.slice(0, 3) == "lib" [
+        name = name.slice(3, name.len())
+    ]
+    let dot = -1
+    let j = 0
+    let m = name.len()
+    while j < m [
+        if dot == -1 and name.char_at(j) == "." [
+            dot = j
+        ]
+        j = j + 1
+    ]
+    if dot >= 0 [
+        name = name.slice(0, dot)
+    ]
+    end name
+]
+
     fun gen_region(self, sigs: List<ExternSig>) [
         let lib = "unknown_extern_lib"
         match self.pending_extern_lib.clone() [
@@ -3947,9 +4314,10 @@ impl CodeGen [
             None -> [
             ]
         ]
-        let link_attr = "#[link(name = \"" + lib + "\")]"
+        let link_name = self.extern_lib_link_name(lib)
+        let link_attr = "#[link(name = \"" + link_name + "\")]"
         if mode == "static" [
-            link_attr = "#[link(name = \"" + lib + "\", kind = \"static\")]"
+            link_attr = "#[link(name = \"" + link_name + "\", kind = \"static\")]"
         ]
         self.emit(link_attr)
         self.emit("extern \"C\" {")
@@ -4155,10 +4523,22 @@ impl CodeGen [
 !!! konstruktora bylo by niezgodnoscia typow (`&Signatures` vs
 !!! `Signatures`) - **bug znaleziony i naprawiony w TEJ sesji**, ten sam
 !!! rodzaj co `extra_variant_names.clone()` w typecheck.hcs (krok 5/N).
-fun new_codegen(sigs: Signatures, boxed_fields: Dict<Str, Str>, mut_params: Dict<Str, Bool>, method_mut_params: Dict<Str, Bool>, variant_arity: Dict<Str, Int>, no_default_structs: Dict<Str, Bool>, direct_blocks: Dict<Str, Str>, native_blocks: Dict<Str, Str>, native_engines: Dict<Str, Str>, sandbox_blocks: Dict<Str, Str>, hot_reload_names: Dict<Str, Bool>, wasm_export_names: Dict<Str, Bool>) -> CodeGen [
+fun new_codegen(sigs: Signatures, boxed_fields: Dict<Str, Str>, mut_params: Dict<Str, Bool>, method_mut_params: Dict<Str, Bool>, variant_arity: Dict<Str, Int>, no_default_structs: Dict<Str, Bool>, direct_blocks: Dict<Str, Str>, native_blocks: Dict<Str, Str>, native_engines: Dict<Str, Str>, sandbox_blocks: Dict<Str, Str>, hot_reload_names: Dict<Str, Bool>, wasm_export_names: Dict<Str, Bool>, fast_direct_blocks: Dict<Str, Str>, fast_direct_backends: Dict<Str, Str>, extra_extern_fn_names: List<Str>) -> CodeGen [
     let env_vars: Dict<Str, Option<TypeRef>> = dict()
     let empty_hr_bodies: Dict<Str, Str> = dict()
-    end CodeGen(sigs.clone(), env_vars, variant_arity, boxed_fields, method_mut_params, mut_params, [], none(), [], 0, no_default_structs, false, direct_blocks, false, native_blocks, native_engines, false, sandbox_blocks, hot_reload_names, false, empty_hr_bodies, [], false, dict(), none(), none(), false, dict(), [], dict(), wasm_export_names, false)
+    let gen = CodeGen(sigs.clone(), env_vars, variant_arity, boxed_fields, method_mut_params, mut_params, [], none(), [], 0, no_default_structs, false, direct_blocks, false, native_blocks, native_engines, false, sandbox_blocks, hot_reload_names, false, empty_hr_bodies, [], false, dict(), none(), none(), false, dict(), [], dict(), wasm_export_names, false, fast_direct_blocks, fast_direct_backends, false, dict(), [], [])
+    !! NAPRAWIONY BUG (ta runda) - patrz komentarz przy
+    !! `ExtraSignatures::extern_fn_names` w transpiler.hcs - bez tego,
+    !! wywolanie funkcji `extern "C"` zadeklarowanej w `region [ ... ]`
+    !! W INNYM PLIKU (np. przez `get <hlib:...>`/`get <work:...>`)
+    !! generowaloby kod bez `unsafe { ... }` (rustc: E0133).
+    let eei = 0
+    let een = extra_extern_fn_names.len()
+    while eei < een [
+        gen.extern_fn_names.insert(extra_extern_fn_names[eei].clone(), true)
+        eei = eei + 1
+    ]
+    end gen
 ]
 
 !!! Punkt wejscia - parytet z `CodeGen.gen_program()`. Liczy WSZYSTKIE
@@ -4192,7 +4572,7 @@ fun gen_program(prog: Program) -> List<Str> [
     let empty_sandbox_blocks: Dict<Str, Str> = dict()
     let empty_hot_reload_names: Dict<Str, Bool> = dict()
     let empty_wasm_export_names: Dict<Str, Bool> = dict()
-    let gen = new_codegen(sigs, info.boxed_fields, mparams, mmparams, varity, ndstructs, empty_direct_blocks, empty_native_blocks, empty_native_engines, empty_sandbox_blocks, empty_hot_reload_names, empty_wasm_export_names)
+    let gen = new_codegen(sigs, info.boxed_fields, mparams, mmparams, varity, ndstructs, empty_direct_blocks, empty_native_blocks, empty_native_engines, empty_sandbox_blocks, empty_hot_reload_names, empty_wasm_export_names, dict(), dict(), [])
 
     let i = 0
     let n = prog.body.len()
@@ -4260,7 +4640,7 @@ fun main() [
     let empty_dict7: Dict<Str, Str> = dict()
     let empty_hr_names: Dict<Str, Bool> = dict()
     let empty_hr_bodies2: Dict<Str, Str> = dict()
-    let gen = CodeGen(empty_sigs, empty_vars, empty_dict1, empty_dict2, empty_dict3, empty_dict4, [], some(TypeRef("Str", none(), none())), [], 0, empty_dict5, false, empty_dict6, false, empty_dict7, empty_dict7, false, empty_dict7, empty_hr_names, false, empty_hr_bodies2, [], false, dict(), none(), none(), false, dict(), [], dict())
+    let gen = CodeGen(empty_sigs, empty_vars, empty_dict1, empty_dict2, empty_dict3, empty_dict4, [], some(TypeRef("Str", none(), none())), [], 0, empty_dict5, false, empty_dict6, false, empty_dict7, empty_dict7, false, empty_dict7, empty_hr_names, false, empty_hr_bodies2, [], false, dict(), none(), none(), false, dict(), [], dict(), dict(), false, dict(), dict(), false, dict(), [], [])
     gen.gen_stmts(body)
 
     let i = 0
