@@ -7,13 +7,22 @@ struct RepairDiagnostic [
     suggestion: Str
 ]
 
-!!! Baza znanych kodow - parytet z tablica `DIAGNOSTICS` (Rust).
+!!! Baza znanych kodow - PARYTET 1:1 z tym, co realnie emituje
+!!! `hackerc/cmd/typecheck.hcs`/`diagnostics.hcs` (sprawdzone przez
+!!! `grep '"E[0-9]\{4\}"\|"W[0-9]\{4\}"' hackerc/cmd/*.hcs` -
+!!! wczesniejsza wersja tej tablicy mial E0001 opisany jako
+!!! "niezamkniety blok [ ... ]", co NIGDY nie bylo prawdziwym
+!!! znaczeniem E0001 w kompilatorze - poprawione tutaj razem z
+!!! dodaniem brakujacych E0005/E0011/W0002).
 fun repair_diagnostics() -> List<RepairDiagnostic> [
     end [
-        RepairDiagnostic("E0001", "niezamkniety blok [ ... ]", "Kazdy blok HackerScript otwarty przez '[' musi byc zamkniety przez ']'.", "Sprawdz czy na koncu funkcji/if/while/for jest brakujacy ']'."),
-        RepairDiagnostic("E0002", "brak `end` na koncu funkcji zwracajacej wartosc", "Funkcja z typem zwracanym (-> Typ) powinna konczyc sie `end <wyrazenie>`.", "Dodaj `end <wartosc>` przed zamknieciem bloku funkcji."),
-        RepairDiagnostic("W0001", "nieuzywana zmienna", "Zmienna zadeklarowana przez `let` nigdy nie jest odczytywana.", "Usun deklaracje albo poprzedz nazwe podkreslnikiem `_nazwa` (docelowo wspierane)."),
-        RepairDiagnostic("E0003", "nieznane zrodlo zaleznosci w `get <zrodlo:nazwa>`", "Obslugiwane zrodla to: pypi, crates, npm, jsr, std, core, selfhost, virus.", "Popraw prefiks zrodla w instrukcji `get`.")
+        RepairDiagnostic("E0001", "zla liczba argumentow w wywolaniu funkcji", "Funkcja zostala wywolana z inna liczba argumentow, niz deklaruje jej sygnatura (`typecheck.hcs::check_call`).", "Policz parametry w deklaracji `fun` i dopasuj liczbe argumentow w miejscu wywolania."),
+        RepairDiagnostic("E0002", "brak `end <wartosc>` w funkcji zwracajacej wartosc", "Funkcja z typem zwracanym (-> Typ) nigdzie w swoim ciele nie ma instrukcji `end <wyrazenie>` (`has_value_return`).", "Dodaj `end <wartosc>` na kazdej sciezce, ktora konczy funkcje (w tym w kazdej galezi `if`/`match`, jesli funkcja moze sie tam zakonczyc)."),
+        RepairDiagnostic("E0003", "nieznane zrodlo zaleznosci w `get <zrodlo:nazwa>`", "Obslugiwane zrodla (`is_known_get_source`): bit, bytes, c, core, cpp, crates, extern, hlib, jsr, npm, pypi, selfhost, std, vira, virus, work.", "Popraw prefiks zrodla w instrukcji `get` - najczesciej literowka (np. `phyp`/`pypi`)."),
+        RepairDiagnostic("E0005", "typ deklarowany zmiennej nie zgadza sie z typem przypisanej wartosci", "`let x: T = wyrazenie` - wywnioskowany typ `wyrazenie` rozni sie od jawnie podanego `T`.", "Popraw adnotacje typu albo przypisywana wartosc, tak zeby sie zgadzaly."),
+        RepairDiagnostic("E0011", "`?` uzyte w funkcji, ktora nie zwraca Result<T,E> ani Option<T>", "Operator `?` propaguje Err/None do OTACZAJACEJ funkcji - jej typ zwracany musi wiec byc `Result<...>` albo `Option<...>`.", "Zmien typ zwracany funkcji na `Result<...>`/`Option<...>`, albo obsluz blad recznie (`match`) zamiast `?`."),
+        RepairDiagnostic("W0001", "nieuzywana zmienna", "Zmienna zadeklarowana przez `let` nigdy nie jest odczytywana.", "Usun deklaracje albo poprzedz nazwe podkreslnikiem `_nazwa`, zeby wyciszyc ostrzezenie."),
+        RepairDiagnostic("W0002", "wywolanie nieznanej funkcji", "Nazwa wywolana jak funkcja nie jest ani wbudowana, ani zadeklarowana w tym pliku, ani znanym structem/wariantem/importem. Jesli pochodzi z `get <...>`, to znane ograniczenie bootstrapu (patrz docs/ROADMAP.md, sekcja 1) - typecheck nie widzi jeszcze sygnatur z importow spoza pliku.", "Sprawdz literowke w nazwie funkcji; jesli nazwa jest poprawna i pochodzi z importu, ostrzezenie mozna dzis bezpiecznie zignorowac.")
     ]
 ]
 
@@ -49,6 +58,73 @@ fun repair_lookup(code_upper: Str) -> Option<RepairDiagnostic> [
     end none()
 ]
 
+!!! Odleglosc edycyjna Levenshteina (klasyczne DP, dwa wiersze
+!!! zamiast pelnej macierzy) - uzywana WYLACZNIE do podpowiadania
+!!! najblizszego znanego kodu diagnostycznego, gdy podany kod nie
+!!! istnieje w bazie (patrz `repair_closest_code` nizej). Kody maja
+!!! stala dlugosc 5 (litera + 4 cyfry), wiec to celowo prosta
+!!! implementacja bez zadnych optymalizacji pamieciowych.
+fun repair_levenshtein(a: Str, b: Str) -> Int [
+    let la = a.len()
+    let lb = b.len()
+    let prev: List<Int> = []
+    let j = 0
+    while j <= lb [
+        prev.push(j)
+        j = j + 1
+    ]
+    let i = 0
+    while i < la [
+        let cur: List<Int> = [i + 1]
+        let bj = 0
+        while bj < lb [
+            let cost = 1
+            if a.char_at(i) == b.char_at(bj) [
+                cost = 0
+            ]
+            let del_cost = prev[bj + 1] + 1
+            let ins_cost = cur[bj] + 1
+            let sub_cost = prev[bj] + cost
+            let best = del_cost
+            if ins_cost < best [
+                best = ins_cost
+            ]
+            if sub_cost < best [
+                best = sub_cost
+            ]
+            cur.push(best)
+            bj = bj + 1
+        ]
+        prev = cur
+        i = i + 1
+    ]
+    end prev[lb]
+]
+
+!!! Najblizszy znany kod diagnostyczny dla `code_upper` NIEOBECNEGO w
+!!! bazie, o ile odleglosc Levenshteina <= 2 (np. "E0021" -> "E0011",
+!!! "E0O01" z literka zamiast zera -> "E0001") - inaczej `none()`.
+fun repair_closest_code(code_upper: Str) -> Option<Str> [
+    let diags = repair_diagnostics()
+    let best_code = ""
+    let best_dist = 3
+    let i = 0
+    let n = diags.len()
+    while i < n [
+        let d = diags[i].clone()
+        let dist = repair_levenshtein(code_upper.clone(), d.code.clone())
+        if dist < best_dist [
+            best_dist = dist
+            best_code = d.code.clone()
+        ]
+        i = i + 1
+    ]
+    if best_code.len() > 0 [
+        end some(best_code)
+    ]
+    end none()
+]
+
 !!! `true` = kod znaleziony i wyjasniony.
 fun cmd_repair_run(code: Str) -> Bool [
     let code_upper = repair_normalize_code(code.clone())
@@ -62,7 +138,14 @@ fun cmd_repair_run(code: Str) -> Bool [
         ]
         None -> [
             progress_error("nieznany kod diagnostyczny: " + code)
-            elog("brak wpisu dla " + code_upper + " w bazie diagnostyk - jesli to swiezy blad z hackerc, zglos go, zeby dodac go do `virus repair` (docs/ROADMAP.md)")
+            match repair_closest_code(code_upper.clone()) [
+                Some(closest) -> [
+                    elog("brak wpisu dla " + code_upper + " - czy chodzilo o " + closest + "? (`virus repair " + closest + "`)")
+                ]
+                None -> [
+                    elog("brak wpisu dla " + code_upper + " w bazie diagnostyk - jesli to swiezy blad z hackerc, zglos go, zeby dodac go do `virus repair` (docs/ROADMAP.md)")
+                ]
+            ]
             end false
         ]
     ]
