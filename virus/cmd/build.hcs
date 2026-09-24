@@ -2,9 +2,10 @@ include <cache>
 include <manifest>
 include <hackerc_bridge>
 include <progress>
-get <std:path> import <path_join::path_basename>
+get <std:path> import <path_join::path_basename::path_is_absolute>
 get <std:string> import <str_contains::str_starts_with::str_split::str_join::str_index_of::str_ends_with>
-get <std:fs> import <create_dir_ok>
+get <std:fs> import <create_dir_ok::list_dir_or_empty>
+get <std:process> import <command_succeeds::run_command_checked>
 
 !!! Warianty nazwane z prefiksem `Target*`, zeby nie kolidowaly z
 !!! nazwami wariantow innych modulow (patrz uwaga w json.hcs o
@@ -23,7 +24,15 @@ struct BuildOptions [
     !! jako entry point, ignorujac konwencyjny cmd/main.hcs (ZMIANA
     !! 0.4: dawniej "[build].entry z Virus.hk", usuniete - patrz
     !! find_cmd_entry() w manifest.hcs) - szybka iteracja.
-    single_file: Option<Str>
+    single_file: Option<Str>,
+    !! ROZBUDOWA (ta runda) - `virus build --bin <nazwa>` (patrz
+    !! `docs/VIRUS.md`, "Plan: multi-binarki na czlonka"). `none()`
+    !! (domyslne) = zbuduj `cmd/main.hcs` ORAZ wszystkie `cmd/bin/*.hcs`
+    !! (parytet z `cargo build` bez `--bin` w workspace z wieloma
+    !! `[[bin]]`). `some(nazwa)` = zbuduj TYLKO jedna binarke o tej
+    !! nazwie - albo glowna (`manifest.package.name`), albo jedna z
+    !! `cmd/bin/<nazwa>.hcs`.
+    bin_filter: Option<Str>
 ]
 
 fun build_target_name(t: BuildTarget) -> Str [
@@ -35,7 +44,7 @@ fun build_target_name(t: BuildTarget) -> Str [
             end "release"
         ]
         TargetLibrary -> [
-            end "library (.so/.rlib/.a)"
+            end "library (.rlib)"
         ]
         TargetWasm -> [
             end "wasm"
@@ -67,6 +76,42 @@ fun build_warn_missing_dependencies(cache: CacheDirs, manifest: Manifest) [
 
 !!! Krok 4-5 potoku (kompilacja + kopia binarki) - wspolny dla
 !!! `TargetDefault`/`TargetRelease` (rozniacych sie tylko `--release`).
+!!! ROZBUDOWA (ta runda, patrz docs/JAVA.md) - kopiuje CALY katalog
+!!! (rekurencyjnie) - `libs/std/lib/fs.hcs` nie ma takiej funkcji
+!!! (tylko `copy_file_ok` dla pojedynczych plikow), potrzebne do
+!!! skopiowania `crate_dir/java_classes/` obok finalnej binarki (patrz
+!!! `build_compile_and_copy` nizej) - `hks_get_jvm()` (transpiler.hcs)
+!!! szuka klas WZGLEDEM POLOZENIA BINARKI w runtime, wiec katalog MUSI
+!!! tam z nia pojechac. Brak `src` (nic do skopiowania, np. projekt
+!!! nie uzywa `native {java}(...)`) NIE jest bledem.
+fun copy_dir_recursive(src: Str, dest: Str) -> Result<Str, Str> [
+    if not dir_exists(src.clone()) [
+        end ok(dest)
+    ]
+    create_dir_ok(dest.clone())
+    let names = list_dir_or_empty(src.clone())
+    let i = 0
+    let n = names.len()
+    while i < n [
+        let name = names[i].clone()
+        let s = path_join(src.clone(), name.clone())
+        let d = path_join(dest.clone(), name.clone())
+        if dir_exists(s.clone()) [
+            copy_dir_recursive(s, d)?
+        ] else [
+            match copy_file(s.clone(), d.clone()) [
+                Ok(_v) -> [
+                ]
+                Err(e) -> [
+                    end err(d + ": " + e)
+                ]
+            ]
+        ]
+        i = i + 1
+    ]
+    end ok(dest)
+]
+
 fun build_compile_and_copy(cache: CacheDirs, crate_dir: Str, name: Str, release: Bool) -> Result<Str, Str> [
     progress_step(2, 2, "kompilacja (cargo build)")
     let built = hackerc_compile_crate(crate_dir, name, release)?
@@ -76,6 +121,105 @@ fun build_compile_and_copy(cache: CacheDirs, crate_dir: Str, name: Str, release:
         ]
         Err(e) -> [
             end err("nie mozna skopiowac zbudowanej binarki: " + e)
+        ]
+    ]
+    !! ROZBUDOWA (ta runda) - `java_classes/` (skompilowane `javac`iem
+    !! wyzej w `build_wire_extern_dependencies`) MUSI jechac OBOK
+    !! finalnej binarki - `hks_get_jvm()` w runtime szuka jej
+    !! wzgledem `env::current_exe()`.
+    copy_dir_recursive(path_join(crate_dir.clone(), "java_classes"), path_join(cache.build.clone(), "java_classes"))?
+    progress_success("zbudowano " + dest.clone())
+    end ok(dest)
+]
+
+!!! ROZBUDOWA (ta runda, patrz docs/JAVA.md) - `virus build --jar`:
+!!! pakuje `crate_dir/java_classes/*.class` (juz skompilowane `javac`iem
+!!! w `build_wire_extern_dependencies` WYZEJ, PRZED tym miejscem - ten
+!!! krok dziala niezaleznie od wybranego `Target*`) w PRZENOSNY `.jar`
+!!! przez narzedzie `jar` z JDK - do dystrybucji/ponownego uzycia przez
+!!! INNE projekty JVM (nie do uruchomienia samego w sobie -
+!!! `native {java}(...)` to Rust WOLAJACY Jave, nie odwrotnie, wiec ten
+!!! `.jar` nie ma `Main-Class` ani nie jest uruchamialny przez `java
+!!! -jar`).
+fun build_package_jar(cache: CacheDirs, crate_dir: Str, name: Str) -> Result<Str, Str> [
+    let classes_dir = path_join(crate_dir.clone(), "java_classes")
+    if not dir_exists(classes_dir.clone()) [
+        end err("`virus build --jar` - brak `native {java}(...)` blokow w tym projekcie (patrz docs/JAVA.md), wiec nie ma czego zapakowac do .jar - katalog " + classes_dir + " nie istnieje")
+    ]
+    if not command_succeeds("jar", ["--version"]) [
+        end err("`virus build --jar` wymaga narzedzia 'jar' z JDK - zainstaluj JDK (np. 'sudo apt install openjdk-21-jdk-headless' na Debian/Ubuntu) i sprobuj ponownie")
+    ]
+    let jar_dest = path_join(cache.build.clone(), name.clone() + ".jar")
+    run_command_checked("jar", ["--create", "--file", jar_dest.clone(), "-C", classes_dir.clone(), "."])?
+    progress_success("spakowano " + jar_dest.clone())
+    end ok(jar_dest)
+]
+
+!!! ROZBUDOWA (ta runda) - odpowiednik `build_compile_and_copy` wyzej,
+!!! dla `TargetLibrary` (`virus build --library`) - patrz
+!!! `hackerc_compile_crate_library` w `hackerc_bridge.hcs`.
+fun build_compile_library_and_copy(cache: CacheDirs, crate_dir: Str, name: Str, release: Bool) -> Result<Str, Str> [
+    progress_step(2, 2, "kompilacja biblioteki (cargo build --lib)")
+    let built = hackerc_compile_crate_library(crate_dir, name, release)?
+    let dest = path_join(cache.build, path_basename(built.clone()))
+    match copy_file(built, dest.clone()) [
+        Ok(_v) -> [
+        ]
+        Err(e) -> [
+            end err("nie mozna skopiowac zbudowanej biblioteki: " + e)
+        ]
+    ]
+    progress_success("zbudowano " + dest.clone())
+    end ok(dest)
+]
+
+!!! ROZBUDOWA (ta runda) - nazwy (bez ".hcs") wszystkich dodatkowych
+!!! binarek czlonka, czyli plikow pod `cmd/bin/*.hcs` (patrz
+!!! `docs/VIRUS.md`, "Plan: multi-binarki na czlonka") - pusta lista,
+!!! jesli katalog `cmd/bin/` nie istnieje (najczestszy przypadek -
+!!! wiekszosc czlonkow ma TYLKO `cmd/main.hcs`).
+fun list_extra_bin_stems(project_root: Str) -> List<Str> [
+    let bin_dir = path_join(manifest_source_dir(project_root), "bin")
+    let names = list_dir_or_empty(bin_dir)
+    let out: List<Str> = []
+    let i = 0
+    let n = names.len()
+    while i < n [
+        !! `let nm: Str = ...` (JAWNA adnotacja typu) - bez niej codegen
+        !! nie zna typu `nm` tutaj (ten sam gap co przy `match`-owych
+        !! bindingach, patrz komentarz w hackerc/cmd/lsp.hcs -
+        !! `.slice()` ponizej wymaga znanego typu Str).
+        let nm: Str = names[i].clone()
+        if str_ends_with(nm.clone(), ".hcs") [
+            out.push(nm.slice(0, nm.len() - 4))
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+!!! ROZBUDOWA (ta runda) - po tym, jak `cargo build` (wewnatrz
+!!! `build_compile_and_copy`, ktora kompiluje CALY crate, wiec i
+!!! wszystkie `[[bin]]` naraz) juz sie skonczylo, kopiuje artefakt
+!!! JEDNEJ dodatkowej binarki (`bin_name`) z `target/<profil>/` do
+!!! `cache/build/` - parytet z `build_compile_and_copy`, ale bez
+!!! ponownego wywolywania `cargo build` (juz zrobione raz dla calego
+!!! crate'a).
+fun build_copy_extra_bin(cache: CacheDirs, crate_dir: Str, bin_name: Str, release: Bool) -> Result<Str, Str> [
+    let profile_dir = "debug"
+    if release [
+        profile_dir = "release"
+    ]
+    let built = path_join(path_join(path_join(crate_dir, "target"), profile_dir), bin_name)
+    if not path_exists(built.clone()) [
+        end err("kompilacja (podobno) sie powiodla, ale nie znaleziono dodatkowej binarki " + built + " - sprawdz [[bin]] '" + bin_name + "' w wygenerowanym Cargo.toml")
+    ]
+    let dest = path_join(cache.build, bin_name.clone())
+    match copy_file(built, dest.clone()) [
+        Ok(_v) -> [
+        ]
+        Err(e) -> [
+            end err("nie mozna skopiowac dodatkowej binarki '" + bin_name + "': " + e)
         ]
     ]
     progress_success("zbudowano " + dest.clone())
@@ -153,6 +297,40 @@ fun workspace_member_buildable_entry(member_root: Str) -> Option<Str> [
     end find_cmd_entry(member_root)
 ]
 
+!!! ROZBUDOWA (ta runda) - odpowiednik `workspace_member_buildable_entry`
+!!! wyzej, ale dla czlonkow-BIBLIOTEK (`lib/mod.hcs`, np. `libs/core`,
+!!! `libs/std`) - w ODROZNIENIU od binarek, biblioteki w tym repo NIE
+!!! MAJA wlasnego `Virus.hk` (patrz `libs/core`/`libs/std` - tylko
+!!! `libs/Virus.hk` na poziomie wyzej), wiec ta funkcja swiadomie NIE
+!!! wymaga `Virus.hk` w `member_root` - tylko obecnosci `lib/mod.hcs`.
+fun workspace_member_lib_entry(member_root: Str) -> Option<Str> [
+    let entry = path_join(path_join(member_root.clone(), "lib"), "mod.hcs")
+    if path_exists(entry.clone()) [
+        end some(entry)
+    ]
+    end none()
+]
+
+!!! ROZBUDOWA (ta runda) - buduje JEDNEGO czlonka-biblioteke jako
+!!! `.rlib` (patrz `workspace_member_lib_entry` wyzej), UZYWAJAC
+!!! WSPOLNEGO `cache`/`hackerc_bin` przekazanego z
+!!! `cmd_build_workspace_run` - w odroznieniu od czlonkow-binarek
+!!! (budowanych przez pelny, rekurencyjny `cmd_build_run` na WLASNYM
+!!! `Virus.hk` czlonka), czlonek-biblioteka nie ma wlasnego manifestu,
+!!! wiec nie ma jak przez niego przejsc - ten potok jest wiec
+!!! swiadomie UPROSZCZONY (pomija np. `build_wire_extern_dependencies`,
+!!! bo biblioteki tego workspace dzis nie maja wlasnych zaleznosci
+!!! natywnych) wzgledem pelnego `cmd_build_run`.
+fun cmd_build_workspace_library_member(cache: CacheDirs, hackerc_bin: Str, member_name: Str, lib_entry: Str) -> Result<Str, Str> [
+    let crate_name = path_basename(member_name.clone())
+    let crate_dir = path_join(cache.build.clone(), "crate-" + crate_name)
+    if dir_exists(crate_dir.clone()) [
+        remove_dir_all(crate_dir.clone())
+    ]
+    hackerc_build_crate_library(hackerc_bin, lib_entry, crate_dir.clone(), crate_name.clone())?
+    end build_compile_library_and_copy(cache, crate_dir, crate_name, false)
+]
+
 !!! `virus build` na korzeniu workspace (`[workspace] -> members`
 !!! niepuste w Virus.hk) - buduje KAZDEGO czlonka majacego wlasny,
 !!! uruchamialny `fun main()` (patrz `workspace_member_buildable_entry`),
@@ -171,6 +349,20 @@ fun workspace_member_buildable_entry(member_root: Str) -> Option<Str> [
 !!! czy pojedynczy projekt).
 fun cmd_build_workspace_run(project_root: Str, manifest: Manifest, opts: BuildOptions) -> Result<Str, Str> [
     progress_header("Workspace " + manifest.package.name.clone() + " - " + (manifest.workspace.members.len() as Str) + " czlonkow (" + build_target_name(opts.target.clone()) + ")")
+
+    !! ROZBUDOWA (ta runda) - potrzebne TYLKO dla czlonkow-bibliotek
+    !! nizej (`workspace_member_lib_entry`) - czlonkowie-binarki nadal
+    !! ida przez wlasny, pelny `cmd_build_run` (wlasny Virus.hk/cache).
+    let root_cache = cache_dirs_for_project(project_root.clone())
+    cache_ensure_all(root_cache.clone())
+    let root_version = DEFAULT_HACKERC_VERSION.to_string()
+    match manifest.package.lang_using.clone() [
+        Some(u) -> [
+            root_version = u
+        ]
+        None -> [
+        ]
+    ]
 
     let built: List<Str> = []
     let skipped: List<Str> = []
@@ -192,8 +384,29 @@ fun cmd_build_workspace_run(project_root: Str, manifest: Manifest, opts: BuildOp
                 ]
             ]
             None -> [
-                progress_info("pomijam '" + member + "' - biblioteka bez wlasnego binarnego entry point (brak fun main())")
-                skipped.push(member.clone())
+                !! ROZBUDOWA (ta runda) - dawniej KAZDY czlonek bez
+                !! `cmd/main.hcs` byl tu bezwarunkowo pomijany. Teraz
+                !! czlonkowie majacy `lib/mod.hcs` (np. `libs/core`,
+                !! `libs/std`) sa budowani jako `.rlib` - patrz
+                !! `docs/VIRUS.md`, "Plan: --library/TargetLibrary".
+                match workspace_member_lib_entry(member_root.clone()) [
+                    Some(lib_entry) -> [
+                        progress_step(i + 1, n, "czlonek (biblioteka): " + member.clone())
+                        let hackerc_bin = hackerc_ensure(root_cache.clone(), root_version.clone())?
+                        match cmd_build_workspace_library_member(root_cache.clone(), hackerc_bin, member.clone(), lib_entry) [
+                            Ok(rlib_path) -> [
+                                built.push(member.clone() + " -> " + rlib_path)
+                            ]
+                            Err(e) -> [
+                                end err("workspace: budowanie biblioteki '" + member + "' nie powiodlo sie: " + e)
+                            ]
+                        ]
+                    ]
+                    None -> [
+                        progress_info("pomijam '" + member + "' - ani cmd/main.hcs (binarka), ani lib/mod.hcs (biblioteka)")
+                        skipped.push(member.clone())
+                    ]
+                ]
             ]
         ]
         i = i + 1
@@ -369,8 +582,42 @@ fun vira_wire_rust_lib(crate_dir: Str, name: Str, rlib_path: Str) -> Result<Str,
 !!! zaleznosci "vira" w manifescie I brak `.hks-extern-links.txt` = nic
 !!! do zrobienia, zwraca `Ok` natychmiast (bez tworzenia pustego
 !!! `build.rs`).
-fun build_wire_extern_dependencies(cache: CacheDirs, manifest: Manifest, crate_dir: Str) -> Result<Str, Str> [
+fun build_wire_extern_dependencies(cache: CacheDirs, manifest: Manifest, crate_dir: Str, project_root: Str) -> Result<Str, Str> [
+    !! ROZBUDOWA (ta runda, patrz docs/ROADMAP.md sekcja 3 - "Plan:
+    !! lepsza obsluga braku kompilatora") - sprawdzenie DOSTEPNOSCI
+    !! kompilatora C/C++ PRZED probą kompilacji, gdy projekt uzywa
+    !! `[native_sources]` - zamiast czekac na surowy blad `cc`/`rustc`
+    !! gdzies w srodku `cargo build`. Sprawdzane w kolejnosci: `cc`
+    !! (najbardziej przenosne - na Linuksie/macOS to zazwyczaj alias na
+    !! systemowy domyslny kompilator), potem `gcc`, potem `clang`
+    !! (najczestsze konkretne nazwy na Linuksie/macOS), potem `cl`
+    !! (MSVC na Windows). To NIE pokrywa inline `native {C++}[...]`
+    !! (ten blad wciaz wychodzi pozniej, z samego `cc`/`rustc` - patrz
+    !! docs/VIRUS.md) - `[native_sources]` jest jedynym miejscem, gdzie
+    !! `virus` z gory WIE (z manifestu), ze kompilator bedzie
+    !! potrzebny, wiec tylko tu moze sprawdzic to Z WYPRZEDZENIEM.
+    if manifest.native_sources.c.len() > 0 or manifest.native_sources.cpp.len() > 0 [
+        let has_compiler = command_succeeds("cc", ["--version"]) or command_succeeds("gcc", ["--version"]) or command_succeeds("clang", ["--version"]) or command_succeeds("cl", [])
+        if not has_compiler [
+            end err("[native_sources] w Virus.hk wymaga kompilatora C/C++ (sprawdzono: cc, gcc, clang, cl) - zainstaluj jeden z nich (np. 'build-essential' na Debian/Ubuntu, Xcode Command Line Tools na macOS, MSVC Build Tools na Windows) i sprobuj ponownie")
+        ]
+    ]
+
     let link_lines: List<Str> = []
+    !! ROZBUDOWA (ta runda, patrz docs/JAVA.md) - `native {java}(...)`
+    !! - zbierane TU (nie w `link_lines`, bo `javac` NIE jest czescia
+    !! `build.rs`/`cargo build` - to osobny krok, uruchamiany PRZED
+    !! `cargo build`, patrz nizej w tej funkcji).
+    let java_class_names: List<Str> = []
+    let java_cp_entries: List<Str> = []
+    !! ROZBUDOWA (ta runda, patrz docs/ROADMAP.md - integracja .hlib) -
+    !! sciezki do plikow `.so` zlinkowanych DYNAMICZNIE
+    !! (`get <extern:...> use <dynamic>`) - kopiowane obok finalnej
+    !! binarki I dopisywane jako `-rpath $ORIGIN` w `build.rs`, zeby
+    !! dynamiczny linker w runtime ZNALAZL je bez recznego
+    !! `LD_LIBRARY_PATH` (znalezione realnym testem `get <hlib:...>`
+    !! wskazujacego na `.so` spoza standardowych katalogow linkera).
+    let dynamic_so_paths: List<Str> = []
     let i = 0
     let n = manifest.dependencies.len()
     while i < n [
@@ -441,15 +688,32 @@ fun build_wire_extern_dependencies(cache: CacheDirs, manifest: Manifest, crate_d
                         !!! `hlib_extract_for_import`).
                         progress_warn("'" + dep.name.clone() + "' (" + dep.source.clone() + ") to .hlib pod " + meta2.file.clone() + " - dopisz recznie 'get <extern:...> use <dynamic>' + 'region [ ... ]' albo wypakuj przez 'hackerc hlib extract'")
                     ] else [
-                        !!! .a/.so (albo brak rozpoznanego rozszerzenia -
-                        !!! wtedy zgadujemy dynamiczne linkowanie, tak
-                        !!! samo jak dla nieznanych "kind" z
-                        !!! `.hks-extern-links.txt` nizej).
+                        !!! ROZBUDOWA (ta runda): jawna tabela
+                        !!! rozszerzenie -> tryb linkowania zamiast
+                        !!! cichego domyslnego "dylib" dla WSZYSTKIEGO
+                        !!! poza ".a". Rozpoznane dwuznacznie:
+                        !!! .a/.lib -> static, .so/.dylib/.dll ->
+                        !!! dynamic. Rozszerzenie SPOZA tej tabeli
+                        !!! (dawniej: cicho zgadywane jako "dylib") ->
+                        !!! teraz jawne ostrzezenie, ze tryb zostal
+                        !!! ZGADNIETY (nie ustalony), bo `virus`
+                        !!! naprawde tego nie wie - patrz
+                        !!! `docs/VIRUS.md`, "Plan: rozpoznawanie
+                        !!! rozszerzen .a/.so" (ktory wlasnie tu jest
+                        !!! zaimplementowany).
                         match vira_split_dir_libname(meta2.file.clone()) [
                             Some(vln2) -> [
                                 let kind3 = "dylib"
-                                if str_ends_with(meta2.file.clone(), ".a") [
+                                let recognized = false
+                                if str_ends_with(meta2.file.clone(), ".a") or str_ends_with(meta2.file.clone(), ".lib") [
                                     kind3 = "static"
+                                    recognized = true
+                                ] elif str_ends_with(meta2.file.clone(), ".so") or str_ends_with(meta2.file.clone(), ".dylib") or str_ends_with(meta2.file.clone(), ".dll") [
+                                    kind3 = "dylib"
+                                    recognized = true
+                                ]
+                                if not recognized [
+                                    progress_warn(dep.source.clone() + ": rozszerzenie pliku '" + meta2.file.clone() + "' nieznane (oczekiwano .a/.lib/.so/.dylib/.dll) - ZGADUJE tryb 'dynamic', sprawdz to recznie albo dodaj 'link_mode' w rejestrze (docs/VIRUS.md)")
                                 ]
                                 link_lines.push("    println!(\"cargo:rustc-link-search=native=" + vln2.dir + "\");")
                                 link_lines.push("    println!(\"cargo:rustc-link-lib=" + kind3 + "=" + vln2.libname + "\");")
@@ -502,8 +766,29 @@ fun build_wire_extern_dependencies(cache: CacheDirs, manifest: Manifest, crate_d
                                         if mode == "static" [
                                             kind2 = "static"
                                         ]
-                                        link_lines.push("    println!(\"cargo:rustc-link-search=native=" + vln.dir + "\");")
+                                        !! NAPRAWIONY BUG (ta runda,
+                                        !! znaleziony realnym buildem -
+                                        !! patrz docs/ROADMAP.md) -
+                                        !! `vln.dir` to sciezka DOKLADNIE
+                                        !! taka, jak napisana w `get
+                                        !! <extern:...>` (typowo
+                                        !! WZGLEDNA, np. "native") -
+                                        !! bez zamiany na absolutna
+                                        !! wzgledem KORZENIA PROJEKTU,
+                                        !! `-L` wskazywalo katalog wzgledny
+                                        !! do CWD procesu `cc` (rzadko
+                                        !! rownego korzeniowi projektu),
+                                        !! wiec linker nie znajdowal pliku
+                                        !! mimo poprawnej nazwy biblioteki.
+                                        let search_dir = vln.dir.clone()
+                                        if not path_is_absolute(search_dir.clone()) [
+                                            search_dir = path_join(project_root.clone(), search_dir)
+                                        ]
+                                        link_lines.push("    println!(\"cargo:rustc-link-search=native=" + search_dir + "\");")
                                         link_lines.push("    println!(\"cargo:rustc-link-lib=" + kind2 + "=" + vln.libname + "\");")
+                                        if kind2 == "dylib" [
+                                            dynamic_so_paths.push(path_join(search_dir.clone(), "lib" + vln.libname.clone() + ".so"))
+                                        ]
                                     ]
                                     None -> [
                                         !!! Brak `/` w sciezce - potraktuj
@@ -550,6 +835,18 @@ fun build_wire_extern_dependencies(cache: CacheDirs, manifest: Manifest, crate_d
                             if kind == "native_cpp" [
                                 link_lines.push("    cc::Build::new().cpp(true).file(\"native/" + name + ".cpp\").compile(\"" + name + "\");")
                             ]
+                            !! ROZBUDOWA (ta runda, patrz docs/JAVA.md) -
+                            !! `java_class`/`java_cp` NIE ida do
+                            !! `link_lines` (nie sa czescia `build.rs`) -
+                            !! zbierane osobno, obsluzone PO tej petli
+                            !! (kompilacja `javac` to niezalezny krok od
+                            !! `cargo build`, patrz nizej).
+                            if kind == "java_class" [
+                                java_class_names.push(name.clone())
+                            ]
+                            if kind == "java_cp" [
+                                java_cp_entries.push(name.clone())
+                            ]
                         ]
                     ]
                     li = li + 1
@@ -561,7 +858,129 @@ fun build_wire_extern_dependencies(cache: CacheDirs, manifest: Manifest, crate_d
         ]
     ]
 
+    !! ROZBUDOWA (ta runda, patrz docs/JAVA.md) - kompiluje wszystkie
+    !! `java_class` (`out_dir/java/<ClassName>.java`, zapisane przez
+    !! `hackerc build`, patrz `project.hcs::build_project`) JEDNYM
+    !! wywolaniem `javac`, do `crate_dir/java_classes/` - dokladnie tam,
+    !! gdzie `hks_get_jvm()` (patrz `transpiler.hcs`) szuka ich w
+    !! RUNTIME (wzgledem POLOZENIA BINARKI, nie `crate_dir` - stad
+    !! kopiowanie `java_classes/` obok finalnej binarki nizej w
+    !! `build_compile_and_copy`).
+    if java_class_names.len() > 0 [
+        if not command_succeeds("javac", ["-version"]) [
+            end err("projekt uzywa 'native {java}(...)' (patrz docs/JAVA.md), ale nie znaleziono 'javac' - zainstaluj JDK (np. 'sudo apt install openjdk-21-jdk-headless' na Debian/Ubuntu) i sprobuj ponownie")
+        ]
+        let classpath_parts: List<Str> = []
+        let jcpi = 0
+        let jcpn = java_cp_entries.len()
+        while jcpi < jcpn [
+            let cp_entry = java_cp_entries[jcpi].clone()
+            if not path_is_absolute(cp_entry.clone()) [
+                cp_entry = path_join(project_root.clone(), cp_entry)
+            ]
+            classpath_parts.push(cp_entry)
+            jcpi = jcpi + 1
+        ]
+        let classes_out = path_join(crate_dir.clone(), "java_classes")
+        create_dir_ok(classes_out.clone())
+        let javac_args: List<Str> = ["-d", classes_out]
+        if classpath_parts.len() > 0 [
+            javac_args.push("-cp")
+            javac_args.push(str_join(classpath_parts, ":"))
+        ]
+        let jni = 0
+        let jnn = java_class_names.len()
+        while jni < jnn [
+            javac_args.push(path_join(path_join(crate_dir.clone(), "java"), java_class_names[jni].clone() + ".java"))
+            jni = jni + 1
+        ]
+        progress_step(1, 1, "kompilacja Java (javac)")
+        run_command_checked("javac", javac_args)?
+        progress_success("skompilowano " + (java_class_names.len() as Str) + " klas(y) Java do " + classes_out)
+    ]
+
+    !! ROZBUDOWA (ta runda) - `[native_sources]` z manifestu (patrz
+    !! `NativeSourcesSection` w manifest.hcs) - kompiluje WLASNE zrodla
+    !! `.c`/`.cpp` PROJEKTU przez crate `cc`, w ODROZNIENIU od
+    !! `get <c:...>`/`get <cpp:...>` WYZEJ (te linkuja SYSTEMOWA
+    !! biblioteke po nazwie i nie kompiluja niczego same). Sciezki w
+    !! manifescie sa wzgledem KORZENIA PROJEKTU - zamieniane tu na
+    !! ABSOLUTNE (`path_join(project_root, ...)`), bo `cc::Build::file`
+    !! w wygenerowanym `build.rs` jest wywolywane z CWD = korzen
+    !! CRATE'A (`crate_dir`), nie korzen projektu HackerScript - to sa
+    !! zazwyczaj DWA rozne katalogi (`crate_dir` to `cache/build/
+    !! crate`), wiec sciezka wzgledna nie zadzialalaby.
+    if manifest.native_sources.c.len() > 0 [
+        let c_call = "    cc::Build::new()"
+        let ci = 0
+        let cn = manifest.native_sources.c.len()
+        while ci < cn [
+            c_call = c_call + ".file(\"" + path_join(project_root.clone(), manifest.native_sources.c[ci].clone()) + "\")"
+            ci = ci + 1
+        ]
+        c_call = c_call + ".compile(\"hks_native_sources_c\");"
+        link_lines.push(c_call)
+    ]
+    if manifest.native_sources.cpp.len() > 0 [
+        let cpp_call = "    cc::Build::new().cpp(true)"
+        let cppi = 0
+        let cppn = manifest.native_sources.cpp.len()
+        while cppi < cppn [
+            cpp_call = cpp_call + ".file(\"" + path_join(project_root.clone(), manifest.native_sources.cpp[cppi].clone()) + "\")"
+            cppi = cppi + 1
+        ]
+        cpp_call = cpp_call + ".compile(\"hks_native_sources_cpp\");"
+        link_lines.push(cpp_call)
+    ]
+    let has_native_sources = manifest.native_sources.c.len() > 0 or manifest.native_sources.cpp.len() > 0
+
     if link_lines.len() > 0 [
+        !! Jesli `[native_sources]` jest uzyte, ale projekt NIE MA
+        !! zadnego inline `native {C++}[...]` (jedyny dotychczasowy
+        !! powod, dla ktorego `hackerc build` sam dopisuje
+        !! `[build-dependencies]\ncc = "1"` do Cargo.toml - patrz
+        !! `needs_native_cpp` w project.hcs), crate `cc` NIE bylby
+        !! dostepny w `build.rs` i kompilacja by sie wywalila zaraz na
+        !! starcie. Dopisujemy wiec sekcje TYLKO gdy jeszcze jej nie ma
+        !! (sprawdzone przez `str_contains`, zeby nie zduplikowac
+        !! `[build-dependencies]` w TOML, gdyby juz byla).
+        if has_native_sources [
+            match read_file(path_join(crate_dir.clone(), "Cargo.toml")) [
+                Ok(cargo_text) -> [
+                    if not str_contains(cargo_text.clone(), "[build-dependencies]") [
+                        write_file(path_join(crate_dir.clone(), "Cargo.toml"), cargo_text + "\n[build-dependencies]\ncc = \"1\"\n")?
+                    ]
+                ]
+                Err(e) -> [
+                    end err("nie mozna odczytac Cargo.toml do dopisania [build-dependencies] dla [native_sources]: " + e)
+                ]
+            ]
+        ]
+        !! `-rpath $ORIGIN` - patrz `dynamic_so_paths` wyzej. `$ORIGIN`
+        !! (skladnia linkera ELF) = katalog, w ktorym LEZY sama binarka
+        !! w runtime - dziala niezaleznie od tego, skad uzytkownik ja
+        !! uruchamia, o ile skopiowane `.so` (kopiowane TU, ponizej)
+        !! jedzie OBOK niej w `cache/build/`.
+        if dynamic_so_paths.len() > 0 [
+            link_lines.push("    println!(\"cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN\");")
+            let dsi = 0
+            let dsn = dynamic_so_paths.len()
+            while dsi < dsn [
+                let so_src = dynamic_so_paths[dsi].clone()
+                if path_exists(so_src.clone()) [
+                    match copy_file(so_src.clone(), path_join(cache.build.clone(), path_basename(so_src.clone()))) [
+                        Ok(_v) -> [
+                        ]
+                        Err(e) -> [
+                            progress_warn("nie mozna skopiowac '" + so_src + "' obok binarki: " + e)
+                        ]
+                    ]
+                ] else [
+                    progress_warn("'" + so_src + "' (get <extern:...> use <dynamic>) nie istnieje - binarka moze nie wystartowac w runtime")
+                ]
+                dsi = dsi + 1
+            ]
+        ]
         let build_rs = "fn main() {\n" + str_join(link_lines, "\n") + "\n}\n"
         write_file(path_join(crate_dir, "build.rs"), build_rs)?
     ]
@@ -605,18 +1024,44 @@ fun cmd_build_run(project_root: Str, opts: BuildOptions) -> Result<Str, Str> [
     !! ZMIANA 0.4 - `manifest.build.entry` usuniete (patrz manifest.hcs);
     !! bez `--single-file` szukamy teraz zawsze `cmd/main.hcs` przez
     !! `find_cmd_entry()`.
+    !! ROZBUDOWA (ta runda) - `opts.bin_filter = some(nazwa)`, gdzie
+    !! `nazwa` NIE jest glowna binarka (`manifest.package.name`) -
+    !! przelacza `entry`/`crate_name` na `cmd/bin/<nazwa>.hcs` CALKIEM
+    !! zamiast `cmd/main.hcs` - wtedy dalszy potok (ponizej) jest
+    !! DOKLADNIE tym samym pojedynczym-binarnym budowaniem co zawsze,
+    !! tylko z innym plikiem wejsciowym - `cmd/main.hcs` i pozostale
+    !! `cmd/bin/*.hcs` NIE sa w ogole dotykane.
     let entry = ""
-    match opts.single_file.clone() [
-        Some(f) -> [
-            entry = path_join(project_root.clone(), f)
+    let crate_name = manifest.package.name.clone()
+    let building_single_extra_bin = false
+    match opts.bin_filter.clone() [
+        Some(bf) -> [
+            if bf != manifest.package.name.clone() [
+                let candidate = path_join(path_join(manifest_source_dir(project_root.clone()), "bin"), bf.clone() + ".hcs")
+                if not path_exists(candidate.clone()) [
+                    end err("nie znaleziono 'cmd/bin/" + bf + ".hcs' (--bin " + bf + ") - dostepne binarki: " + manifest.package.name.clone() + ", " + str_join(list_extra_bin_stems(project_root.clone()), ", "))
+                ]
+                entry = candidate
+                crate_name = bf
+                building_single_extra_bin = true
+            ]
         ]
         None -> [
-            match find_cmd_entry(project_root.clone()) [
-                Some(e) -> [
-                    entry = e
-                ]
-                None -> [
-                    end err("nie znaleziono pliku wejsciowego - brak " + path_join(manifest_source_dir(project_root.clone()), "main.hcs") + " (kazdy budowalny projekt/czlonek musi miec cmd/main.hcs z fun main())")
+        ]
+    ]
+    if not building_single_extra_bin [
+        match opts.single_file.clone() [
+            Some(f) -> [
+                entry = path_join(project_root.clone(), f)
+            ]
+            None -> [
+                match find_cmd_entry(project_root.clone()) [
+                    Some(e) -> [
+                        entry = e
+                    ]
+                    None -> [
+                        end err("nie znaleziono pliku wejsciowego - brak " + path_join(manifest_source_dir(project_root.clone()), "main.hcs") + " (kazdy budowalny projekt/czlonek musi miec cmd/main.hcs z fun main())")
+                    ]
                 ]
             ]
         ]
@@ -633,24 +1078,84 @@ fun cmd_build_run(project_root: Str, opts: BuildOptions) -> Result<Str, Str> [
     ]
 
     progress_step(1, 2, "generowanie crate'a Rust (hackerc build)")
-    hackerc_build_crate(hackerc_bin, entry, crate_dir.clone(), manifest.package.name.clone())?
-    build_wire_extern_dependencies(cache.clone(), manifest.clone(), crate_dir.clone())?
+    !! ROZBUDOWA (ta runda) - `TargetLibrary` uzywa
+    !! `hackerc_build_crate_library` (dopisuje `--library` do wywolania
+    !! `hackerc build`, patrz `hackerc_bridge.hcs`), zeby wygenerowany
+    !! Cargo.toml mial `[lib] crate-type = ["rlib"]` juz na tym etapie -
+    !! MUSI byc zdecydowane PRZED `build_wire_extern_dependencies` nizej
+    !! (ktora tylko dopisuje do juz istniejacego Cargo.toml, nie tworzy
+    !! go od nowa).
+    match opts.target [
+        TargetLibrary -> [
+            hackerc_build_crate_library(hackerc_bin, entry, crate_dir.clone(), crate_name.clone())?
+        ]
+        _ -> [
+            hackerc_build_crate(hackerc_bin, entry, crate_dir.clone(), crate_name.clone())?
+        ]
+    ]
+
+    !! ROZBUDOWA (ta runda) - multi-binarki: TYLKO gdy budujemy caly
+    !! czlonek (nie pojedyncza `--bin <dodatkowa>`, patrz wyzej) I cel
+    !! to zwykla binarka (Default/Release - TargetLibrary/Wasm/Jar nie
+    !! maja dzis odpowiednika dla dodatkowych binarek, patrz
+    !! docs/VIRUS.md), kazdy `cmd/bin/*.hcs` DOPISUJE wlasny `[[bin]]`
+    !! do Cargo.toml wygenerowanego dla `cmd/main.hcs` wyzej.
+    let extra_bins: List<Str> = []
+    let target_supports_extra_bins = false
+    match opts.target [
+        TargetDefault -> [
+            target_supports_extra_bins = true
+        ]
+        TargetRelease -> [
+            target_supports_extra_bins = true
+        ]
+        _ -> [
+        ]
+    ]
+    if not building_single_extra_bin and target_supports_extra_bins [
+        extra_bins = list_extra_bin_stems(project_root.clone())
+        let bi = 0
+        let bn = extra_bins.len()
+        while bi < bn [
+            let stem = extra_bins[bi].clone()
+            let bin_entry = path_join(path_join(manifest_source_dir(project_root.clone()), "bin"), stem.clone() + ".hcs")
+            hackerc_build_crate_bin(hackerc_bin, bin_entry, crate_dir.clone(), crate_name.clone(), stem.clone())?
+            bi = bi + 1
+        ]
+    ]
+
+    build_wire_extern_dependencies(cache.clone(), manifest.clone(), crate_dir.clone(), project_root.clone())?
 
     match opts.target [
         TargetDefault -> [
-            end build_compile_and_copy(cache, crate_dir, manifest.package.name, false)
+            let main_out = build_compile_and_copy(cache.clone(), crate_dir.clone(), crate_name.clone(), false)?
+            let ei = 0
+            let en = extra_bins.len()
+            while ei < en [
+                build_copy_extra_bin(cache.clone(), crate_dir.clone(), extra_bins[ei].clone(), false)?
+                ei = ei + 1
+            ]
+            end ok(main_out)
         ]
         TargetRelease -> [
-            end build_compile_and_copy(cache, crate_dir, manifest.package.name, true)
+            let main_out2 = build_compile_and_copy(cache.clone(), crate_dir.clone(), crate_name.clone(), true)?
+            let ei2 = 0
+            let en2 = extra_bins.len()
+            while ei2 < en2 [
+                build_copy_extra_bin(cache.clone(), crate_dir.clone(), extra_bins[ei2].clone(), true)?
+                ei2 = ei2 + 1
+            ]
+            end ok(main_out2)
         ]
         TargetLibrary -> [
-            end err("`virus build --library` (.so/.rlib/.a) wymaga zmiany [[bin]] na [lib] w wygenerowanym Cargo.toml - nie zaimplementowane, patrz docs/ROADMAP.md")
+            end build_compile_library_and_copy(cache, crate_dir, crate_name, false)
         ]
         TargetWasm -> [
-            end build_compile_wasm_and_copy(cache, crate_dir, manifest.package.name, true)
+            end build_compile_wasm_and_copy(cache, crate_dir, crate_name, true)
         ]
         TargetJar -> [
-            end err("`virus build --jar` nie jest jeszcze zaimplementowane, patrz docs/ROADMAP.md")
+            let bin_out = build_compile_and_copy(cache.clone(), crate_dir.clone(), crate_name.clone(), false)?
+            end build_package_jar(cache, crate_dir, crate_name)
         ]
     ]
 ]
