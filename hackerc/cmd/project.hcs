@@ -19,6 +19,15 @@ const CARGO_TOML_TAIL: Str = "\"\npath = \"src/main.rs\"\n\n[dependencies]\n"
 !! wiec crate_name jest tu potrzebny TYLKO RAZ (w `[package] -> name`).
 const CARGO_TOML_WASM_MID: Str = "\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\", \"rlib\"]\npath = \"src/lib.rs\"\n\n[dependencies]\n"
 
+!! ROZBUDOWA (ta runda) - `[lib]` z SAMYM "rlib" (bez "cdylib"), dla
+!! `virus build --library` (`TargetLibrary`, patrz
+!! `virus/cmd/build.hcs`). W odroznieniu od wariantu WASM wyzej, to
+!! NIE jest przeznaczone do zaladowania jako biblioteka dynamiczna z
+!! innego jezyka - to zwykly crate Rust-owy, docelowo konsumowany przez
+!! inny crate Rust przez `get <work:czlonek>` (patrz docs/SYNTAX.md) -
+!! stad tylko "rlib".
+const CARGO_TOML_LIBRARY_MID: Str = "\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"rlib\"]\npath = \"src/lib.rs\"\n\n[dependencies]\n"
+
 !!! Splaszczona, deterministyczna nazwa modulu Rust dla `get <std:...>`
 !!! / `get <core:...>` / `get <selfhost:...>`. MUSI byc identyczna po
 !!! obu stronach (patrz `codegen.hcs::gen_get_import`) - to jest cala
@@ -42,7 +51,15 @@ fun replace_dash(s: Str) -> Str [
     let n = s.len()
     while i < n [
         let c = s.char_at(i)
-        if c == "-" [
+        !! ROZBUDOWA (ta runda, znalezione realnym buildem - patrz
+        !! docs/ROADMAP.md) - `name` w `get <std:podkatalog/plik>`
+        !! (np. `get <std:cybersecurity/entropy>`) moze zawierac "/" -
+        !! bez tej gałęzi `flat_module_name` (nizej) produkowalby
+        !! nazwe pliku Rust z LITERALNYM "/" w srodku (np.
+        !! "_hks_std_cybersecurity/entropy.rs"), co `write_file`
+        !! probuje zapisac jako plik W PODKATALOGU, ktory nigdy nie
+        !! zostal utworzony - stad "No such file or directory".
+        if c == "-" or c == "/" [
             out = out + "_"
         ] else [
             out = out + c
@@ -503,7 +520,11 @@ struct DiscoveredFile [
     hot_reload_names: List<Str>,
     !! NOWOSC 0.4 - patrz `extract_wasm_export_markers()` w
     !! transpiler.hcs, parytet z `hot_reload_names` obok.
-    wasm_export_names: List<Str>
+    wasm_export_names: List<Str>,
+    !! ROZBUDOWA (ta runda, patrz docs/FAST_DIRECT.md) - `fast direct
+    !! {backend} [ ... ]`, parytet z `blocks`/`native_engines` wyzej.
+    fast_direct_blocks: List<Str>,
+    fast_direct_backends: List<Str>
 ]
 
 struct ProjectResult [
@@ -549,13 +570,14 @@ impl Discovery [
     fun parse_and_add(self, path: Str, flat_name: Str, source_tag: Str) -> Bool [
         match read_file(path.clone()) [
             Ok(source) -> [
-                let extraction = extract_direct_blocks(source.clone())
+                let fast_direct_extraction = extract_fast_direct_blocks(source.clone())
+                let extraction = extract_direct_blocks(fast_direct_extraction.stripped_source)
                 let native_extraction = extract_native_blocks(extraction.stripped_source, native_dirname(path))
                 let sandbox_extraction = extract_sandbox_blocks(native_extraction.stripped_source)
                 let hot_extraction = extract_hot_reload_markers(sandbox_extraction.stripped_source)
                 let wasm_extraction = extract_wasm_export_markers(hot_extraction.stripped_source)
                 let prog = parse(wasm_extraction.stripped_source)
-                self.files.push(DiscoveredFile(path, flat_name, source_tag, prog, extraction.blocks, native_extraction.blocks, native_extraction.engines, sandbox_extraction.blocks, hot_extraction.names, wasm_extraction.names))
+                self.files.push(DiscoveredFile(path, flat_name, source_tag, prog, extraction.blocks, native_extraction.blocks, native_extraction.engines, sandbox_extraction.blocks, hot_extraction.names, wasm_extraction.names, fast_direct_extraction.blocks, fast_direct_extraction.backends))
                 end true
             ]
             Err(e) -> [
@@ -802,6 +824,10 @@ fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_roo
     let method_names: List<Str> = []
     let mut_params: Dict<Str, Bool> = dict()
     let method_mut_params: Dict<Str, Bool> = dict()
+    !! NAPRAWIONY BUG (ta runda) - patrz komentarz przy
+    !! `ExtraSignatures::extern_fn_names` w transpiler.hcs.
+    let extern_fn_names: Dict<Str, Bool> = dict()
+    let extern_fn_name_list: List<Str> = []
 
     let fi = 0
     let fn_ = disc.files.len()
@@ -839,6 +865,18 @@ fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_roo
                             ]
                         ]
                         mi = mi + 1
+                    ]
+                ]
+                RegionBlock(region_sigs) -> [
+                    let ri = 0
+                    let rn = region_sigs.len()
+                    while ri < rn [
+                        let rsig = region_sigs[ri].clone()
+                        if not extern_fn_names.contains(rsig.name.clone()) [
+                            extern_fn_names.insert(rsig.name.clone(), true)
+                            extern_fn_name_list.push(rsig.name.clone())
+                        ]
+                        ri = ri + 1
                     ]
                 ]
                 _ -> [
@@ -879,11 +917,11 @@ fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_roo
         fi = fi + 1
     ]
 
-    let sigs = ExtraSignatures(functions, function_names, structs, struct_names, enums, enum_names, methods, method_names, mut_params, method_mut_params)
+    let sigs = ExtraSignatures(functions, function_names, structs, struct_names, enums, enum_names, methods, method_names, mut_params, method_mut_params, extern_fn_names, extern_fn_name_list)
     end ProjectSignatures(sigs, disc.warnings)
 ]
 
-fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, needs_sandbox: Bool, needs_hot_reload: Bool, needs_native_cpp: Bool, needs_wasm_bindgen: Bool, deps_names: List<Str>, deps_versions: List<Str>) -> Str [
+fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, needs_sandbox: Bool, needs_hot_reload: Bool, needs_native_cpp: Bool, needs_wasm_bindgen: Bool, force_library: Bool, deps_names: List<Str>, deps_versions: List<Str>, needs_native_java: Bool, needs_sha256: Bool) -> Str [
     let deps_lines = ""
     if needs_pyo3 [
         deps_lines = deps_lines + "pyo3 = { version = \"0.22\", features = [\"auto-initialize\"] }\n"
@@ -903,6 +941,35 @@ fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, ne
     !! `wasm32-unknown-unknown`).
     if needs_wasm_bindgen [
         deps_lines = deps_lines + "wasm-bindgen = \"0.2\"\n"
+    ]
+    !! ROZBUDOWA (ta runda, patrz docs/JAVA.md) - `jni` dla `native
+    !! {java}(...)` - w [dependencies] (nie [build-dependencies], w
+    !! odroznieniu od `cc` przy C++) - embedded JVM zyje W RUNTIME
+    !! skompilowanej binarki, nie tylko podczas budowania. Feature
+    !! "invocation" wlacza tworzenie JVM z poziomu Rusta
+    !! (`JavaVM::new`) - bez niej crate `jni` obsluguje tylko
+    !! ODWROTNY kierunek (Java->Rust, `#[no_mangle] extern "system"
+    !! fn Java_...`), ktory NIE jest tym, czego potrzebuje `native
+    !! {java}(...)` (Rust->Java).
+    if needs_native_java [
+        deps_lines = deps_lines + "jni = { version = \"0.21\", features = [\"invocation\"] }\n"
+    ]
+    !! ROZBUDOWA (ta runda) - `sha256_hex(...)` - `sha2`/`hex` to juz
+    !! sprawdzone zaleznosci tego bootstrapu (patrz `hlib.hcs`).
+    !! NAPRAWIONY BUG (ta runda, znaleziony realnym buildem na
+    !! `hackerc` samym w sobie - patrz docs/ROADMAP.md): `hlib.hcs`
+    !! JUZ deklaruje `sha2`/`hex` przez `get <crates:sha2::0.10>` (w
+    !! `deps_names`/`deps_versions` ponizej) - bez tego sprawdzenia
+    !! dublowalibysmy wpis `[dependencies] sha2 = ...` (Cargo/TOML
+    !! odrzuca zduplikowane klucze w tej samej tabeli) za KAZDYM razem,
+    !! gdy projekt uzywa I `sha256_hex` (wykrywane przez skan tekstu
+    !! wygenerowanego kodu, patrz transpiler.hcs), I czegokolwiek z
+    !! `hlib.hcs` (albo wlasnego `get <crates:sha2...>`).
+    if needs_sha256 and not list_contains_str(deps_names, "sha2") [
+        deps_lines = deps_lines + "sha2 = \"0.10\"\n"
+    ]
+    if needs_sha256 and not list_contains_str(deps_names, "hex") [
+        deps_lines = deps_lines + "hex = \"0.4\"\n"
     ]
     let i = 0
     let n = deps_names.len()
@@ -954,6 +1021,15 @@ fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, ne
     !! `src/lib.rs`, dokladnie w parze z ta galezia).
     if needs_wasm_bindgen [
         end CARGO_TOML_HEADER + crate_name + CARGO_TOML_WASM_MID + deps_lines + build_deps_section
+    ]
+    !! ROZBUDOWA (ta runda) - `--library`/`TargetLibrary`. Sprawdzane
+    !! PO `needs_wasm_bindgen` celowo: gdy oba sa prawda (projekt ma
+    !! `@wasm_export` I zostal zbudowany z `--library`), wygrywa WASM
+    !! (jego `[lib]` juz i tak zawiera "rlib" obok "cdylib" - patrz
+    !! `CARGO_TOML_WASM_MID` - wiec jest STRICT SUPERSETEM tego, co
+    !! `--library` samo by dalo).
+    if force_library [
+        end CARGO_TOML_HEADER + crate_name + CARGO_TOML_LIBRARY_MID + deps_lines + build_deps_section
     ]
     end CARGO_TOML_HEADER + crate_name + CARGO_TOML_MID + crate_name + CARGO_TOML_TAIL + deps_lines + build_deps_section
 ]
@@ -1051,7 +1127,17 @@ fun trim_str(s: Str) -> Str [
 !!! sie nie uda (np. brak uprawnien), zapis kazdego pliku i tak
 !!! sprobuje samodzielnie i doda `Err` do `warnings`, wiec brak
 !!! twardego przerwania calej budowy.
-fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, vira_root: Option<Str>, crate_name: Str) -> ProjectResult [
+!!! ROZBUDOWA (ta runda) - `bin_name`: `none()` = zachowanie
+!!! dotychczasowe (`src/main.rs`/`src/lib.rs` + PELNY, nadpisujacy
+!!! zapis `Cargo.toml`). `some(nazwa)` = multi-binarki (odpowiednik
+!!! Cargo `src/bin/*.rs`, patrz `docs/VIRUS.md`, "Plan: multi-binarki
+!!! na czlonka") - PISZE do `src/bin/<nazwa>.rs` i DOPISUJE (nie
+!!! nadpisuje) sekcje `[[bin]]` do JUZ ISTNIEJACEGO `Cargo.toml` -
+!!! wywolujacy (`virus build`/`cmd_build` w main.hcs) MUSI wiec
+!!! najpierw zbudowac glowny entry (`cmd/main.hcs`, `bin_name =
+!!! none()`), ktory tworzy `Cargo.toml` od zera, zanim zbuduje
+!!! ktorykolwiek dodatkowy `cmd/bin/*.hcs` z `bin_name = some(...)`.
+fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, vira_root: Option<Str>, crate_name: Str, force_library: Bool, bin_name: Option<Str>) -> ProjectResult [
     let src_dir = out_dir + "/src"
     let main_rs_path = src_dir + "/main.rs"
     let warnings: List<Str> = []
@@ -1115,6 +1201,13 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     !! DODANE - patrz `CodeGen::native_cpp_sources`/`TranspileResult::native_cpp_sources`.
     let native_cpp_sources: Dict<Str, Str> = dict()
     let native_cpp_names: List<Str> = []
+    !! ROZBUDOWA (ta runda) - parytet z `native_cpp_sources`/
+    !! `native_cpp_names` wyzej, dla `native {java}(...)`.
+    let needs_native_java = false
+    let native_java_sources: Dict<Str, Str> = dict()
+    let native_java_names: List<Str> = []
+    !! ROZBUDOWA (ta runda) - `sha256_hex(...)`, parytet z `needs_pyo3`.
+    let needs_sha256 = false
     let hot_reload_bodies: Dict<Str, Str> = dict()
     let hot_reload_order: List<Str> = []
     let hot_reload_source_path = ""
@@ -1128,10 +1221,13 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     let fn_ = disc.files.len()
     while fi < fn_ [
         let df = disc.files[fi].clone()
-        let r = transpile_program_with_extra(df.program.clone(), df.blocks.clone(), df.native_blocks.clone(), df.native_engines.clone(), df.sandbox_blocks.clone(), df.hot_reload_names.clone(), df.wasm_export_names.clone(), df.path.clone(), extra)
+        let r = transpile_program_with_extra(df.program.clone(), df.blocks.clone(), df.native_blocks.clone(), df.native_engines.clone(), df.sandbox_blocks.clone(), df.hot_reload_names.clone(), df.wasm_export_names.clone(), df.path.clone(), extra, df.fast_direct_blocks.clone(), df.fast_direct_backends.clone())
 
         if r.needs_pyo3 [
             needs_pyo3 = true
+        ]
+        if r.needs_sha256 [
+            needs_sha256 = true
         ]
         if r.needs_native_js [
             needs_native_js = true
@@ -1172,6 +1268,34 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
                 ]
             ]
             ncsi = ncsi + 1
+        ]
+        !! ROZBUDOWA (ta runda, patrz docs/JAVA.md) - parytet z
+        !! `native_cpp_sources` wyzej, ale kind "java_class" zamiast
+        !! "native_cpp" (virus/cmd/build.hcs je rozroznia - `javac`
+        !! zamiast `cc::Build`).
+        if r.needs_native_java [
+            needs_native_java = true
+        ]
+        let njsi = 0
+        let njsn = r.native_java_order.len()
+        while njsi < njsn [
+            let cname = r.native_java_order[njsi].clone()
+            match r.native_java_sources.fetch(cname.clone()) [
+                Some(jsrc) -> [
+                    native_java_sources.insert(cname.clone(), jsrc)
+                    native_java_names.push(cname.clone())
+                    extern_link_specs.push("java_class\t" + cname + "\t")
+                ]
+                None -> [
+                ]
+            ]
+            njsi = njsi + 1
+        ]
+        let jcpi = 0
+        let jcpn = r.java_classpath_entries.len()
+        while jcpi < jcpn [
+            extern_link_specs.push("java_cp\t" + r.java_classpath_entries[jcpi].clone() + "\t")
+            jcpi = jcpi + 1
         ]
         if r.needs_hot_reload [
             needs_hot_reload = true
@@ -1241,8 +1365,36 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     !! `src/lib.rs`, w parze z `cargo_toml_text(...)` nizej (ktora
     !! dostaje ten sam `needs_wasm_bindgen` i pisze `[lib] -> path =
     !! "src/lib.rs"` zamiast `[[bin]] -> path = "src/main.rs"`).
-    if needs_wasm_bindgen [
+    !! ROZBUDOWA (ta runda) - `force_library` (`--library`, patrz
+    !! `TargetLibrary` w `virus/cmd/build.hcs`) przelacza docelowa
+    !! sciezke na `src/lib.rs` dokladnie tak samo, jak juz robi to
+    !! `needs_wasm_bindgen` - `entry_rust` (kod funkcji uzytkownika) jest
+    !! IDENTYCZNY w obu przypadkach, rozni sie tylko plik docelowy i
+    !! sekcja Cargo.toml (patrz `cargo_toml_text` wyzej).
+    if needs_wasm_bindgen or force_library [
         main_rs_path = src_dir + "/lib.rs"
+    ]
+    !! ROZBUDOWA (ta runda) - multi-binarki: `bin_name = some(x)`
+    !! przekierowuje docelowy plik na `src/bin/<x>.rs` (WYGRYWA nad
+    !! `needs_wasm_bindgen`/`force_library` powyzej - dodatkowa
+    !! binarka nigdy nie jest ani `@wasm_export`-owym `[lib]`, ani
+    !! `--library` samym w sobie, to zawsze zwykla binarka).
+    let extra_bin_path: Option<Str> = none()
+    match bin_name.clone() [
+        Some(bn) -> [
+            let bin_dir = src_dir + "/bin"
+            match create_dir(bin_dir.clone()) [
+                Ok(_v) -> [
+                ]
+                Err(e) -> [
+                    warnings.push(bin_dir + ": " + e)
+                ]
+            ]
+            main_rs_path = bin_dir + "/" + bn + ".rs"
+            extra_bin_path = some(bn)
+        ]
+        None -> [
+        ]
     ]
     match write_file(main_rs_path.clone(), entry_rust) [
         Ok(_v) -> [
@@ -1253,12 +1405,38 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     ]
 
     let cargo_toml_path = out_dir + "/Cargo.toml"
-    let cargo_text = cargo_toml_text(crate_name, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, needs_native_cpp, needs_wasm_bindgen, crates_names.clone(), crates_versions.clone())
-    match write_file(cargo_toml_path.clone(), cargo_text) [
-        Ok(_v) -> [
+    match extra_bin_path.clone() [
+        Some(bn2) -> [
+            !! DOPISUJEMY do Cargo.toml juz istniejacego (napisanego
+            !! przez WCZESNIEJSZE wywolanie build_project z
+            !! `bin_name = none()` dla `cmd/main.hcs` tego samego
+            !! czlonka) - nigdy nie nadpisujemy calosci, inaczej
+            !! stracilibysmy [[bin]] glownej binarki + [dependencies].
+            match read_file(cargo_toml_path.clone()) [
+                Ok(existing) -> [
+                    let appended = existing + "\n[[bin]]\nname = \"" + bn2 + "\"\npath = \"src/bin/" + bn2 + ".rs\"\n"
+                    match write_file(cargo_toml_path.clone(), appended) [
+                        Ok(_v) -> [
+                        ]
+                        Err(e) -> [
+                            warnings.push(cargo_toml_path + ": " + e)
+                        ]
+                    ]
+                ]
+                Err(e) -> [
+                    warnings.push(cargo_toml_path + " (multi-binarka '" + bn2 + "' wymaga, zeby glowny 'cmd/main.hcs' byl zbudowany JAKO PIERWSZY): " + e)
+                ]
+            ]
         ]
-        Err(e) -> [
-            warnings.push(cargo_toml_path + ": " + e)
+        None -> [
+            let cargo_text = cargo_toml_text(crate_name, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, needs_native_cpp, needs_wasm_bindgen, force_library, crates_names.clone(), crates_versions.clone(), needs_native_java, needs_sha256)
+            match write_file(cargo_toml_path.clone(), cargo_text) [
+                Ok(_v) -> [
+                ]
+                Err(e) -> [
+                    warnings.push(cargo_toml_path + ": " + e)
+                ]
+            ]
         ]
     ]
 
@@ -1320,6 +1498,46 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
             ]
         ]
         nci = nci + 1
+    ]
+
+    !! ROZBUDOWA (ta runda, patrz docs/JAVA.md) - materializuje kazdy
+    !! `native {java}(...)` (`CodeGen::native_java_sources`) jako
+    !! `out_dir/java/<ClassName>.java` - `virus build` kompiluje ten
+    !! plik przez `javac` na podstawie linii "java_class" w
+    !! `.hks-extern-links.txt` nizej. W odroznieniu od C++, zrodlo Javy
+    !! (`java_src`, zbudowane juz w calosci przez
+    !! `codegen.hcs::gen_native`) NIE wymaga tu zadnej dodatkowej
+    !! obrobki (bez rozdzielania dyrektyw preprocesora itp.) - Java nie
+    !! ma preprocesora.
+    let nji = 0
+    let njn = native_java_names.len()
+    if njn > 0 [
+        let java_dir = out_dir + "/java"
+        match create_dir(java_dir.clone()) [
+            Ok(_v) -> [
+            ]
+            Err(e) -> [
+                warnings.push(java_dir + ": " + e)
+            ]
+        ]
+    ]
+    while nji < njn [
+        let cname = native_java_names[nji].clone()
+        match native_java_sources.fetch(cname.clone()) [
+            Some(jsrc) -> [
+                let java_path = out_dir + "/java/" + cname + ".java"
+                match write_file(java_path.clone(), jsrc) [
+                    Ok(_v) -> [
+                    ]
+                    Err(e) -> [
+                        warnings.push(java_path + ": " + e)
+                    ]
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        nji = nji + 1
     ]
 
     !!! ZMIANA 0.3 - sidecar `.hks-extern-links.txt` (jedna linia
