@@ -1,4 +1,6 @@
 get <std:env> import <env_var_present>
+get <std:string> import <str_to_int::str_trim>
+get <std:process> import <run_command_inherit_ok>
 
 !! -- kody ANSI SGR (Select Graphic Rendition) -------------------------------
 !! (funkcje, NIE consts - patrz uzasadnienie na gorze pliku)
@@ -176,4 +178,77 @@ fun print_progress_line(label: Str, current: Int, total: Int, item: Str, is_firs
     ] else [
         log(ansi_cursor_up_clear() + line)
     ]
+]
+
+!! -- rozmiar terminala i tryb raw ---------------------------------------
+!! ROZBUDOWA (ta runda, patrz docs/ROADMAP.md sekcja 4) - dotad
+!! calkowicie brakujace. Ten bootstrap NIE MA dostepu do `ioctl`/
+!! `termios` (patrz uwaga przy `term_color_enabled` wyzej), wiec obie
+!! funkcje ponizej dzialaja przez ZEWNETRZNE narzedzia (`tput`/`stty`,
+!! standardowe w kazdym systemie uniksowym z terminalem) zamiast
+!! surowych wywolan systemowych - dziala TYLKO, gdy stdin/stdout tego
+!! procesu sa faktycznie podlaczone do terminala (TTY); przy
+!! przekierowaniu do pliku/potoku `tput`/`stty` zwykle zglaszaja blad,
+!! stad `none()`/`false` jako bezpieczny wynik w takim przypadku,
+!! zamiast propagowania surowego bledu polecenia.
+
+struct TermSize [
+    cols: Int,
+    rows: Int
+]
+
+!!! Rozmiar terminala (kolumny x wiersze) przez `tput cols`/`tput
+!!! lines` - `none()` jesli ktorekolwiek polecenie zawiedzie (brak
+!!! TTY, `tput` niedostepny) albo zwroci cos, co nie parsuje sie jako
+!!! liczba calkowita.
+fun term_size() -> Option<TermSize> [
+    let cols_out = ""
+    match run_command("tput", ["cols"]) [
+        Ok(o) -> [
+            cols_out = str_trim(o)
+        ]
+        Err(_e) -> [
+            end none()
+        ]
+    ]
+    let rows_out = ""
+    match run_command("tput", ["lines"]) [
+        Ok(o2) -> [
+            rows_out = str_trim(o2)
+        ]
+        Err(_e2) -> [
+            end none()
+        ]
+    ]
+    match str_to_int(cols_out.clone()) [
+        Some(c) -> [
+            match str_to_int(rows_out.clone()) [
+                Some(r) -> [
+                    end some(TermSize(c, r))
+                ]
+                None -> [
+                    end none()
+                ]
+            ]
+        ]
+        None -> [
+            end none()
+        ]
+    ]
+]
+
+!!! Wlacza (`enable = true`) albo wylacza (`false`) tryb "raw" (+ bez
+!!! echa) terminala PRZEZ `stty raw -echo` / `stty sane` - `true` przy
+!!! sukcesie. UWAGA: zmiana dotyczy CALEGO terminala (deskryptora
+!!! stdin procesu), nie da sie jej cofnac automatycznie przy
+!!! zakonczeniu procesu (w odroznieniu od bibliotek typu `crossterm`,
+!!! ktore robia to za pomoca RAII) - kazdy kod wlaczajacy `term_set_raw
+!!! (true)` MUSI sam wywolac `term_set_raw(false)` przed zakonczeniem
+!!! (rowniez na sciezkach bledu!), inaczej terminal uzytkownika
+!!! zostanie w trybie raw po wyjsciu z programu.
+fun term_set_raw(enable: Bool) -> Bool [
+    if enable [
+        end run_command_inherit_ok("stty", ["raw", "-echo"])
+    ]
+    end run_command_inherit_ok("stty", ["sane"])
 ]
