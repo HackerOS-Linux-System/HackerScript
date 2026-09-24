@@ -6,6 +6,7 @@ include <formatter>
 include <transpiler>
 include <project>
 include <hlib>
+include <lsp>
 get <std:io> import <file_readable>
 get <std:term> import <c_bold_green::c_bold_red::c_bold_cyan::c_red::c_gray::print_progress_line>
 
@@ -26,7 +27,8 @@ const BUILD_STEP_COUNT: Int = 4
 !!! kluczowymi TYLKO na etapie preprocessingu, patrz transpiler.hcs).
 !!! Parytet z `_parse_with_direct`.
 fun parse_with_direct(source: Str, src_path: Str) -> Program [
-    let extraction = extract_direct_blocks(source)
+    let fast_direct_extraction = extract_fast_direct_blocks(source)
+    let extraction = extract_direct_blocks(fast_direct_extraction.stripped_source)
     let native_extraction = extract_native_blocks(extraction.stripped_source, native_dirname(src_path))
     let sandbox_extraction = extract_sandbox_blocks(native_extraction.stripped_source)
     let hot_extraction = extract_hot_reload_markers(sandbox_extraction.stripped_source)
@@ -132,7 +134,7 @@ fun cmd_lint(src_path: Str) -> Int [
 !!! patrz to samo ograniczenie udokumentowane przy `build_project` w
 !!! project.hcs. `vira_root` DODANE w tej rundzie (patrz
 !!! `project.hcs::find_vira_cache_root`) - `none()` = auto-wykrywanie.
-fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, vira_root: Option<Str>) -> Int [
+fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, vira_root: Option<Str>, force_library: Bool, bin_name: Option<Str>) -> Int [
     if not file_readable(src_path.clone()) [
         elog(c_red("hackerc:") + " nie znaleziono pliku " + src_path)
         end 1
@@ -184,7 +186,7 @@ fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<St
             ]
 
             print_progress_line("Kompilacja " + src_path, 4, BUILD_STEP_COUNT, "generowanie crate'a Rust", false)
-            let result = build_project(src_path, out_dir, libs_root, bootstrap_root, vira_root, crate_name)
+            let result = build_project(src_path, out_dir, libs_root, bootstrap_root, vira_root, crate_name, force_library, bin_name)
 
             let wi = 0
             let wn = result.warnings.len()
@@ -521,16 +523,17 @@ fun cmd_transpile_legacy(src_path: Str, out_path: Str) -> Int [
 !!! Wypisuje banner `usage`/`--help` - parytet z
 !!! `build_parser().print_help()` (Python, argparse).
 fun print_usage() [
-    log("usage: hackerc [-h] [--version] {check,lint,build,fmt,hlib} ...")
+    log("usage: hackerc [-h] [--version] {check,lint,build,fmt,lsp,hlib} ...")
     log("")
     log("Transpilator HackerScript -> Rust")
     log("")
     log("positional arguments:")
-    log("  {check,lint,build,fmt,hlib}")
+    log("  {check,lint,build,fmt,lsp,hlib}")
     log("    check               typecheck bez generowania kodu")
     log("    lint                tylko warningi (podzbior 'check')")
     log("    build               pelny crate Rust (Cargo.toml + src/)")
     log("    fmt                 formatuje kod .hcs")
+    log("    lsp                 Language Server (LSP) po stdio - patrz docs/LSP.md (Etap 2a: diagnostyka)")
     log("    hlib                buduj/sprawdzaj archiwa .hlib (HackerOS Lib) - patrz hlib.hcs")
     log("      hlib build <plik.hcs> [-o wyjscie.hlib] [--lib-version W] [--sign klucz]")
     log("      hlib inspect <plik.hlib>")
@@ -631,9 +634,20 @@ fun main() [
         exit(0)
     ]
 
+    !! ROZBUDOWA (ta runda, patrz docs/LSP.md) - `hackerc lsp` NIE
+    !! bierze pliku wejsciowego jako argument (w odroznieniu od
+    !! check/lint/build/fmt nizej) - dziala jako dlugozyjacy proces,
+    !! czytajacy sciezki plikow z komunikatow JSON-RPC edytora
+    !! (`textDocument/didOpen`/`didChange`), nie z linii polecen.
+    !! `lsp_run()` konczy proces sam (przez `exit(...)`), wiec nie ma
+    !! tu `exit(...)` po jej wywolaniu.
+    if first == "lsp" [
+        lsp_run()
+    ]
+
     if first == "check" or first == "lint" or first == "build" or first == "fmt" [
         let _rest = argv.remove(0)
-        let value_flags: List<Str> = ["-o", "--output", "--crate-name", "--libs-root", "--bootstrap-root"]
+        let value_flags: List<Str> = ["-o", "--output", "--crate-name", "--libs-root", "--bootstrap-root", "--bin-name"]
         let src = first_positional(argv, value_flags)
         if src == "" [
             log("hackerc " + first + ": brak wymaganego argumentu 'source'")
@@ -700,7 +714,25 @@ fun main() [
             None -> [
             ]
         ]
-        exit(cmd_build(src, out_dir, crate_name, libs_root, bootstrap_root, vira_root))
+        !! ROZBUDOWA (ta runda) - `hackerc build --library` (przekazywane
+        !! przez `virus build --library`, patrz TargetLibrary w
+        !! `virus/cmd/build.hcs`) - `[lib] crate-type = ["rlib"]` zamiast
+        !! `[[bin]]`, patrz `project.hcs::cargo_toml_text`.
+        let force_library = has_flag(argv, "--library")
+        !! ROZBUDOWA (ta runda) - `--bin-name <nazwa>` (przekazywane
+        !! przez `virus build`, patrz `docs/VIRUS.md`, "Plan:
+        !! multi-binarki na czlonka") - pisze do `src/bin/<nazwa>.rs` i
+        !! DOPISUJE `[[bin]]` do juz istniejacego Cargo.toml, zamiast
+        !! generowac calosc od nowa (patrz `project.hcs::build_project`).
+        let bin_name: Option<Str> = none()
+        match find_flag_value(argv, "", "--bin-name") [
+            Some(v) -> [
+                bin_name = some(v)
+            ]
+            None -> [
+            ]
+        ]
+        exit(cmd_build(src, out_dir, crate_name, libs_root, bootstrap_root, vira_root, force_library, bin_name))
     ]
 
     if first == "hlib" [
