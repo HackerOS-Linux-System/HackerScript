@@ -367,12 +367,18 @@ fun hlib_extract_for_import(hlib_path: Str, lib_name: Str, into_dir: Str) -> Str
                         result_path = dest.to_string_lossy().to_string();
                     }
                 } else {
-                    // Brak zrodla - sprobuj zsyntetyzowac `extern`/`region` z
-                    // naglowka (manifest.json / exports). Uproszczone w v1:
-                    // wyciagamy nazwy eksportowanych funkcji wprost z
-                    // manifest.json przez proste skanowanie tekstu (bez
-                    // pelnego parsera JSON w tym bloku), wystarczajace dla
-                    // funkcji bez generykow.
+                    // ROZBUDOWA (ta runda, patrz docs/ROADMAP.md sekcja
+                    // 3 - "integracja .hlib z virus install") - brak
+                    // artefaktu `ast` (zrodla), ale jest `.so` dla tego
+                    // hosta: syntetyzujemy PRAWDZIWE sygnatury
+                    // `region [ ... ]` z `manifest.json` -> `exports`
+                    // (patrz docs/HLIB_FORMAT.md, sekcja 3 - "AbiType"),
+                    // zamiast (jak wczesniej) pustego szablonu z
+                    // komentarzem "dopisz recznie". Tylko eksporty
+                    // NIEGENERYCZNE i BEZ makr sa tu wiazane - dokladnie
+                    // to, co docs/HLIB_FORMAT.md sekcja 6 nazywa
+                    // "Synthesized extern (fallback)": "Only non-generic
+                    // function exports can be bound this way".
                     let so_key_prefix = "native/";
                     let so_entry = entries_map.iter().find(|(k, _)| k.starts_with(so_key_prefix) && k.ends_with(&format!("{}.so", lib_name)));
                     if let Some((so_path, so_bytes)) = so_entry {
@@ -380,9 +386,79 @@ fun hlib_extract_for_import(hlib_path: Str, lib_name: Str, into_dir: Str) -> Str
                         let _ = std::fs::create_dir_all(&cache_dir);
                         let so_dest = cache_dir.join(format!("lib{}.so", lib_name));
                         let _ = std::fs::write(&so_dest, so_bytes);
+
+                        // AbiType (docs/HLIB_FORMAT.md sekcja 3) -> typ
+                        // HackerScript. `None` = nie da sie odwzorowac w
+                        // typie prostym (np. `opaque { ... }`) - taki
+                        // eksport jest POMIJANY (z komentarzem
+                        // wyjasniajacym czemu), nie zgadywany.
+                        fn hks_abi_type(t: &str) -> Option<&'static str> {
+                            match t {
+                                "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" => Some("Int"),
+                                "f32" | "f64" => Some("Float"),
+                                "bool" => Some("Bool"),
+                                "ptr" => Some("Str"),
+                                "void" => Some(""),
+                                _ => None,
+                            }
+                        }
+
+                        let mut region_body = String::new();
+                        let mut skipped: Vec<String> = Vec::new();
+                        let manifest_bytes = entries_map.get("manifest.json");
+                        let exports: Vec<serde_json::Value> = manifest_bytes
+                            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+                            .and_then(|v| v.get("exports").cloned())
+                            .and_then(|v| v.as_array().cloned())
+                            .unwrap_or_default();
+                        for exp in &exports {
+                            let name = exp.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            if name.is_empty() {
+                                continue;
+                            }
+                            let kind = exp.get("kind").and_then(|v| v.as_str()).unwrap_or("function");
+                            let is_generic = exp.get("generic").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let is_macro = exp.get("is_macro").and_then(|v| v.as_bool()).unwrap_or(false);
+                            if kind != "function" || is_generic || is_macro {
+                                skipped.push(format!("{} (kind={}, generic={}, is_macro={} - patrz docs/HLIB_FORMAT.md sekcja 6, 'Only non-generic function exports')", name, kind, is_generic, is_macro));
+                                continue;
+                            }
+                            let empty_params = Vec::new();
+                            let params = exp.get("params").and_then(|v| v.as_array()).unwrap_or(&empty_params);
+                            let mut hks_params: Vec<String> = Vec::new();
+                            let mut param_ok = true;
+                            for (pi, p) in params.iter().enumerate() {
+                                let pty = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                                match hks_abi_type(pty) {
+                                    Some(t) if !t.is_empty() => hks_params.push(format!("p{}: {}", pi, t)),
+                                    _ => { param_ok = false; }
+                                }
+                            }
+                            if !param_ok {
+                                skipped.push(format!("{} (parametr spoza wspieranego AbiType - patrz docs/HLIB_FORMAT.md sekcja 3)", name));
+                                continue;
+                            }
+                            let ret_ty = exp.get("returns").and_then(|v| v.get("type")).and_then(|v| v.as_str()).unwrap_or("void");
+                            let ret_clause = match hks_abi_type(ret_ty) {
+                                Some(t) if t.is_empty() => String::new(),
+                                Some(t) => format!(" -> {}", t),
+                                None => { skipped.push(format!("{} (typ zwracany '{}' spoza wspieranego AbiType)", name, ret_ty)); continue; }
+                            };
+                            region_body.push_str(&format!("    fun {}({}){}\n", name, hks_params.join(", "), ret_clause));
+                        }
+                        if region_body.is_empty() {
+                            region_body.push_str("    !! Brak eksportow mozliwych do zwiazania automatycznie - patrz komentarz na koncu pliku.\n");
+                        }
+                        let mut skip_comment = String::new();
+                        if !skipped.is_empty() {
+                            skip_comment.push_str("\n!! Pominiete (nie da sie zwiazac automatycznie):\n");
+                            for s in &skipped {
+                                skip_comment.push_str(&format!("!!   - {}\n", s));
+                            }
+                        }
                         let stub = format!(
-                            "!!! auto-wygenerowane przez hlib_extract_for_import z {} - nie edytuj recznie\nget <extern:{}> use <dynamic>\nregion [\n    !! UWAGA: ten .hlib nie mial artefaktu `ast` (zrodla) - sygnatury\n    !! ponizej trzeba dopisac recznie na podstawie dokumentacji\n    !! biblioteki (manifest.json->exports niesie typy, ale to archiwum\n    !! nie jest HackerScript-owe zrodlo, wiec generator sygnatur w tym\n    !! miejscu jest celowo pominiety - patrz HLIB_FORMAT.md, sekcja\n    !! \"ABI stability\").\n]\n",
-                            hlib_path, so_dest.to_string_lossy()
+                            "!!! auto-wygenerowane przez hlib_extract_for_import z {} - nie edytuj recznie\nget <extern:{}> use <dynamic>\nregion [\n{}]\n{}",
+                            hlib_path, so_dest.to_string_lossy(), region_body, skip_comment
                         );
                         let dest = std::path::Path::new(&into_dir).join(format!("{}_hlib_bind.hcs", lib_name));
                         if std::fs::write(&dest, stub).is_ok() {
