@@ -29,6 +29,21 @@ struct WorkspaceSection [
     members: List<Str>
 ]
 
+!!! ROZBUDOWA (ta runda) - `[native_sources]` (patrz docs/ROADMAP.md,
+!!! sekcja 3 - "Plan: kompilacja WLASNYCH zrodel .c/.cpp") - listy
+!!! SCIEZEK (wzgledem korzenia projektu) do plikow `.c`/`.cpp`
+!!! projektu, ktore maja zostac skompilowane przez crate `cc` i
+!!! zlinkowane statycznie - odrebne od `get <c:nazwa>`/`get
+!!! <cpp:nazwa>` (ktore linkuja SYSTEMOWA biblioteke PO NAZWIE, nie
+!!! kompiluja niczego). Przyklad w Virus.hk:
+!!!   [native_sources]
+!!!   -> c => ["native/hash.c"]
+!!!   -> cpp => ["native/matrix.cpp", "native/blas_shim.cpp"]
+struct NativeSourcesSection [
+    c: List<Str>,
+    cpp: List<Str>
+]
+
 !!! ZMIANA 0.4 - sekcja `[build]` (byla tu: `struct BuildSection [ entry:
 !!! Str ]` + `default_build_section()` + pole `build: BuildSection` w
 !!! `Manifest` nizej) ZOSTALA CALKOWICIE USUNIETA z formatu `.hk`.
@@ -50,7 +65,8 @@ struct Manifest [
     package: PackageSection,
     dependencies: List<Dependency>,
     dev_dependencies: List<Dependency>,
-    workspace: WorkspaceSection
+    workspace: WorkspaceSection,
+    native_sources: NativeSourcesSection
 ]
 
 !!! Szuka `key` w liscie par `entries` (JsonObject rozpakowany) - `none()`
@@ -297,13 +313,21 @@ fun parse_manifest_str(source: Str, origin: Str) -> Result<Manifest, Str> [
     let dev_dependencies = manifest_collect_dependencies(manifest_optional_map(root_entries.clone(), "dev-dependencies"))
     let workspace = WorkspaceSection(manifest_get_str_array(manifest_optional_map(root_entries.clone(), "workspace"), "members"))
 
+    !! ROZBUDOWA (ta runda) - patrz `NativeSourcesSection` wyzej. Brak
+    !! sekcji `[native_sources]` w pliku = obie listy puste (parytet z
+    !! reszta opcjonalnych sekcji tego parsera - `manifest_optional_map`
+    !! zwraca pusta liste `entries`, gdy sekcji nie ma wcale).
+    let native_c = manifest_get_str_array(manifest_optional_map(root_entries.clone(), "native_sources"), "c")
+    let native_cpp = manifest_get_str_array(manifest_optional_map(root_entries.clone(), "native_sources"), "cpp")
+    let native_sources = NativeSourcesSection(native_c, native_cpp)
+
     !!! ZMIANA 0.4 - sekcja [build] nie jest juz odczytywana wcale (patrz
     !!! komentarz przy usunietej `BuildSection` wyzej) - nawet jesli
     !!! nadal wystepuje w jakims starym pliku `.hk`, po prostu jest
     !!! ignorowana (parser .hk nie traktuje nieznanych sekcji jako
     !!! bledu - parytet z `#[serde(deny_unknown_fields)]` OFF).
 
-    end ok(Manifest(package, dependencies, dev_dependencies, workspace))
+    end ok(Manifest(package, dependencies, dev_dependencies, workspace, native_sources))
 ]
 
 !!! Wczytuje i parsuje `Virus.hk` (albo dowolny plik `.hk` o tym samym
