@@ -148,6 +148,27 @@ fun hackerc_build_crate(hackerc_bin: Str, entry: Str, crate_dir: Str, crate_name
     end run_command_checked(hackerc_bin, ["build", entry.clone(), "-o", crate_dir.clone(), "--crate-name", crate_name.clone()])
 ]
 
+!!! ROZBUDOWA (ta runda) - jak `hackerc_build_crate` wyzej, ale z
+!!! `--library` (patrz `hackerc/cmd/main.hcs` + `project.hcs::
+!!! cargo_toml_text` - `CARGO_TOML_LIBRARY_MID`) - generuje
+!!! `src/lib.rs` + `Cargo.toml` z `[lib] crate-type = ["rlib"]`
+!!! zamiast `[[bin]]`. Uzywane przez `virus build --library`
+!!! (`TargetLibrary`, patrz nizej w tym pliku).
+fun hackerc_build_crate_library(hackerc_bin: Str, entry: Str, crate_dir: Str, crate_name: Str) -> Result<Str, Str> [
+    end run_command_checked(hackerc_bin, ["build", entry.clone(), "-o", crate_dir.clone(), "--crate-name", crate_name.clone(), "--library"])
+]
+
+!!! ROZBUDOWA (ta runda) - jak `hackerc_build_crate` wyzej, ale dla
+!!! JEDNEJ DODATKOWEJ binarki czlonka (`cmd/bin/<bin_name>.hcs`,
+!!! patrz `docs/VIRUS.md`, "Plan: multi-binarki na czlonka") - musi
+!!! byc wolane PO glownym `hackerc_build_crate` (dla `cmd/main.hcs`)
+!!! na TYM SAMYM `crate_dir`, bo `--bin-name` DOPISUJE `[[bin]]` do
+!!! juz istniejacego `Cargo.toml` zamiast pisac go od nowa (patrz
+!!! `project.hcs::build_project`).
+fun hackerc_build_crate_bin(hackerc_bin: Str, entry: Str, crate_dir: Str, crate_name: Str, bin_name: Str) -> Result<Str, Str> [
+    end run_command_checked(hackerc_bin, ["build", entry.clone(), "-o", crate_dir.clone(), "--crate-name", crate_name.clone(), "--bin-name", bin_name.clone()])
+]
+
 !!! `hackerc check <plik>` - diagnostyka bez generowania kodu.
 fun hackerc_check_file(hackerc_bin: Str, src: Str) -> Result<Str, Str> [
     end run_command_checked(hackerc_bin, ["check", src.clone()])
@@ -188,6 +209,38 @@ fun hackerc_compile_crate(crate_dir: Str, crate_name: Str, release: Bool) -> Res
     let built = path_join(path_join(path_join(crate_dir, "target"), profile_dir), crate_name)
     if not path_exists(built.clone()) [
         end err("kompilacja zakonczyla sie (podobno) sukcesem, ale nie znaleziono binarki " + built + " - sprawdz [[bin]].name w Cargo.toml. Wyjscie cargo:\n" + build_result)
+    ]
+    end ok(built)
+]
+
+!!! ROZBUDOWA (ta runda) - jak `hackerc_compile_crate` wyzej, ale dla
+!!! `virus build --library` (`TargetLibrary`): `cargo build --lib
+!!! [--release]` zamiast zwyklego `cargo build` - w projekcie z `[lib]`
+!!! (bez `[[bin]]`) oba dzialaja identycznie, ale `--lib` jest jawne
+!!! (nie polega na tym, ze Cargo "przypadkiem" nie znajdzie zadnego
+!!! `[[bin]]` do zbudowania). Artefakt to `lib<crate_name z _ zamiast
+!!! ->.rlib` (Rust ZAWSZE dodaje przedrostek "lib" do nazwy pliku
+!!! `.rlib`, w odroznieniu od `[[bin]]`, patrz `replace_dash_local`
+!!! nizej - ten sam mechanizm co WASM).
+fun hackerc_compile_crate_library(crate_dir: Str, crate_name: Str, release: Bool) -> Result<Str, Str> [
+    if not command_succeeds("cargo", ["--version"]) [
+        end err("budowanie wymaga zainstalowanego Rust (cargo) - crate wygenerowany w " + crate_dir + " nie zostal skompilowany. Zainstaluj Rust: https://rustup.rs")
+    ]
+
+    let cargo_args: List<Str> = ["build", "--lib", "--manifest-path", path_join(crate_dir.clone(), "Cargo.toml")]
+    if release [
+        cargo_args.push("--release")
+    ]
+    let build_result = run_command_checked("cargo", cargo_args)?
+
+    let profile_dir = "debug"
+    if release [
+        profile_dir = "release"
+    ]
+    let lib_file_stem = "lib" + replace_dash_local(crate_name)
+    let built = path_join(path_join(path_join(crate_dir, "target"), profile_dir), lib_file_stem + ".rlib")
+    if not path_exists(built.clone()) [
+        end err("kompilacja zakonczyla sie (podobno) sukcesem, ale nie znaleziono " + built + " - sprawdz [lib] w Cargo.toml. Wyjscie cargo:\n" + build_result)
     ]
     end ok(built)
 ]
@@ -286,12 +339,12 @@ fun hackerc_compile_crate_wasm(crate_dir: Str, crate_name: Str, release: Bool, o
         end ok(WasmBuildOutcome(raw_wasm, none(), false))
     ]
 
-    match create_dir_ok(out_dir.clone()) [
-        Ok(_v) -> [
-        ]
-        Err(_e) -> [
-        ]
-    ]
+    !! `create_dir_ok` zwraca `Bool` (nie `Result`) - patrz jego
+    !! poprawne uzycie wyzej w tym pliku (`if not create_dir_ok(...)`).
+    !! Tu wynik jest celowo ignorowany (najczestszy przypadek: katalog
+    !! juz istnieje) - `wasm-bindgen` nizej i tak zglosi czytelny blad,
+    !! jesli `out_dir` faktycznie nie da sie zapisac.
+    create_dir_ok(out_dir.clone())
     match run_command_checked("wasm-bindgen", [raw_wasm.clone(), "--target", "web", "--out-dir", out_dir.clone()]) [
         Ok(_o) -> [
             end ok(WasmBuildOutcome(raw_wasm, some(out_dir), true))
