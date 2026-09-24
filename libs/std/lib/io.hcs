@@ -12,16 +12,17 @@ fun read_file_or(path: Str, domyslna: Str) -> Str [
 
 !! Sprawdza, czy plik istnieje i da sie go odczytac (bez zwracania
 !! tresci) - przydatne przed operacjami, ktore zakladaja jego obecnosc.
+!! NAPRAWIONY BUG (ta runda, znaleziony realnym buildem przy
+!! integracji .hlib - patrz docs/ROADMAP.md): poprzednia wersja
+!! sprawdzala "czytelnosc" przez `read_file` (`std::fs::
+!! read_to_string`, WALIDUJACE UTF-8) - dla KAZDEGO pliku binarnego
+!! (kazdy `.hlib`, kazdy `.so`, obrazek, ...) zawsze zwracala `false`,
+!! NAWET jesli plik naprawde istnial i byl czytelny na poziomie
+!! systemu plikow - bo tresc po prostu nie jest poprawnym UTF-8.
+!! `path_exists` (builtin, `Path::exists()`) sprawdza WLASCIWA rzecz -
+!! obecnosc pliku, bez prob dekodowania jego tresci.
 fun file_readable(path: Str) -> Bool [
-    let wynik = read_file(path)
-    match wynik [
-        Ok(_tresc) -> [
-            end true
-        ]
-        Err(_e) -> [
-            end false
-        ]
-    ]
+    end path_exists(path)
 ]
 
 !! Zapisuje `tresc` do pliku i zwraca `true` przy sukcesie, `false` przy
