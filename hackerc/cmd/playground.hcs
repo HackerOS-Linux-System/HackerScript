@@ -10,7 +10,8 @@ include <transpiler>
 !!! `project.hcs`/prawdziwy `main()` z argv, niepotrzebne i niedzialajace
 !!! w WASM).
 fun parse_source(source: Str) -> Program [
-    let extraction = extract_direct_blocks(source)
+    let fast_direct_extraction = extract_fast_direct_blocks(source)
+    let extraction = extract_direct_blocks(fast_direct_extraction.stripped_source)
     end parse(extraction.stripped_source)
 ]
 
