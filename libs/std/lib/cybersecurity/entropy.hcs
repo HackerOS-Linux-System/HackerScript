@@ -43,3 +43,40 @@ fun shannon_entropy(data: List<Int>) -> Float [
 fun looks_encrypted(data: List<Int>, threshold: Float) -> Bool [
     end shannon_entropy(data) >= threshold
 ]
+
+!! ROZBUDOWA (ta runda, patrz docs/ROADMAP.md sekcja 4) - dotad
+!! calkowicie brakujace prymitywy poza entropia.
+
+!!! Stalo-czasowe porownanie dwoch stringow (np. hashy hasel, tokenow
+!!! sesji, podpisow) - w ODROZNIENIU od zwyklego `a == b`, sprawdza
+!!! WSZYSTKIE znaki niezaleznie od tego, czy wczesniejszy juz sie nie
+!!! zgadza (`a == b` w wygenerowanym Ruscie moze wyjsc z porownania
+!!! wczesniej przy pierwszej niezgodnosci - to jest DOKLADNIE ten atak
+!!! czasowy, przed ktorym ta funkcja chroni). RÓZNE DLUGOSCI dajaFalse
+!!! natychmiast (dlugosc sekretu i tak zwykle nie jest tajemnica) -
+!!! stalo-czasowosc dotyczy TRESCI, nie dlugosci.
+fun ct_eq(a: Str, b: Str) -> Bool [
+    if a.len() != b.len() [
+        end false
+    ]
+    let diff = 0
+    let i = 0
+    let n = a.len()
+    while i < n [
+        let ca = a.char_at(i)
+        let cb = b.char_at(i)
+        if ca != cb [
+            diff = diff + 1
+        ]
+        i = i + 1
+    ]
+    end diff == 0
+]
+
+!!! Wygodny skrot: `true` jesli SHA-256 tekstu `data` (szesnastkowo)
+!!! zgadza sie z oczekiwanym skrotem `expected_hex` - porownanie SAMYCH
+!!! SKROTOW jest stalo-czasowe (`ct_eq`), tak jak przy weryfikacji
+!!! kazdego podpisu/checksumy powinno byc.
+fun sha256_matches(data: Str, expected_hex: Str) -> Bool [
+    end ct_eq(sha256_hex(data), expected_hex)
+]
