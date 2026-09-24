@@ -149,3 +149,134 @@ fun str_join(parts: List<Str>, sep: Str) -> Str [
     ]
     end out
 ]
+
+!! ROZBUDOWA (ta runda, patrz docs/ROADMAP.md sekcja 4) - `Str -> Int`
+!! nie mial dotad ZADNEGO ogolnego odpowiednika w calym `libs/std`
+!! (kazde miejsce, ktore tego potrzebowalo - np.
+!! `hackerc/cmd/lsp.hcs::lsp_parse_uint` przy parsowaniu naglowka
+!! `Content-Length` - pisalo WLASNA, waska, jednorazowa wersje).
+!! `none()` dla pustego stringa albo znaku spoza `[0-9]`/wiodacego
+!! `-`/`+` - CELOWO scisle (bez tolerowania spacji/przecinkow itp.,
+!! w odroznieniu od np. Python `int()`), zeby bledy w danych byly
+!! widoczne od razu jako `none()`, nie ciche zgadywanie.
+fun str_to_int(s: Str) -> Option<Int> [
+    let n = s.len()
+    if n == 0 [
+        end none()
+    ]
+    let i = 0
+    let neg = false
+    let first = s.char_at(0)
+    if first == "-" [
+        neg = true
+        i = 1
+    ] elif first == "+" [
+        i = 1
+    ]
+    if i >= n [
+        end none()
+    ]
+    let value = 0
+    while i < n [
+        let c = s.char_at(i)
+        let d = -1
+        if c == "0" [
+            d = 0
+        ] elif c == "1" [
+            d = 1
+        ] elif c == "2" [
+            d = 2
+        ] elif c == "3" [
+            d = 3
+        ] elif c == "4" [
+            d = 4
+        ] elif c == "5" [
+            d = 5
+        ] elif c == "6" [
+            d = 6
+        ] elif c == "7" [
+            d = 7
+        ] elif c == "8" [
+            d = 8
+        ] elif c == "9" [
+            d = 9
+        ]
+        if d == -1 [
+            end none()
+        ]
+        value = value * 10 + d
+        i = i + 1
+    ]
+    if neg [
+        end some(0 - value)
+    ]
+    end some(value)
+]
+
+!! Jak `str_to_int`, ale dla `Float` - dopuszcza NAJWYZEJ JEDNA kropke
+!! dziesietna (np. "3.14", "-0.5", "42") - bez notacji naukowej
+!! ("1e10"), bez wiodacej/koncowej kropki bez cyfr ("." / "3." /
+!! ".5" - wszystkie daja problem, `none()`), zeby zachowanie bylo
+!! przewidywalne i latwe do przetestowania w calosci.
+fun str_to_float(s: Str) -> Option<Float> [
+    let n = s.len()
+    if n == 0 [
+        end none()
+    ]
+    let dot = -1
+    let i0 = 0
+    if s.char_at(0) == "-" or s.char_at(0) == "+" [
+        i0 = 1
+    ]
+    let i = i0
+    while i < n [
+        if s.char_at(i) == "." [
+            if dot != -1 [
+                end none()
+            ]
+            dot = i
+        ]
+        i = i + 1
+    ]
+    if dot == -1 [
+        match str_to_int(s.clone()) [
+            Some(iv) -> [
+                end some(iv as Float)
+            ]
+            None -> [
+                end none()
+            ]
+        ]
+    ]
+    if dot == i0 or dot == n - 1 [
+        end none()
+    ]
+    let int_part = s.slice(0, dot)
+    let frac_part = s.slice(dot + 1, n)
+    match str_to_int(int_part) [
+        Some(iv2) -> [
+            match str_to_int(frac_part.clone()) [
+                Some(fv) -> [
+                    let scale = 1.0
+                    let k = 0
+                    let fn_ = frac_part.len()
+                    while k < fn_ [
+                        scale = scale * 10.0
+                        k = k + 1
+                    ]
+                    let frac_val = (fv as Float) / scale
+                    if iv2 < 0 [
+                        end some((iv2 as Float) - frac_val)
+                    ]
+                    end some((iv2 as Float) + frac_val)
+                ]
+                None -> [
+                    end none()
+                ]
+            ]
+        ]
+        None -> [
+            end none()
+        ]
+    ]
+]
