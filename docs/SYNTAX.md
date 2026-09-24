@@ -450,15 +450,19 @@ kompilatora C (bo `rquickjs-sys` kompiluje C QuickJS przez `cc`).
 
 ### Ograniczenia (uczciwie, jak reszta tego bootstrapu)
 
-* `get <c:...>`/`get <cpp:...>` linkują dziś **systemową** bibliotekę
-  po nazwie. Kompilowanie WŁASNEGO źródła `.c`/`.cpp` z projektu
-  (np. `native/<nazwa>/*.c`) przez `cc::Build` zamiast tego — **nie
-  jest jeszcze zrobione** (patrz `docs/ROADMAP.md`).
-* Sygnatury zadeklarowane w `region [ ... ]` nie są dziś wpuszczane do
-  `typecheck.hcs`/`typeinfer.hcs` (ten sam gap co miało stare
-  `extern "lib" fun ...` przed 0.3) — literówka w nazwie/typie
-  parametru nie da błędu kompilatora HackerScript, tylko błąd `rustc`
-  na wygenerowanym kodzie.
+* `get <c:...>`/`get <cpp:...>` (BEZ `use <...>`) wciąż linkują
+  wyłącznie **systemową** bibliotekę po nazwie. Kompilowanie WŁASNEGO
+  źródła `.c`/`.cpp` z projektu jest od tej rundy możliwe — ale przez
+  osobny mechanizm: sekcja `[native_sources]` w `Virus.hk` (patrz
+  `docs/VIRUS.md`), nie przez `get <c:...>`/`get <cpp:...>`.
+* ~~Sygnatury zadeklarowane w `region [ ... ]` nie są dziś wpuszczane
+  do `typecheck.hcs`/`typeinfer.hcs`~~ **Naprawione**: od tej rundy
+  `collect_signatures` (`hackerc/cmd/typeinfer.hcs`) wpisuje każdą
+  `ExternSig` z `region [ ... ]` do tej samej tabeli `functions`, co
+  zwykłe `fun` — literówka w nazwie/liczbie argumentów wywołania
+  funkcji z `region` daje teraz błąd `hackerc` (arity check w
+  `check_call`), zamiast dopiero błędu `rustc` na wygenerowanym
+  kodzie.
 * `region` nie sprawdza w żaden sposób, że poprzedzający go `get
   <extern:...>` rzeczywiście istnieje w tym samym pliku (best-effort
   parser, patrz wyżej).
