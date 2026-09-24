@@ -45,3 +45,12 @@ fun run_command_simple(program: Str) -> Result<Str, Str> [
 fun run_command_combined_labeled(program: Str, args: List<Str>) -> Str [
     end "$ " + program.clone() + " " + str_join(args.clone(), " ") + "\n" + run_command_combined(program, args)
 ]
+
+!! ROZBUDOWA (ta runda, patrz docs/VIRUS.md - "virus lsp") - jak
+!! `run_command_inherit()` (builtin), ale zwraca `Bool` (kod wyjscia
+!! 0 = sukces) zamiast surowego kodu - wygodne dla wywolujacych, ktorych
+!! interesuje tylko "czy sie udalo", np. `exit(if ok { 0 } else { 1 })`
+!! po stronie `virus`.
+fun run_command_inherit_ok(program: Str, args: List<Str>) -> Bool [
+    end run_command_inherit(program, args) == 0
+]
