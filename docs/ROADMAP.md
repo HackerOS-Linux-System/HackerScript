@@ -90,6 +90,14 @@ braku czasu, i gdzie kolejna runda pracy przyniesie najwięcej.
 
 ## 1. Braki językowe samego bootstrapu (`hackerc`)
 
+> Status tej rundy: lista niżej bez zmian merytorycznych — te braki
+> są przesłanką (nie celem) dla `docs/LSP.md` (numery linii w AST są
+> wymagane dla dokładnego `textDocument/publishDiagnostics`) i dla
+> `docs/GRAMMAR.md` (sekcja "Znane rozbieżności"). Kolejność
+> wdrożenia: numery linii w AST i `ParseError` idą przed Etapem 2a
+> `lsp` (patrz `docs/LSP.md`), reszta punktów niżej pozostaje
+> nieuszeregowana w czasie.
+
 * Brak iteracji po `Dict` (`.keys()`/`.values()`/`.items()`) —
   dostępny jest tylko `.fetch(known_key)`. Wymusza to obejścia w
   całym kompilatorze (ręczne listy `*_names` towarzyszące każdemu
@@ -114,19 +122,37 @@ nadrobione podczas bootstrapu.
 
 ## 3. FFI 0.3/0.4
 
-* `get <c:...>`/`get <cpp:...>` linkuje dziś tylko systemowe
-  biblioteki po nazwie — kompilacja WŁASNYCH źródeł `.c`/`.cpp` z
-  projektu przez crate `cc` jeszcze nie działa (`virus/cmd/build.hcs`).
-* `native {C++}` wymaga zainstalowanego kompilatora; brak lepszej
-  obsługi błędów przy jego braku.
-* Sygnatury zadeklarowane w `region [ ... ]` nie są dziś wpuszczane do
-  `typecheck.hcs`/`typeinfer.hcs` — literówka w nazwie/typie parametru
-  nie da błędu kompilatora HackerScript, tylko błąd `rustc` na
-  wygenerowanym kodzie.
+* ✅ **Zrobione (ta runda):** kompilacja WŁASNYCH źródeł `.c`/`.cpp`
+  projektu przez crate `cc`, obok `get <c:...>`/`get <cpp:...>`
+  (które nadal tylko linkują systemową bibliotekę po nazwie) — nowa
+  sekcja manifestu `[native_sources] -> c = [...]` / `cpp = [...]`
+  (`virus/cmd/manifest.hcs::NativeSourcesSection`), którą
+  `build_wire_extern_dependencies` (`virus/cmd/build.hcs`) zamienia na
+  wywołania `cc::Build::new().file(...).compile(...)` w generowanym
+  `build.rs`, dopisując `[build-dependencies] cc = "1"` do Cargo.toml,
+  gdy jeszcze go tam nie ma.
+* ✅ **Zrobione (ta runda), częściowo:** `virus build` sprawdza z góry
+  dostępność kompilatora C/C++ (`cc`/`gcc`/`clang`/`cl`), gdy projekt
+  używa `[native_sources]`, i zwraca czytelny błąd zamiast surowego
+  błędu `cc`/`rustc` w środku `cargo build`. **Zostaje:** inline
+  `native {C++}[...]` (bez `[native_sources]`) wciąż nie ma tego
+  prechecku — jego błąd braku kompilatora nadal wychodzi dopiero z
+  samego `cc`.
+* ✅ **Zrobione (ta runda):** sygnatury zadeklarowane w
+  `region [ ... ]` trafiają teraz do tej samej tabeli `functions` co
+  zwykłe `fun` (`hackerc/cmd/typeinfer.hcs::collect_signatures`) —
+  `check_call` (typecheck.hcs) sprawdza teraz liczbę argumentów przy
+  wywołaniach funkcji z `region`, zamiast dawać błąd dopiero z
+  `rustc` na wygenerowanym kodzie. Patrz `docs/SYNTAX.md`, sekcja FFI
+  "Ograniczenia".
 * Format `.hlib` (biblioteki binarne) — dopiero raczkuje:
   `hackerc hlib build/inspect/verify` działa, ale integracja z `virus
   install` (auto-generowanie stubów `get <extern:...>`) jest
-  częściowa.
+  częściowa. **Plan:** `virus install hlib <nazwa>` po pobraniu
+  archiwum `.hlib` woła `hackerc hlib inspect --stubs` (nowa flaga) i
+  zapisuje wygenerowane stuby `get <extern:...> use <...>` +
+  `region [...]` do `cache/hlib_stubs/<nazwa>.hcs`, gotowe do
+  `include`.
 
 ## 4. Luki w `libs/std` poza rdzeniem
 
@@ -134,6 +160,28 @@ Rdzeń (`fs`, `io`, `string`, `math`, `json`, `result`) jest solidny,
 ale moduły dodatkowe (`toml`, `http`, `process`, `term`,
 `cybersecurity/`) mają mniejsze pokrycie funkcji niż odpowiedniki w
 Pythonie/Rust.
+
+**Plan domykania, moduł po module** (kolejność wg tego, co dziś
+najczęściej brakuje w praktyce, ustalona przy pisaniu `docs/VIRUS.md`
+i `docs/FAST_DIRECT.md`):
+1. `libs/std/lib/process.hcs` — brakuje przechwytywania stdout/stderr
+   jako strumieni (dziś tylko odpowiednik `run-and-collect`); potrzebne
+   wprost pod przyszłe `fast direct {multiprocessing}`/`{ray}`
+   (patrz `docs/FAST_DIRECT.md`) do zarządzania procesami roboczymi.
+2. `libs/std/lib/http.hcs` — brak klienta streamującego (dziś
+   całe ciało odpowiedzi na raz); zderza się z tym samym obszarem co
+   przyszłe `fast direct {httpx}`/`{aiohttp}`.
+3. `libs/std/lib/term.hcs` — pokrycie kolorów/kursora wystarczające
+   dla dzisiejszych potrzeb (`virus`, patrz `docs/VIRUS.md`), brakuje
+   odczytu rozmiaru terminala i trybu raw (potrzebne pod interaktywne
+   `virus repair`/przyszłe `lsp` logi debug).
+4. `libs/std/lib/toml.hcs` — brak zapisu (tylko odczyt) — `Virus.hk`
+   dziś edytowany przez `virus install`/`remove` na poziomie tekstu,
+   nie przez ten moduł; docelowo `install.hcs`/`remove.hcs` powinny
+   przejść na `toml.hcs` do zapisu, gdy ten zyska serializację.
+5. `libs/std/lib/cybersecurity/entropy.hcs` — dziś tylko entropia
+   Shannona; brak innych podstawowych prymitywów (hashowanie,
+   stałoczasowe porównanie) używanych w przykładach z `docs/showcase`.
 
 ## 5. Sandbox i uprawnienia (`codegen.hcs`)
 
@@ -144,28 +192,79 @@ zaoferować alternatywę.
 
 ## 6. Menedżer pakietów `virus`
 
-* Baza diagnostyk dla `virus repair` jest niepełna — nieznane kody
-  błędów kończą się komunikatem "zgłoś to, żeby dodać do bazy".
-* Rejestr `vira.io` obsługuje typy `git`/`static-lib`/`shared-lib`/
-  `rust-lib`, ale rozpoznawanie nieznanych rozszerzeń plików
-  (`.a`/`.so`) czasem polega na zgadywaniu trybu linkowania.
-* `--library`/`TargetLibrary` (budowanie członka workspace jako
-  biblioteki .rlib, bez próby "uruchomienia" go) nie jest jeszcze
-  zaimplementowane — dziś członkowie bez `cmd/main.hcs` są po prostu
-  pomijani przy `virus build` na całym workspace (patrz
-  `workspace_member_buildable_entry`), a nie kompilowani osobno jako
-  `.rlib`.
-* Multi-binarki na jednego członka (`[[bin]]` jak w Cargo) — dziś
-  jeden `cmd/main.hcs` = jeden budowalny plik wejściowy na członka;
-  brak odpowiednika Cargo `src/bin/*.rs`.
+Cztery z pięciu punktów niżej są teraz **zaimplementowane w kodzie**
+(nie tylko zaprojektowane) — pełny opis w **`docs/VIRUS.md`**, sekcja
+"Plany rozbudowy" (nazwa sekcji zostaje historyczna, treść już
+odzwierciedla stan "zrobione").
+
+* ✅ **Zrobione (ta runda):** baza diagnostyk `virus repair`
+  przepisana na zgodną 1:1 z realnymi kodami z `typecheck.hcs`
+  (`virus/cmd/repair.hcs`), plus dopasowanie przybliżone
+  (Levenshtein) nieznanego kodu do najbliższego znanego.
+* ✅ **Zrobione (ta runda):** rozpoznawanie `.a`/`.so`/`.dylib`/`.dll`
+  jawną tabelą zamiast cichego domyślnego "dynamic" dla wszystkiego
+  poza `.a` (`virus/cmd/build.hcs`) — nieznane rozszerzenie teraz
+  jawnie OSTRZEGA, że tryb linkowania jest zgadywany.
+* ✅ **Zrobione (ta runda):** `--library`/`TargetLibrary` — pełny
+  łańcuch `hackerc build --library` → `[lib] crate-type=["rlib"]`
+  (`project.hcs`) → `cargo build --lib` → kopia `.rlib`
+  (`virus/cmd/build.hcs`, `hackerc_bridge.hcs`). Członkowie workspace
+  z samym `lib/mod.hcs` (np. `libs/core`, `libs/std`) są teraz
+  budowani jako `.rlib` zamiast pomijani.
+* ✅ **Zrobione (ta runda):** multi-binarki — `cmd/bin/*.hcs` obok
+  `cmd/main.hcs` dopisują własne `[[bin]]` do Cargo.toml
+  (`hackerc build --bin-name`, `project.hcs::build_project`), `virus
+  build` buduje domyślnie wszystkie, `virus build --bin <nazwa>`
+  buduje tylko jedną.
+* **Nowość — `virus lsp`** (jeszcze nieistniejąca komenda, projekt
+  gotowy, kod jeszcze nie napisany): patrz `docs/LSP.md`.
 
 ## 7. Dokumentacja
 
 Ten plik jest pierwszą wersją — wcześniej cytowany wszędzie, ale
 fizycznie nieobecny, więc lista braków była rozproszona po
-komentarzach `!!!` w kodzie. Wciąż brakuje:
+komentarzach `!!!` w kodzie.
 
-* Formalnej gramatyki `hackerc` (BNF/EBNF) — `docs/SYNTAX.md` jest
-  ręcznie pisaną mapą, nie specyfikacją.
-* Osobnego dokumentu opisującego `virus` (dziś tylko `--help` w
-  `virus/cmd/main.hcs` + ten plik).
+* ✅ **Formalna gramatyka `hackerc` (EBNF)** — `docs/GRAMMAR.md`,
+  dodana w tej rundzie. `docs/SYNTAX.md` zostaje jako ręcznie pisana
+  mapa/samouczek (nadal nadrzędny wobec obu w razie rozbieżności jest
+  kod `lexer.hcs`/`parser.hcs`), `GRAMMAR.md` to formalne uzupełnienie
+  w notacji EBNF, z osobną sekcją nazywającą wprost dwa miejsca, gdzie
+  gramatyka formalna i dzisiejszy parser się rozjeżdżają (brak
+  `ParseError`, brak numerów linii w AST — patrz sekcja 1 niżej).
+* ✅ **Osobny dokument opisujący `virus`** — `docs/VIRUS.md`, dodana w
+  tej rundzie. Opisuje manifest `Virus.hk`, wszystkie komendy
+  (`init`/`build`/`cache`/`check`/`lint`/`fmt`/`install`/`remove`/
+  `repair`/`clean`) i — nowość względem samego `--help` — rozpisany
+  plan implementacji dla każdego z czterech braków w sekcji 6 niżej.
+
+## 8. Plan kolejnej rundy: `lsp` i `fast direct {backend}`
+
+Dwie duże, nowe rzeczy zaprojektowane w tej rundzie (Faza 1 —
+specyfikacja + dokumentacja; kod przyjdzie w kolejnych rundach,
+iteracyjnie, żeby każdy krok był realnie sprawdzalny zamiast
+deklarowany "zrobiony" bez pokrycia w działającym kodzie):
+
+* ✅ **Zrobione (ta runda) — Etap 2a:** `hackerc lsp`/`virus lsp`
+  istnieją i działają — JSON-RPC po stdio (`hackerc/cmd/lsp.hcs`),
+  `initialize`/`shutdown`/`exit`, `textDocument/didOpen`/`didChange`
+  → prawdziwy `textDocument/publishDiagnostics` (reużywa
+  `check_program`). Wymagało dwóch nowych prymitywów w samym
+  `hackerc` (`read_stdin_line`/`read_stdin_exact`, `write_stdout`,
+  `run_command_inherit` — patrz `codegen.hcs::gen_call`), bo bootstrap
+  wcześniej w ogóle nie czytał stdin. **Zostaje (Etap 2b/2c):**
+  hover/definition/completion/rename/formatting — pełny plan w
+  **`docs/LSP.md`**. Zakresy diagnostyk są dziś zawsze `(0,0)-(0,1)`
+  (patrz sekcja 1 wyżej — brak numerów linii w AST).
+* **`fast direct {backend} [ ... ]`** — rozszerzenie dzisiejszego
+  `direct[...]` o wybór jednego z 19 backendów przyspieszających
+  Pythona (`pypy`, `numba`, `cython`, `numpy`, `polars`, `scipy`,
+  `asyncio`, `uvloop`, `multiprocessing`, `jax`, `pythran`, `duckdb`,
+  `cupy`, `vaex`, `numexpr`, `trio`, `aiohttp`, `granian`, `httpx`,
+  `ray`), ze statycznym linkowaniem całego interpretera (PyPy albo
+  CPython, zależnie od backendu) i bibliotek do finalnej binarki —
+  poza udokumentowanymi wyjątkami narzuconymi przez same biblioteki
+  (CUDA runtime dla `cupy`, proces `raylet` dla `ray`). Pełna
+  specyfikacja, w tym kolejność wdrażania w 6 grupach, w
+  **`docs/FAST_DIRECT.md`**. Gramatyka już dodana do
+  `docs/GRAMMAR.md`, sekcja 6.
