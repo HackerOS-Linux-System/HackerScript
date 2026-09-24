@@ -11,6 +11,7 @@ include <remove>
 include <repair>
 include <clean>
 include <cache>
+include <lsp>
 get <std:string> import <str_starts_with>
 get <std:term> import <c_bold_green::c_bold_cyan::c_red::c_gray>
 
@@ -23,7 +24,7 @@ fun cmd_usage() -> Str [
     let usage_line = c_gray("Uzycie:") + "\n  virus <polecenie> [argumenty]"
     let cmds = c_gray("Polecenia:") + "\n"
     cmds = cmds + "  " + c_bold_cyan("init") + " [--name NAZWA]                              tworzy szkielet nowego projektu\n"
-    cmds = cmds + "  " + c_bold_cyan("build") + " [plik] [--release|--library|--wasm|--jar]  buduje projekt (domyslnie: debug)\n"
+    cmds = cmds + "  " + c_bold_cyan("build") + " [plik] [--release|--library|--wasm|--jar] [--bin NAZWA]  buduje projekt (domyslnie: debug, wszystkie binarki)\n"
     cmds = cmds + "  " + c_bold_cyan("cache") + "                                             tworzy/odswieza katalog cache/\n"
     cmds = cmds + "  " + c_bold_cyan("check") + "                                             sprawdza poprawnosc kodu bez budowania\n"
     cmds = cmds + "  " + c_bold_cyan("lint") + " [plik]                                       pokazuje tylko warningi\n"
@@ -32,6 +33,7 @@ fun cmd_usage() -> Str [
     cmds = cmds + "  " + c_bold_cyan("remove") + " <zrodlo> <nazwa>                           usuwa zaleznosc\n"
     cmds = cmds + "  " + c_bold_cyan("repair") + " <kod>                                      wyjasnia kod diagnostyczny (np. E0001)\n"
     cmds = cmds + "  " + c_bold_cyan("clean") + "                                             usuwa caly katalog cache/\n"
+    cmds = cmds + "  " + c_bold_cyan("lsp") + "                                               Language Server (LSP) po stdio - patrz docs/LSP.md\n"
     let result = title + "\n\n" + usage_line + "\n\n" + cmds
     end result
 ]
@@ -78,7 +80,7 @@ fun positional_args(args: List<Str>) -> List<Str> [
     while i < n [
         let a = args[i].clone()
         if str_starts_with(a.clone(), "--") [
-            if a == "--version" or a == "--name" [
+            if a == "--version" or a == "--name" or a == "--bin" [
                 i = i + 1
             ]
         ] else [
@@ -166,7 +168,11 @@ fun main() [
             target = TargetJar
         ]
         let file_opt = first_positional(rest)
-        match cmd_build_run(root, BuildOptions(target, file_opt)) [
+        !! ROZBUDOWA (ta runda) - `--bin <nazwa>` (patrz `docs/VIRUS.md`,
+        !! "Plan: multi-binarki na czlonka") - wybiera JEDNA z wielu
+        !! binarek do zbudowania zamiast wszystkich (domyslnie).
+        let bin_filter = find_option_value(rest, "--bin")
+        match cmd_build_run(root, BuildOptions(target, file_opt, bin_filter)) [
             Ok(path) -> [
                 log(c_bold_green("zbudowano:") + " " + path)
             ]
@@ -234,6 +240,18 @@ fun main() [
     ] elif cmd == "clean" [
         let root = require_project_root()
         if not cmd_clean_run(root) [
+            exit(1)
+        ]
+    ] elif cmd == "lsp" [
+        !! ROZBUDOWA (ta runda, patrz docs/LSP.md) - `virus lsp`
+        !! CELOWO nie uzywa `exit(1)` na `false` jak reszta komend
+        !! wyzej - `cmd_lsp_run` samo w sobie BLOKUJE az edytor
+        !! zakonczy sesje (posredniczy w calym protokole LSP przez
+        !! odziedziczone stdio, patrz `virus/cmd/lsp.hcs`), wiec jej
+        !! wynik (`Bool`) to kod wyjscia DZIECKA (`hackerc lsp`), nie
+        !! natychmiastowy blad do zaraportowania tutaj.
+        let root = require_project_root()
+        if not cmd_lsp_run(root) [
             exit(1)
         ]
     ] elif cmd == "--help" or cmd == "-h" or cmd == "help" [
