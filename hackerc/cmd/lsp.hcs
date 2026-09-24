@@ -1,0 +1,449 @@
+include <ast_nodes>
+include <parser>
+include <typecheck>
+include <diagnostics>
+include <transpiler>
+get <std:json> import <JsonValue::JsonEntry::json_parse::json_escape_string>
+get <std:string> import <str_starts_with::str_trim::str_join::str_to_int>
+
+!!! ============================================================
+!!! `hackerc lsp` - Etap 2a (patrz docs/LSP.md): Language Server
+!!! Protocol (LSP 3.17) po stdio - `initialize`/`shutdown`/`exit`,
+!!! `textDocument/didOpen`/`didChange`/`didClose`,
+!!! `textDocument/publishDiagnostics`. ZAKRES CELOWO WASKI (Etap 2a
+!!! = TYLKO diagnostyka) - hover/definition/completion to kolejne
+!!! etapy (2b/2c), jeszcze nie tutaj.
+!!!
+!!! ZNANE OGRANICZENIA (uczciwie, jak reszta tego bootstrapu):
+!!!   - Zakresy diagnostyk sa zawsze `line 0, character 0..1` -
+!!!     `Diagnostic` w `diagnostics.hcs` NIE MA prawdziwych numerow
+!!!     linii (patrz docs/ROADMAP.md, sekcja 1 - "brak numerow linii
+!!!     w AST") - edytor podswietli poczatek pliku, nie faktyczne
+!!!     miejsce bledu, dopoki ten gap nie zostanie zamkniety.
+!!!   - `id` zadania JSON-RPC MUSI byc liczba (Number) - klienci
+!!!     wysylajacy `id` jako string dostana odpowiedz z `id: 0`
+!!!     (bledna) - wiekszosc klientow LSP (VS Code, Neovim) uzywa
+!!!     wylacznie liczb, wiec w praktyce to rzadko problem, ale jest
+!!!     to realne ograniczenie tego, prostego jeszcze, parsera JSON-RPC.
+!!!   - Diagnostyka jest liczona TYLKO na pojedynczym pliku (parytet z
+!!!     `hackerc check <plik>`, NIE z `hackerc build` -
+!!!     `collect_project_signatures`) - importy z `get <...>` z innych
+!!!     plikow moga dawac spurious W0002 (parytet z tym samym
+!!!     ograniczeniem juz udokumentowanym przy W0002 w
+!!!     `virus/cmd/repair.hcs`).
+!!! ============================================================
+
+!!! Duplikuje `parse_with_direct` z `main.hcs` (zamiast `include
+!!! <main>`) - `main.hcs` sam BEDZIE `include <lsp>`, wiec odwrotny
+!!! `include` stworzylby cykl. Ciala MUSZA pozostac identyczne -
+!!! jesli `main.hcs::parse_with_direct` sie zmieni, ta kopia tez musi.
+fun lsp_parse_with_direct(source: Str, src_path: Str) -> Program [
+    let fast_direct_extraction = extract_fast_direct_blocks(source)
+    let extraction = extract_direct_blocks(fast_direct_extraction.stripped_source)
+    let native_extraction = extract_native_blocks(extraction.stripped_source, native_dirname(src_path))
+    let sandbox_extraction = extract_sandbox_blocks(native_extraction.stripped_source)
+    let hot_extraction = extract_hot_reload_markers(sandbox_extraction.stripped_source)
+    end parse(hot_extraction.stripped_source)
+]
+
+!!! -- Male pomocniki JSON (json.hcs daje tylko parse/stringify + ---
+!!! -- surowe struct'y JsonValue/JsonEntry, bez akcesorow "po kluczu")
+
+fun json_obj_get(v: JsonValue, key: Str) -> Option<JsonValue> [
+    match v [
+        JsonObject(entries) -> [
+            let i = 0
+            let n = entries.len()
+            while i < n [
+                if entries[i].key == key [
+                    end some(entries[i].value.clone())
+                ]
+                i = i + 1
+            ]
+            end none()
+        ]
+        _ -> [
+            end none()
+        ]
+    ]
+]
+
+fun json_as_str(v: JsonValue) -> Option<Str> [
+    match v [
+        JsonString(s) -> [
+            end some(s.clone())
+        ]
+        _ -> [
+            end none()
+        ]
+    ]
+]
+
+fun json_as_float(v: JsonValue) -> Option<Float> [
+    match v [
+        JsonNumber(f) -> [
+            end some(f.clone())
+        ]
+        _ -> [
+            end none()
+        ]
+    ]
+]
+
+!!! -- Ramkowanie JSON-RPC (naglowki "Content-Length: N\r\n\r\n") ----
+
+!!! Recznie napisany parser liczby dziesietnej bez znaku - NIE ma
+!!! ogolnego "Str -> Int" nigdzie w libs/std (patrz docs/ROADMAP.md,
+!!! sekcja 4 - luki w libs/std), a `Content-Length` to jedyne miejsce
+!!! w calym `hackerc`, gdzie taka konwersja jest w ogole potrzebna -
+!!! celowo WASKI (tylko cyfry), zamiast ogolnego parsera liczb.
+!! ROZBUDOWA (ta runda, patrz docs/ROADMAP.md sekcja 4) - teraz cienka
+!! nakladka na ogolne `str_to_int` (`libs/std/lib/string.hcs`, nowosc
+!! tej rundy) zamiast wlasnej, osobnej petli parsujacej - `none()`
+!! (np. dla pustego naglowka) traktowany jako `0`, tak samo jak
+!! poprzednia wersja tej funkcji (ktora nie mialaby jak zaraportowac
+!! bledu - `lsp_read_headers` i tak dalej sprawdza `content_length >=
+!! 0` po fakcie).
+fun lsp_parse_uint(s: Str) -> Int [
+    match str_to_int(s) [
+        Some(v) -> [
+            end v
+        ]
+        None -> [
+            end 0
+        ]
+    ]
+]
+
+!!! Czyta naglowki JEDNEJ ramki (linia po linii, do pierwszej pustej
+!!! linii) i zwraca `Content-Length` - `none()` na EOF (klient zamknal
+!!! stdin - `exit` bez formalnego `shutdown`, obslugiwane tak samo jak
+!!! `exit`, patrz `lsp_run` nizej) albo gdy `Content-Length` nigdy sie
+!!! nie pojawil przed pusta linia (ramka zniekształcona).
+fun lsp_read_headers() -> Option<Int> [
+    let content_length = -1
+    while true [
+        match read_stdin_line() [
+            Some(line0) -> [
+                !! `let line: Str = line0` (rebind z JAWNA adnotacja typu)
+                !! zamiast uzywac `line0` (zwiazanej przez wzorzec
+                !! `Some(...)`) bezposrednio - codegen dzis NIE zna typu
+                !! zmiennych zwiazanych przez WZORZEC `match`
+                !! (`declare_env(b, none())` w codegen.hcs -
+                !! udokumentowane ograniczenie, patrz docs/ROADMAP.md,
+                !! sekcja 1), wiec `.slice()`/`.char_at()` wprost na
+                !! `line0` wygenerowaloby NIEISTNIEJACA metode Rusta
+                !! `String::slice`. Zwykle `let` Z ADNOTACJA typu
+                !! rejestruje typ poprawnie (`gen_let_stmt`), wiec ten
+                !! jeden dodatkowy wiersz naprawia caly dalszy kod.
+                let line: Str = line0
+                if line.len() == 0 [
+                    if content_length >= 0 [
+                        end some(content_length)
+                    ]
+                    end none()
+                ]
+                if str_starts_with(line.clone(), "Content-Length:") [
+                    content_length = lsp_parse_uint(str_trim(line.slice(15, line.len())))
+                ]
+            ]
+            None -> [
+                end none()
+            ]
+        ]
+    ]
+    end none()
+]
+
+!!! Zapisuje `body` (JEDEN kompletny obiekt JSON-RPC, bez wlasnych
+!!! naglowkow) jako poprawnie oramkowana wiadomosc LSP na stdout.
+!!! `write_stdout` (NIE `log`) jest tu KLUCZOWE - `log` dopisalby "\n"
+!!! NAWIGOWANY poza `Content-Length` zapowiedziany w naglowku, co
+!!! zepsuloby ramkowanie NASTEPNEJ wiadomosci (patrz komentarz przy
+!!! `write_stdout` w codegen.hcs).
+fun lsp_send(body: Str) [
+    write_stdout("Content-Length: " + (body.len() as Str) + "\r\n\r\n" + body)
+]
+
+!!! -- Diagnostyka -> JSON LSP -------------------------------------
+
+fun lsp_severity_to_int(sev: Str) -> Int [
+    if sev == "error" [
+        end 1
+    ]
+    if sev == "warning" [
+        end 2
+    ]
+    end 3
+]
+
+!!! Patrz "ZNANE OGRANICZENIA" na gorze pliku - `range` jest zawsze
+!!! (0,0)-(0,1), bo `Diagnostic.line`/`.col` sa dzis zawsze 0 (nie
+!!! prawdziwa pozycja) - `hackerc/cmd/typecheck.hcs` jeszcze ich nie
+!!! wypelnia (patrz docs/ROADMAP.md, sekcja 1).
+fun lsp_diagnostic_to_json(d: Diagnostic) -> Str [
+    end "{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":1}},\"severity\":" + (lsp_severity_to_int(d.severity.clone()) as Str) + ",\"code\":\"" + d.code.clone() + "\",\"source\":\"hackerc\",\"message\":" + json_escape_string(d.message.clone()) + "}"
+]
+
+fun lsp_diagnostics_array_json(diags: List<Diagnostic>) -> Str [
+    let parts: List<Str> = []
+    let i = 0
+    let n = diags.len()
+    while i < n [
+        parts.push(lsp_diagnostic_to_json(diags[i].clone()))
+        i = i + 1
+    ]
+    end "[" + str_join(parts, ",") + "]"
+]
+
+!!! `get <extern:sciezka> use <tryb>` przed `region [ ... ]` w
+!!! docs/SYNTAX.md tez uzywa "file://" - identyczna konwencja co LSP,
+!!! wiec nazwa nie kolidowala niczego istniejacego.
+fun lsp_uri_to_path(uri: Str) -> Str [
+    if str_starts_with(uri.clone(), "file://") [
+        end uri.slice(7, uri.len())
+    ]
+    end uri
+]
+
+!!! Liczy diagnostyki DLA TEKSTU W PAMIECI (nie dla tego, co jest na
+!!! dysku - kluczowe: edytor wysyla niezapisane zmiany, `hackerc lsp`
+!!! NIGDY nie czyta pliku z dysku samodzielnie, patrz "ZNANE
+!!! OGRANICZENIA") i publikuje je jako
+!!! `textDocument/publishDiagnostics` (notyfikacja - BEZ `id`, klient
+!!! nie odpowiada).
+fun lsp_check_and_publish(uri: Str, source: Str) [
+    let path = lsp_uri_to_path(uri.clone())
+    let program = lsp_parse_with_direct(source, path)
+    let diags = check_program(program, [])
+    let params = "{\"uri\":" + json_escape_string(uri.clone()) + ",\"diagnostics\":" + lsp_diagnostics_array_json(diags) + "}"
+    lsp_send("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":" + params + "}")
+]
+
+!!! -- Odpowiedzi standardowe ----------------------------------------
+
+fun lsp_send_result(id_json: Str, result_json: Str) [
+    lsp_send("{\"jsonrpc\":\"2.0\",\"id\":" + id_json + ",\"result\":" + result_json + "}")
+]
+
+!!! Odpowiedz na `initialize` - `textDocumentSync: 1` = `Full` (cala
+!!! tresc przy kazdym `didChange`, patrz docs/LSP.md "Etap 2a" -
+!!! najprostszy poprawny wariant, nie przyrostowy). `diagnosticProvider`
+!!! NIE jest deklarowane (uzywamy push-owego
+!!! `publishDiagnostics`, nie pull-owego `textDocument/diagnostic` z
+!!! LSP 3.17 - prostszy model, wystarczajacy dla Etapu 2a).
+fun lsp_capabilities_json() -> Str [
+    end "{\"capabilities\":{\"textDocumentSync\":1},\"serverInfo\":{\"name\":\"hackerc-lsp\",\"version\":\"0.4\"}}"
+]
+
+!!! -- Petla glowna --------------------------------------------------
+
+!!! `docs`: Dict URI -> ostatnia znana tresc (aktualizowana przez
+!!! `didOpen`/`didChange`) - CELOWO trzymana jako zmienna LOKALNA tej
+!!! funkcji (nie przekazywana do osobnych funkcji obslugi wiadomosci),
+!!! bo mutacja `Dict` przez metode (`.insert(...)`) w tym bootstrapie
+!!! jest sprawdzona TYLKO wewnatrz funkcji, ktora go zadeklarowala
+!!! (patrz `collect_signatures` w typeinfer.hcs - ten sam wzorzec) -
+!!! przekazanie `docs` jako parametr do osobnej funkcji obslugi i
+!!! oczekiwanie, ze mutacja "wroci" do wywolujacego, nie jest nigdzie
+!!! indziej w tym kodzie sprawdzone, wiec `lsp_run` samo, w calosci,
+!!! obsluguje kazdy typ wiadomosci w jednej petli, zamiast delegowac.
+fun lsp_run() [
+    let docs: Dict<Str, Str> = dict()
+    let shutting_down = false
+
+    while true [
+        match lsp_read_headers() [
+            None -> [
+                !! EOF na stdin (klient zamknal potok bez `exit`) -
+                !! parytet z tym, jak `rust-analyzer`/inne LSP servery
+                !! traktuja to jak ciche zamkniecie, nie blad.
+                exit(0)
+            ]
+            Some(content_length) -> [
+                match read_stdin_exact(content_length) [
+                    None -> [
+                        !! Klient zapowiedzial N bajtow, ale polaczenie
+                        !! sie urwalo w trakcie - nic sensownego do
+                        !! zrobienia poza zakonczeniem.
+                        exit(1)
+                    ]
+                    Some(body) -> [
+                        match json_parse(body) [
+                            Err(_e) -> [
+                                !! Malformed JSON - ignorujemy ramke
+                                !! (bez wysylania bledu - nie znamy
+                                !! nawet `id`, zeby poprawnie
+                                !! odpowiedziec) i czekamy na kolejna.
+                            ]
+                            Ok(msg) -> [
+                                let method = ""
+                                match json_obj_get(msg.clone(), "method") [
+                                    Some(mv) -> [
+                                        match json_as_str(mv) [
+                                            Some(ms) -> [
+                                                method = ms
+                                            ]
+                                            None -> [
+                                            ]
+                                        ]
+                                    ]
+                                    None -> [
+                                    ]
+                                ]
+                                let id_json = "0"
+                                let has_id = false
+                                match json_obj_get(msg.clone(), "id") [
+                                    Some(iv) -> [
+                                        match json_as_float(iv) [
+                                            Some(f) -> [
+                                                id_json = (f as Int) as Str
+                                                has_id = true
+                                            ]
+                                            None -> [
+                                            ]
+                                        ]
+                                    ]
+                                    None -> [
+                                    ]
+                                ]
+                                let params = JsonNull
+                                match json_obj_get(msg.clone(), "params") [
+                                    Some(pv) -> [
+                                        params = pv
+                                    ]
+                                    None -> [
+                                    ]
+                                ]
+
+                                if method == "initialize" [
+                                    lsp_send_result(id_json, lsp_capabilities_json())
+                                ] elif method == "initialized" [
+                                    !! notyfikacja klienta - brak odpowiedzi
+                                ] elif method == "shutdown" [
+                                    shutting_down = true
+                                    lsp_send_result(id_json, "null")
+                                ] elif method == "exit" [
+                                    if shutting_down [
+                                        exit(0)
+                                    ]
+                                    exit(1)
+                                ] elif method == "textDocument/didOpen" [
+                                    match json_obj_get(params.clone(), "textDocument") [
+                                        Some(td) -> [
+                                            let uri = ""
+                                            let text = ""
+                                            match json_obj_get(td.clone(), "uri") [
+                                                Some(uv) -> [
+                                                    match json_as_str(uv) [
+                                                        Some(us) -> [
+                                                            uri = us
+                                                        ]
+                                                        None -> [
+                                                        ]
+                                                    ]
+                                                ]
+                                                None -> [
+                                                ]
+                                            ]
+                                            match json_obj_get(td.clone(), "text") [
+                                                Some(tv) -> [
+                                                    match json_as_str(tv) [
+                                                        Some(ts) -> [
+                                                            text = ts
+                                                        ]
+                                                        None -> [
+                                                        ]
+                                                    ]
+                                                ]
+                                                None -> [
+                                                ]
+                                            ]
+                                            if uri.len() > 0 [
+                                                docs.insert(uri.clone(), text.clone())
+                                                lsp_check_and_publish(uri, text)
+                                            ]
+                                        ]
+                                        None -> [
+                                        ]
+                                    ]
+                                ] elif method == "textDocument/didChange" [
+                                    !! `textDocumentSync = Full` (patrz
+                                    !! `lsp_capabilities_json`) - edytor
+                                    !! wysyla ZAWSZE CALA nowa tresc jako
+                                    !! `contentChanges[0].text`, nigdy
+                                    !! przyrostowy `range`.
+                                    let uri2 = ""
+                                    match json_obj_get(params.clone(), "textDocument") [
+                                        Some(td2) -> [
+                                            match json_obj_get(td2.clone(), "uri") [
+                                                Some(uv2) -> [
+                                                    match json_as_str(uv2) [
+                                                        Some(us2) -> [
+                                                            uri2 = us2
+                                                        ]
+                                                        None -> [
+                                                        ]
+                                                    ]
+                                                ]
+                                                None -> [
+                                                ]
+                                            ]
+                                        ]
+                                        None -> [
+                                        ]
+                                    ]
+                                    match json_obj_get(params.clone(), "contentChanges") [
+                                        Some(changes) -> [
+                                            match changes [
+                                                JsonArray(items) -> [
+                                                    if items.len() > 0 and uri2.len() > 0 [
+                                                        match json_obj_get(items[0].clone(), "text") [
+                                                            Some(tv2) -> [
+                                                                match json_as_str(tv2) [
+                                                                    Some(ts2) -> [
+                                                                        docs.insert(uri2.clone(), ts2.clone())
+                                                                        lsp_check_and_publish(uri2, ts2)
+                                                                    ]
+                                                                    None -> [
+                                                                    ]
+                                                                ]
+                                                            ]
+                                                            None -> [
+                                                            ]
+                                                        ]
+                                                    ]
+                                                ]
+                                                _ -> [
+                                                ]
+                                            ]
+                                        ]
+                                        None -> [
+                                        ]
+                                    ]
+                                ] elif has_id [
+                                    !! Dowolna inna METODA ZADANIA (ma
+                                    !! `id`, wiec oczekuje odpowiedzi) spoza
+                                    !! zakresu Etapu 2a (hover/definition/
+                                    !! completion - patrz docs/LSP.md,
+                                    !! Etap 2b/2c) - `MethodNotFound`
+                                    !! (kod -32601, standard JSON-RPC),
+                                    !! zamiast ciszy (klient by wisial na
+                                    !! odpowiedzi w nieskonczonosc).
+                                    lsp_send("{\"jsonrpc\":\"2.0\",\"id\":" + id_json + ",\"error\":{\"code\":-32601,\"message\":\"metoda nieobslugiwana w Etapie 2a: " + method + "\"}}")
+                                ]
+                                !! Notyfikacje spoza obslugiwanego zbioru
+                                !! (`didClose`, `didSave`, ...) - CICHO
+                                !! ignorowane (parytet ze standardowym
+                                !! zachowaniem LSP: notyfikacja bez `id`
+                                !! nigdy nie oczekuje odpowiedzi, wiec
+                                !! ignorowanie nieznanej notyfikacji jest
+                                !! zawsze bezpieczne).
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        ]
+    ]
+]
