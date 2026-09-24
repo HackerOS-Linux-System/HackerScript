@@ -27,11 +27,11 @@ include <typeinfer>
 !!! blad E0003 (ten sam typ pomylki, ktory ZMIANA 0.3 wyzej naprawila
 !!! juz raz dla "npm"/"jsr").
 fun is_known_get_source(s: Str) -> Bool [
-    end s == "pypi" or s == "crates" or s == "std" or s == "core" or s == "selfhost" or s == "virus" or s == "vira" or s == "npm" or s == "jsr" or s == "extern" or s == "c" or s == "cpp" or s == "bytes" or s == "bit" or s == "hlib" or s == "work"
+    end s == "pypi" or s == "crates" or s == "std" or s == "core" or s == "selfhost" or s == "virus" or s == "vira" or s == "npm" or s == "jsr" or s == "extern" or s == "c" or s == "cpp" or s == "java" or s == "bytes" or s == "bit" or s == "hlib" or s == "work"
 ]
 
 fun is_builtin_func(name: Str) -> Bool [
-    end name == "log" or name == "elog" or name == "__direct__" or name == "some" or name == "none" or name == "ok" or name == "err" or name == "read_file" or name == "write_file" or name == "dict" or name == "env_var" or name == "run_command" or name == "run_command_combined" or name == "http_get" or name == "current_dir"
+    end name == "log" or name == "elog" or name == "__direct__" or name == "__fast_direct__" or name == "__native__" or name == "some" or name == "none" or name == "ok" or name == "err" or name == "read_file" or name == "write_file" or name == "dict" or name == "env_var" or name == "run_command" or name == "run_command_combined" or name == "http_get" or name == "current_dir" or name == "read_stdin_line" or name == "read_stdin_exact" or name == "write_stdout" or name == "run_command_inherit" or name == "sha256_hex"
 ]
 
 fun str_starts_with_underscore(s: Str) -> Bool [
