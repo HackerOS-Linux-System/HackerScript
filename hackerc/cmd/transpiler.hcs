@@ -2,7 +2,7 @@ include <ast_nodes>
 include <parser>
 include <typeinfer>
 include <codegen>
-
+get <std:string> import <str_contains>
 !!! Wynik transpilacji - parytet z `@dataclass TranspileResult`.
 struct TranspileResult [
     rust_code: Str,
@@ -36,7 +36,17 @@ struct TranspileResult [
     !! `project.hcs::build_project` czyta to, zeby dopisac `wasm-bindgen
     !! = "0.2"` do Cargo.toml i `[lib] crate-type = ["cdylib", "rlib"]`
     !! zamiast `[[bin]]` (patrz `cargo_toml_text()`).
-    needs_wasm_bindgen: Bool
+    needs_wasm_bindgen: Bool,
+    !! ROZBUDOWA (ta runda, patrz docs/JAVA.md) - `native {java}(...)`,
+    !! parytet z `needs_native_cpp`/`native_cpp_sources`/
+    !! `native_cpp_order` wyzej.
+    needs_native_java: Bool,
+    native_java_sources: Dict<Str, Str>,
+    native_java_order: List<Str>,
+    !! `get <java:sciezka.jar>` - patrz `CodeGen::java_classpath_entries`.
+    java_classpath_entries: List<Str>,
+    !! ROZBUDOWA (ta runda) - `sha256_hex(...)`, patrz `CodeGen::needs_sha256`.
+    needs_sha256: Bool
 ]
 
 !!! ZMIANA 0.3 - skanuje najwyzszy poziom `prog` w poszukiwaniu
@@ -94,7 +104,20 @@ struct ExtraSignatures [
     methods: Dict<Str, Stmt>,
     method_names: List<Str>,
     mut_params: Dict<Str, Bool>,
-    method_mut_params: Dict<Str, Bool>
+    method_mut_params: Dict<Str, Bool>,
+    !! NAPRAWIONY BUG (ta runda, znaleziony realnym buildem przy
+    !! integracji .hlib - patrz docs/ROADMAP.md): funkcje z `region
+    !! [ ... ]` TRAFIALY do `functions` (dla arity-checkow, wczesniejsza
+    !! runda), ale `CodeGen::extern_fn_names` (decyduje, czy wywolanie
+    !! zawinac w `unsafe { ... }`) bylo populowane WYLACZNIE w
+    !! `gen_region()`, WEWNATRZ TEGO SAMEGO PLIKU co `region` - wywolanie
+    !! funkcji `extern "C"` z INNEGO pliku (np. `get <hlib:...>` albo
+    !! `get <work:...>` importujacego modul z `region`) generowalo kod
+    !! BEZ `unsafe`, ktorego `rustc` odrzuca (E0133). Ten Dict/List
+    !! niesie nazwy funkcji `extern` PROJEKTOWO (przez wszystkie pliki),
+    !! parytet z `functions`/`function_names` wyzej.
+    extern_fn_names: Dict<Str, Bool>,
+    extern_fn_name_list: List<Str>
 ]
 
 !!! `ExtraSignatures` pusty - dla wywolan `transpile_source_full` na
@@ -107,7 +130,8 @@ fun empty_extra_signatures() -> ExtraSignatures [
     let methods: Dict<Str, Stmt> = dict()
     let mut_params: Dict<Str, Bool> = dict()
     let method_mut_params: Dict<Str, Bool> = dict()
-    end ExtraSignatures(functions, [], structs, [], enums, [], methods, [], mut_params, method_mut_params)
+    let extern_fn_names: Dict<Str, Bool> = dict()
+    end ExtraSignatures(functions, [], structs, [], enums, [], methods, [], mut_params, method_mut_params, extern_fn_names, [])
 ]
 
 !!! Dopisuje do `owner` mapowanie wariant -> nazwa enuma dla JEDNEGO
@@ -534,6 +558,138 @@ fun native_join_path(base_dir: Str, rel: Str) -> Str [
         end base_dir + rel
     ]
     end base_dir + "/" + rel
+]
+
+!!! ROZBUDOWA (ta runda, patrz docs/FAST_DIRECT.md) - odpowiednik
+!!! `NativeExtraction`, dla `fast direct {backend}(...)`. Dwie
+!!! rownolegle listy (`blocks[i]` <-> `backends[i]`), tak samo jak
+!!! `NativeExtraction.engines` - ten sam powod (brak tupli w tym
+!!! bootstrapie).
+struct FastDirectExtraction [
+    stripped_source: Str,
+    blocks: List<Str>,
+    backends: List<Str>
+]
+
+!!! Analog `extract_direct_blocks`/`extract_native_blocks` dla `fast
+!!! direct {backend} [ ... ]` - PROSTSZY niz `native` (brak wariantu
+!!! `<import_pliku>`, patrz docs/FAST_DIRECT.md - to tylko Etap
+!!! pilotazowy, `{pypy}`/`{numpy}`). Wymaga DOKLADNIE: `fast`
+!!! (granica slowa), potem (po bialych znakach) `direct` (granica
+!!! slowa), potem `{backend}`, potem `[ ... ]` - kazdy inny uklad
+!!! (np. `fast` bez `direct` zaraz po) zostawia tekst NIETKNIETY
+!!! (parser go i tak odrzuci jako blad skladni, dokladnie jak
+!!! niedopasowane `native`/`direct` wyzej).
+fun extract_fast_direct_blocks(source: Str) -> FastDirectExtraction [
+    let blocks: List<Str> = []
+    let backends: List<Str> = []
+    let out = ""
+    let i = 0
+    let n = source.len()
+    while i < n [
+        let found_at = -1
+        let scan = i
+        while scan < n and found_at == -1 [
+            if scan + 4 <= n and source.slice(scan, scan + 4) == "fast" [
+                let before_ok = scan == 0 or not is_direct_ident_char(source.char_at(scan - 1))
+                let after_ok = scan + 4 >= n or not is_direct_ident_char(source.char_at(scan + 4))
+                if before_ok and after_ok [
+                    found_at = scan
+                ]
+            ]
+            scan = scan + 1
+        ]
+        if found_at == -1 [
+            out = out + source.slice(i, n)
+            i = n
+        ] else [
+            let start = found_at
+            out = out + source.slice(i, start)
+            let j = start + 4
+            while j < n and (source.char_at(j) == " " or source.char_at(j) == "\t") [
+                j = j + 1
+            ]
+            let has_direct = j + 6 <= n and source.slice(j, j + 6) == "direct" and (j + 6 >= n or not is_direct_ident_char(source.char_at(j + 6)))
+            if not has_direct [
+                !! `fast` bez `direct` zaraz po - nie nasz blok (np.
+                !! zmienna o nazwie "fast"), zostaw tekst i szukaj dalej
+                !! ZA slowem "fast", nie od poczatku - inaczej petla
+                !! zapetlilaby sie na tym samym "fast" w nieskonczonosc.
+                out = out + source.slice(start, start + 4)
+                i = start + 4
+            ] else [
+                let j2 = j + 6
+                while j2 < n and (source.char_at(j2) == " " or source.char_at(j2) == "\t") [
+                    j2 = j2 + 1
+                ]
+                if j2 >= n or source.char_at(j2) != "{" [
+                    out = out + source.slice(start, j2)
+                    i = j2
+                ] else [
+                    let brace_start = j2 + 1
+                    let brace_end = -1
+                    let bk = brace_start
+                    while bk < n and brace_end == -1 [
+                        if source.char_at(bk) == "}" [
+                            brace_end = bk
+                        ]
+                        bk = bk + 1
+                    ]
+                    if brace_end == -1 [
+                        log("[transpiler.hcs] niezamkniety '{' po 'fast direct' (brak '}')")
+                        i = n
+                    ] else [
+                        let backend = trim_str_local(source.slice(brace_start, brace_end))
+                        let k2 = brace_end + 1
+                        while k2 < n and (source.char_at(k2) == " " or source.char_at(k2) == "\t" or source.char_at(k2) == "\n" or source.char_at(k2) == "\r") [
+                            k2 = k2 + 1
+                        ]
+                        if k2 >= n or source.char_at(k2) != "[" [
+                            out = out + source.slice(start, k2)
+                            i = k2
+                        ] else [
+                            let depth = 0
+                            let k = k2
+                            let closed_at = -1
+                            while k < n and closed_at == -1 [
+                                let c = source.char_at(k)
+                                if c == "[" [
+                                    depth = depth + 1
+                                ] elif c == "]" [
+                                    depth = depth - 1
+                                    if depth == 0 [
+                                        closed_at = k
+                                    ]
+                                ]
+                                k = k + 1
+                            ]
+                            if closed_at == -1 [
+                                !! Jak w formatter.hcs::fmt_fast_direct_block -
+                        !! " " + "{" jako OSOBNE literaly, zeby wlasny
+                        !! tekst TEGO PLIKU nie zawieral rozpoznawalnego
+                        !! wzorca "fast direct {...}" plus "[" przy przyszlej
+                        !! samo-kompilacji hackerc (patrz docs/ROADMAP.md
+                        !! - ten sam mechanizm zepsul wczesniejsza wersje
+                        !! komunikatu bledu w codegen.hcs::gen_fast_direct,
+                        !! znalezione i naprawione realnym buildem).
+                        log("[transpiler.hcs] niezamkniety blok fast direct " + "{" + backend + "}" + " [ ... ]")
+                                i = n
+                            ] else [
+                                let raw = source.slice(k2 + 1, closed_at)
+                                let dedented = dedent_text(raw)
+                                let idx = blocks.len()
+                                blocks.push(dedented)
+                                backends.push(backend)
+                                out = out + "__fast_direct__(" + (idx as Str) + ")"
+                                i = closed_at + 1
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        ]
+    ]
+    end FastDirectExtraction(out, blocks, backends)
 ]
 
 struct NativeExtraction [
@@ -1103,7 +1259,7 @@ fun hot_reload_runtime_block(names: List<Str>, default_source_path: Str) -> List
     end out
 ]
 
-fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native_blocks: List<Str>, native_engines: List<Str>, sandbox_blocks: List<Str>, hot_reload_names: List<Str>, wasm_export_names: List<Str>, default_source_path: Str, extra: ExtraSignatures) -> TranspileResult [
+fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native_blocks: List<Str>, native_engines: List<Str>, sandbox_blocks: List<Str>, hot_reload_names: List<Str>, wasm_export_names: List<Str>, default_source_path: Str, extra: ExtraSignatures, fast_direct_blocks: List<Str>, fast_direct_backends: List<Str>) -> TranspileResult [
     let local_sigs = collect_signatures(prog.clone())
     let sigs = merge_signatures_with_extra(local_sigs, extra)
     let local_mut = compute_mut_params(prog.clone())
@@ -1118,7 +1274,9 @@ fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native
     let sandbox_dict = direct_blocks_to_dict(sandbox_blocks)
     let hot_reload_dict = names_to_bool_dict(hot_reload_names)
     let wasm_export_dict = names_to_bool_dict(wasm_export_names)
-    let gen = new_codegen(sigs, info.boxed_fields, mut_params, method_mut_params, varity, ndstructs, direct_dict, native_dict, native_engine_dict, sandbox_dict, hot_reload_dict, wasm_export_dict)
+    let fast_direct_dict = direct_blocks_to_dict(fast_direct_blocks)
+    let fast_direct_backend_dict = direct_blocks_to_dict(fast_direct_backends)
+    let gen = new_codegen(sigs, info.boxed_fields, mut_params, method_mut_params, varity, ndstructs, direct_dict, native_dict, native_engine_dict, sandbox_dict, hot_reload_dict, wasm_export_dict, fast_direct_dict, fast_direct_backend_dict, extra.extern_fn_name_list)
 
     let i = 0
     let n = prog.body.len()
@@ -1133,6 +1291,57 @@ fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native
     ]
     if gen.needs_wasm_bindgen [
         header.push("use wasm_bindgen::prelude::*;")
+    ]
+    !! ROZBUDOWA (ta runda) - `sha256_hex(...)`: w ODROZNIENIU od
+    !! `needs_pyo3`/`needs_native_java`/... (ktore sa polami
+    !! MUTOWANYMI przez `self.pole = true` gdzies gleboko w
+    !! `gen_call`), TU celowo NIE dodano takiego pola do `CodeGen` -
+    !! `gen_call` jest wywolywane (posrednio, przez `gen_expr`) przez
+    !! PRAWIE KAZDA inna funkcje generujaca kod w tym pliku, a
+    !! wnioskowanie mutowalnosci `self` w hackerc (`method_mut_params`)
+    !! jest TRANZYTYWNE po calym grafie wywolan - jedna nowa mutacja
+    !! `self.pole = true` gleboko w `gen_call` przeksztalcila ~13
+    !! wczesniej `&self` metod (gen_expr, gen_binop, gen_if_stmt...) w
+    !! `&mut self`, co zepsulo ISTNIEJACY (niezmieniony!) wzorzec
+    !! `self.emit(&format!(..., self.gen_expr(...)))` (E0499 - Rust nie
+    !! pozwala na DWA jednoczesne `&mut self` w takim zagniezdzeniu) -
+    !! znalezione realnym buildem, patrz docs/ROADMAP.md. Zamiast tego:
+    !! sam PRZESZUKUJEMY juz wygenerowane linie (`gen.output`, gotowe
+    !! PO petli `gen_toplevel` wyzej) pod katem tekstu, ktory
+    !! `gen_call` emituje TYLKO dla `sha256_hex` - zero dodatkowej
+    !! mutowalnosci `self`, zero ryzyka kaskady.
+    let needs_sha256 = false
+    let soi = 0
+    let son = gen.output.len()
+    while soi < son [
+        if str_contains(gen.output[soi].clone(), "Sha256::new()") [
+            needs_sha256 = true
+        ]
+        soi = soi + 1
+    ]
+    if needs_sha256 [
+        header.push("use sha2::{Sha256, Digest};")
+    ]
+    !! ROZBUDOWA (ta runda, patrz docs/JAVA.md) - `hks_get_jvm()`:
+    !! WSPOLNA (per-plik, patrz UCZCIWIE w codegen.hcs::gen_native)
+    !! embedded JVM, tworzona LENIWIE przy pierwszym `native
+    !! {java}(...)` bloku. Classpath ustalany w RUNTIME wzgledem
+    !! POLOZENIA BINARKI (`env::current_exe()` -> katalog nadrzedny ->
+    !! `java_classes/`), NIE wzgledem sciezki budowania - zeby
+    !! zbudowana binarka dzialala uruchomiona z DOWOLNEGO katalogu
+    !! roboczego, o ile `java_classes/` (skopiowane przez `virus
+    !! build` obok binarki, patrz `virus/cmd/build.hcs`) jedzie razem
+    !! z nia.
+    if gen.needs_native_java [
+        header.push("static HKS_JVM: std::sync::OnceLock<jni::JavaVM> = std::sync::OnceLock::new();")
+        header.push("fn hks_get_jvm() -> &'static jni::JavaVM {")
+        header.push("    HKS_JVM.get_or_init(|| {")
+        header.push("        let __hks_cp_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(\"java_classes\"))).map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| \"java_classes\".to_string());")
+        header.push("        let __hks_cp_opt = format!(\"-Djava.class.path={}\", __hks_cp_dir);")
+        header.push("        let __hks_args = jni::InitArgsBuilder::new().option(&__hks_cp_opt).build().expect(\"nieprawidlowe argumenty inicjalizacji embedded JVM\");")
+        header.push("        jni::JavaVM::new(__hks_args).expect(\"nie udalo sie wystartowac embedded JVM - czy JRE/JDK (libjvm.so) jest dostepne w tym srodowisku?\")")
+        header.push("    })")
+        header.push("}")
     ]
     header.push("")
 
@@ -1172,7 +1381,7 @@ fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native
     ]
     rust_code = rust_code + "\n"
 
-    end TranspileResult(rust_code, gen.needs_pyo3, gen.needs_native_js, gen.needs_sandbox, gen.needs_hot_reload, gen.hot_reload_bodies, gen.hot_reload_order, gen.needs_native_cpp, collect_extern_link_specs(prog), gen.native_cpp_sources, gen.native_cpp_order, gen.needs_wasm_bindgen)
+    end TranspileResult(rust_code, gen.needs_pyo3, gen.needs_native_js, gen.needs_sandbox, gen.needs_hot_reload, gen.hot_reload_bodies, gen.hot_reload_order, gen.needs_native_cpp, collect_extern_link_specs(prog), gen.native_cpp_sources, gen.native_cpp_order, gen.needs_wasm_bindgen, gen.needs_native_java, gen.native_java_sources, gen.native_java_order, gen.java_classpath_entries, needs_sha256)
 ]
 
 !!! Transpiluje zrodlo `.hcs` -> `TranspileResult` (kod Rust + info czy
@@ -1201,13 +1410,14 @@ fun native_dirname(p: Str) -> Str [
 ]
 
 fun transpile_source_full(source: Str, filename: Str, module_name: Str, extra: ExtraSignatures) -> TranspileResult [
-    let extraction = extract_direct_blocks(source)
+    let fast_direct_extraction = extract_fast_direct_blocks(source)
+    let extraction = extract_direct_blocks(fast_direct_extraction.stripped_source)
     let native_extraction = extract_native_blocks(extraction.stripped_source, native_dirname(filename))
     let sandbox_extraction = extract_sandbox_blocks(native_extraction.stripped_source)
     let hot_extraction = extract_hot_reload_markers(sandbox_extraction.stripped_source)
     let wasm_extraction = extract_wasm_export_markers(hot_extraction.stripped_source)
     let prog = parse(wasm_extraction.stripped_source)
-    end transpile_program_with_extra(prog, extraction.blocks, native_extraction.blocks, native_extraction.engines, sandbox_extraction.blocks, hot_extraction.names, wasm_extraction.names, filename, extra)
+    end transpile_program_with_extra(prog, extraction.blocks, native_extraction.blocks, native_extraction.engines, sandbox_extraction.blocks, hot_extraction.names, wasm_extraction.names, filename, extra, fast_direct_extraction.blocks, fast_direct_extraction.backends)
 ]
 
 !!! Skrot: zwraca tylko kod Rust (bez `needs_pyo3`) - parytet z
