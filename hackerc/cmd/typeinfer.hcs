@@ -149,6 +149,35 @@ fun collect_signatures(prog: Program) -> Signatures [
                     j = j + 1
                 ]
             ]
+            !! ROZBUDOWA (ta runda, patrz docs/ROADMAP.md sekcja 3 -
+            !! "Plan: region -> typecheck") - kazda `ExternSig` z
+            !! `region [ ... ]` (deklaracje FFI, `get <extern:...>` /
+            !! `get <c:...>` / `get <cpp:...>`, patrz docs/SYNTAX.md)
+            !! trafia teraz do TEJ SAMEJ tabeli `functions`, co zwykle
+            !! `fun` - jako `FunDecl` z PUSTYM cialem (nigdy nie
+            !! wywolywane - region sam w sobie nie jest odwiedzany
+            !! przez `check_program`, wiec E0002 "brak end" nigdy nie
+            !! wystrzeli dla deklaracji BEZ ciala z definicji). Skutek:
+            !! `check_call` (typecheck.hcs) sprawdza teraz PRAWDZIWA
+            !! liczbe argumentow dla wywolan funkcji z `region`, zamiast
+            !! milczaco je ignorowac (co dawniej dawalo bledy DOPIERO
+            !! z `rustc` na wygenerowanym kodzie, patrz stary opis w
+            !! docs/ROADMAP.md) - `typeinfer` NIE probuje wnioskowac
+            !! typu zwracanego z (pustego) ciala, bierze `ret_type`
+            !! wprost z deklaracji, dokladnie jak dla zwyklego `fun`
+            !! bez `end` w srodku widzianego z zewnatrz (przez sam typ
+            !! deklarowany, nie przez analize ciala).
+            RegionBlock(region_sigs) -> [
+                let ri = 0
+                let rn = region_sigs.len()
+                while ri < rn [
+                    let rsig = region_sigs[ri].clone()
+                    let synth_fn = FunDecl(rsig.name.clone(), rsig.params.clone(), rsig.ret_type.clone(), [], false, [])
+                    functions.insert(rsig.name.clone(), synth_fn)
+                    function_names.push(rsig.name.clone())
+                    ri = ri + 1
+                ]
+            ]
             _ -> [
             ]
         ]
@@ -320,6 +349,11 @@ fun infer_ident_call_type(name: Str, env: TypeEnv) -> Option<TypeRef> [
     if name == "log" [
         end none()
     ]
+    !! `write_stdout(s)` - patrz codegen.hcs::gen_call - jak `log`, nie
+    !! zwraca uzytecznej wartosci (Rust: `()`).
+    if name == "write_stdout" [
+        end none()
+    ]
     if name == "read_file" [
         end some(make_type2("Result", make_type0("Str"), make_type0("Str")))
     ]
@@ -340,6 +374,41 @@ fun infer_ident_call_type(name: Str, env: TypeEnv) -> Option<TypeRef> [
     ]
     if name == "http_get" [
         end some(make_type2("Result", make_type0("Str"), make_type0("Str")))
+    ]
+    !! ROZBUDOWA (ta runda, patrz docs/LSP.md) - `read_stdin_line()`/
+    !! `read_stdin_exact(n)`, potrzebne do czytania ramek JSON-RPC
+    !! (naglowki `Content-Length` + tresc) w `hackerc lsp`/`virus lsp` -
+    !! pierwsze funkcje wbudowane czytajace ZE STDIN w calym bootstrapie
+    !! (patrz codegen.hcs::gen_call dla implementacji Rust).
+    if name == "read_stdin_line" [
+        end some(make_type1("Option", make_type0("Str")))
+    ]
+    if name == "read_stdin_exact" [
+        end some(make_type1("Option", make_type0("Str")))
+    ]
+    !! ROZBUDOWA (ta runda, patrz docs/VIRUS.md - "virus lsp") -
+    !! `run_command_inherit(program, argumenty) -> Int` - jak
+    !! `run_command`, ale z ODZIEDZICZONYM (nie przechwyconym) stdin/
+    !! stdout/stderr dziecka - jedyny sposob, zeby `virus lsp` mogl
+    !! byc CIENKIM POSREDNIKIEM do `hackerc lsp` (patrz
+    !! `virus/cmd/lsp.hcs`): protokol LSP MUSI plynac bezposrednio
+    !! miedzy edytorem a `hackerc`, `run_command`/`run_command_combined`
+    !! (ktore CZEKAJA na zakonczenie procesu i dopiero wtedy oddaja
+    !! zebrany tekst) sie do tego kompletnie nie nadaja. Zwraca kod
+    !! wyjscia dziecka (Int), nie jego wyjscie (bo wyjscie nigdy nie
+    !! trafia do rodzica - idzie WPROST do prawdziwego stdout).
+    if name == "run_command_inherit" [
+        end some(make_type0("Int"))
+    ]
+    !! ROZBUDOWA (ta runda, patrz docs/ROADMAP.md sekcja 4 -
+    !! cybersecurity/entropy.hcs) - `sha256_hex(tekst) -> Str` (skrot
+    !! szesnastkowy SHA-256 tekstu) - pierwszy prymityw kryptograficzny
+    !! dostepny jako zwykly builtin (nie przez `native {Rust}(...)` +
+    !! recznie doklejane `get <crates:sha2::0.10>`, jak dotad robil to
+    !! WYLACZNIE `hlib.hcs` - patrz `codegen.hcs::gen_call` po
+    !! implementacje).
+    if name == "sha256_hex" [
+        end some(make_type0("Str"))
     ]
     if name == "some" or name == "none" or name == "ok" or name == "err" or name == "dict" [
         end none()
