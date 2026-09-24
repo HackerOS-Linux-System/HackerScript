@@ -6,11 +6,15 @@ include <transpiler>
 struct Formatter [
     lines: List<Str>,
     indent: Int,
-    direct_blocks: Dict<Str, Str>
+    direct_blocks: Dict<Str, Str>,
+    !! ROZBUDOWA (ta runda, patrz docs/FAST_DIRECT.md) - jak
+    !! `direct_blocks` wyzej, ale dla `fast direct {backend}(...)`.
+    fast_direct_blocks: Dict<Str, Str>,
+    fast_direct_backends: Dict<Str, Str>
 ]
 
-fun new_formatter(direct_blocks: Dict<Str, Str>) -> Formatter [
-    end Formatter([], 0, direct_blocks)
+fun new_formatter(direct_blocks: Dict<Str, Str>, fast_direct_blocks: Dict<Str, Str>, fast_direct_backends: Dict<Str, Str>) -> Formatter [
+    end Formatter([], 0, direct_blocks, fast_direct_blocks, fast_direct_backends)
 ]
 
 fun repeat_str(s: Str, n: Int) -> Str [
@@ -203,6 +207,72 @@ impl Formatter [
             ]
         ]
         self.emit("direct [")
+        self.indent = self.indent + 1
+        let raw_lines = split_lines_local(raw)
+        let i = 0
+        let n = raw_lines.len()
+        while i < n [
+            self.emit_raw_line(raw_lines[i].clone())
+            i = i + 1
+        ]
+        self.indent = self.indent - 1
+        self.emit("]")
+    ]
+
+    !!! Jak `direct_call_index` wyzej, ale dla `__fast_direct__(N)`.
+    fun fast_direct_call_index(self, e: Expr) -> Option<Str> [
+        match e [
+            Call(callee, args) -> [
+                if expr_as_ident_name(callee) == "__fast_direct__" and args.len() > 0 [
+                    match args[0].clone() [
+                        NumberLit(v) -> [
+                            end some(v)
+                        ]
+                        _ -> [
+                        ]
+                    ]
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+        end none()
+    ]
+
+    !!! Jak `fmt_direct_block` wyzej, ale odtwarza `fast direct
+    !!! {backend} [ ... ]` (z prawdziwa nazwa backendu z
+    !!! `fast_direct_backends`).
+    fun fmt_fast_direct_block(self, idx_text: Str) [
+        let raw = ""
+        match self.fast_direct_blocks.fetch(idx_text) [
+            Some(r) -> [
+                raw = r
+            ]
+            None -> [
+            ]
+        ]
+        let backend = ""
+        match self.fast_direct_backends.fetch(idx_text) [
+            Some(b) -> [
+                backend = b
+            ]
+            None -> [
+            ]
+        ]
+        !! Skladane z WIECEJ niz jednego literalu ("fast direct "
+        !! OSOBNO od "{") CELOWO - gdyby surowy tekst TEGO PLIKU .hcs
+        !! mial gdzies obok siebie "direct" + biale znaki + "{" + ... +
+        !! "}" + biale znaki + "[", `extract_fast_direct_blocks`
+        !! (dziala na surowym tekscie, bez wiedzy o granicach stringow)
+        !! omylkowo rozpoznalby WLASNY KOD FORMATTERA jako kolejny
+        !! blok `fast direct {...}` przy PRZYSZLEJ samo-kompilacji
+        !! hackerc i by go uszkodzil - dokladnie ten sam mechanizm, co
+        !! zepsul wczesniejsza wersje komunikatu bledu w
+        !! `codegen.hcs::gen_fast_direct` (znalezione i naprawione w
+        !! tej samej rundzie realnym buildem, patrz docs/ROADMAP.md).
+        !! Cudzyslow zamykajacy pierwszy literal ("fast direct ")
+        !! ladujacy sie zaraz po "direct" przerywa dopasowanie.
+        self.emit("fast direct " + "{" + backend + "}" + " [")
         self.indent = self.indent + 1
         let raw_lines = split_lines_local(raw)
         let i = 0
@@ -491,7 +561,14 @@ impl Formatter [
                         self.fmt_direct_block(idx_text)
                     ]
                     None -> [
-                        self.emit(self.fmt_expr(e))
+                        match self.fast_direct_call_index(e.clone()) [
+                            Some(idx_text2) -> [
+                                self.fmt_fast_direct_block(idx_text2)
+                            ]
+                            None -> [
+                                self.emit(self.fmt_expr(e))
+                            ]
+                        ]
                     ]
                 ]
             ]
@@ -602,10 +679,13 @@ fun rstrip_newlines(s: Str) -> Str [
 !!! Formatuje zrodlo `.hcs` -> kanoniczny tekst - parytet z
 !!! `format_source(source, filename)`.
 fun format_source(source: Str, filename: Str) -> Str [
-    let extraction = extract_direct_blocks(source)
+    let fast_direct_extraction = extract_fast_direct_blocks(source)
+    let extraction = extract_direct_blocks(fast_direct_extraction.stripped_source)
     let direct_dict = direct_blocks_to_dict(extraction.blocks)
+    let fast_direct_dict = direct_blocks_to_dict(fast_direct_extraction.blocks)
+    let fast_direct_backend_dict = direct_blocks_to_dict(fast_direct_extraction.backends)
     let prog = parse(extraction.stripped_source)
-    let fmt = new_formatter(direct_dict)
+    let fmt = new_formatter(direct_dict, fast_direct_dict, fast_direct_backend_dict)
     end fmt.format_program(prog)
 ]
 
