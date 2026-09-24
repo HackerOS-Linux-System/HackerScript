@@ -1,0 +1,64 @@
+include <cache>
+include <manifest>
+include <hackerc_bridge>
+include <progress>
+get <std:process> import <run_command_inherit_ok>
+get <std:term> import <c_red>
+get <std:path> import <path_join>
+
+!!! `virus lsp` - Etap 2a (patrz docs/LSP.md). Cienki posrednik do
+!!! `hackerc lsp`: ustala korzen projektu + zapewnia wlasciwa wersje
+!!! `hackerc` (dokladnie jak `virus build`/`virus check`), po czym
+!!! ODDAJE stdin/stdout/stderr WPROST dziecku
+!!! (`run_command_inherit_ok`, patrz `libs/std/lib/process.hcs`) - w
+!!! przeciwienstwie do reszty `virus`, ktora zawsze PRZECHWYTUJE
+!!! wyjscie polecen (`run_command_checked` itp.), tu przechwytywanie
+!!! zepsuloby caly protokol (edytor rozmawia bezposrednio z `hackerc`
+!!! poprzez `virus` jako "przezroczysta rurke").
+!!!
+!!! UCZCIWIE: na Etapie 2a `hackerc lsp` samo w sobie liczy diagnostyki
+!!! TYLKO z tresci pojedynczego pliku (parytet z `hackerc check`, patrz
+!!! `hackerc/cmd/lsp.hcs`) - `virus lsp` NIE dodaje dzis zadnego
+!!! dodatkowego kontekstu workspace (np. `Virus.hk`/`get <work:...>`)
+!!! ponad to, co `hackerc lsp` juz robi samo. Jedyna realna roznica
+!!! wzgledem bezposredniego `hackerc lsp <plik>` (ktory nie istnieje -
+!!! `hackerc lsp` nie bierze pliku, patrz main.hcs) jest ustalenie
+!!! WERSJI `hackerc` z `Virus.hk` projektu i jej automatyczne pobranie/
+!!! zbudowanie, jesli jeszcze jej nie ma w cache (`hackerc_ensure`) -
+!!! dokladnie jak przed kazdym innym `virus build`/`check`/`lint`.
+fun cmd_lsp_run(project_root: Str) -> Bool [
+    let cache = cache_dirs_for_project(project_root.clone())
+    cache_ensure_all(cache.clone())
+
+    let version = DEFAULT_HACKERC_VERSION.to_string()
+    match parse_manifest_file(path_join(project_root.clone(), "Virus.hk")) [
+        Ok(manifest) -> [
+            match manifest.package.lang_using.clone() [
+                Some(u) -> [
+                    version = u
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        Err(_e) -> [
+            !! Virus.hk istnieje, ale nie dalo sie go sparsowac (rzadki
+            !! przypadek - `require_project_root()` w main.hcs juz
+            !! wymaga, zeby Virus.hk w ogole ISTNIAL, wiec ta galaz
+            !! lapie tylko BLEDY PARSOWANIA, nie jego brak) - `virus
+            !! lsp` mimo to rusza, z domyslna wersja `hackerc`
+            !! (`DEFAULT_HACKERC_VERSION`), bo diagnostyka per-plik
+            !! (Etap 2a) i tak jej nie wymaga.
+        ]
+    ]
+
+    match hackerc_ensure(cache, version) [
+        Ok(hackerc_bin) -> [
+            end run_command_inherit_ok(hackerc_bin, ["lsp"])
+        ]
+        Err(e) -> [
+            elog(c_red("virus lsp: ") + " nie mozna przygotowac hackerc: " + e)
+            end false
+        ]
+    ]
+]
