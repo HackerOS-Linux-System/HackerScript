@@ -3,6 +3,7 @@ include <parser>
 include <typecheck>
 include <diagnostics>
 include <transpiler>
+include <lsp_features>
 get <std:json> import <JsonValue::JsonEntry::json_parse::json_escape_string>
 get <std:string> import <str_starts_with::str_trim::str_join::str_to_int>
 
@@ -37,13 +38,13 @@ get <std:string> import <str_starts_with::str_trim::str_join::str_to_int>
 !!! <main>`) - `main.hcs` sam BEDZIE `include <lsp>`, wiec odwrotny
 !!! `include` stworzylby cykl. Ciala MUSZA pozostac identyczne -
 !!! jesli `main.hcs::parse_with_direct` sie zmieni, ta kopia tez musi.
-fun lsp_parse_with_direct(source: Str, src_path: Str) -> Program [
+fun lsp_parse_with_direct_checked(source: Str, src_path: Str) -> ParseResult [
     let fast_direct_extraction = extract_fast_direct_blocks(source)
     let extraction = extract_direct_blocks(fast_direct_extraction.stripped_source)
     let native_extraction = extract_native_blocks(extraction.stripped_source, native_dirname(src_path))
     let sandbox_extraction = extract_sandbox_blocks(native_extraction.stripped_source)
     let hot_extraction = extract_hot_reload_markers(sandbox_extraction.stripped_source)
-    end parse(hot_extraction.stripped_source)
+    end parse_checked(hot_extraction.stripped_source)
 ]
 
 !!! -- Male pomocniki JSON (json.hcs daje tylko parse/stringify + ---
@@ -181,8 +182,34 @@ fun lsp_severity_to_int(sev: Str) -> Int [
 !!! (0,0)-(0,1), bo `Diagnostic.line`/`.col` sa dzis zawsze 0 (nie
 !!! prawdziwa pozycja) - `hackerc/cmd/typecheck.hcs` jeszcze ich nie
 !!! wypelnia (patrz docs/ROADMAP.md, sekcja 1).
+!!! NAPRAWA (ta runda, patrz docs/ROADMAP.md sekcja 7 - "zakresy
+!!! diagnostyk w LSP zawsze (0,0)-(0,1)"). Teraz uzywa `d.line`/`d.col`/
+!!! `d.length`, GDY sa realne (>0) - dzieki nowemu `parse_checked()`
+!!! (patrz `parser.hcs`) bledy PARSERA maja teraz prawdziwa pozycje
+!!! (Token juz od dawna nosi `line`/`col` - brakowalo tylko
+!!! przekazania ich dalej zamiast zgubienia w `log()`, patrz
+!!! `push_error()`). Diagnostyki TYPECHECKA (z `check_program`) NADAL
+!!! maja `line == 0`/`col == 0` (patrz `typecheck.hcs` -
+!!! `Diagnostic(..., 0, 0, 1, "")` wszedzie) - to wymaga numerow linii
+!!! w AST (Expr/Stmt), NIE zrobione w tej rundzie (zbyt inwazyjne bez
+!!! mozliwosci kompilacji/weryfikacji - dotknieloby kazdy wariant
+!!! `Expr`/`Stmt` i tysiace miejsc dopasowania w typecheck.hcs/
+!!! typeinfer.hcs/codegen.hcs na raz). Dla takich - fallback na stara
+!!! wartosc `(0,0)-(0,1)`, BEZ zmiany zachowania.
+!!! LSP liczy linie/kolumny OD 0 (`d.line`/`d.col` z `Token` sa OD 1) -
+!!! stad `- 1`.
 fun lsp_diagnostic_to_json(d: Diagnostic) -> Str [
-    end "{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":1}},\"severity\":" + (lsp_severity_to_int(d.severity.clone()) as Str) + ",\"code\":\"" + d.code.clone() + "\",\"source\":\"hackerc\",\"message\":" + json_escape_string(d.message.clone()) + "}"
+    let start_line = 0
+    let start_char = 0
+    let end_char = 1
+    if d.line > 0 [
+        start_line = d.line - 1
+        if d.col > 0 [
+            start_char = d.col - 1
+        ]
+        end_char = start_char + max_int(1, d.length)
+    ]
+    end "{\"range\":{\"start\":{\"line\":" + (start_line as Str) + ",\"character\":" + (start_char as Str) + "},\"end\":{\"line\":" + (start_line as Str) + ",\"character\":" + (end_char as Str) + "}},\"severity\":" + (lsp_severity_to_int(d.severity.clone()) as Str) + ",\"code\":\"" + d.code.clone() + "\",\"source\":\"hackerc\",\"message\":" + json_escape_string(d.message.clone()) + "}"
 ]
 
 fun lsp_diagnostics_array_json(diags: List<Diagnostic>) -> Str [
@@ -214,9 +241,27 @@ fun lsp_uri_to_path(uri: Str) -> Str [
 !!! nie odpowiada).
 fun lsp_check_and_publish(uri: Str, source: Str) [
     let path = lsp_uri_to_path(uri.clone())
-    let program = lsp_parse_with_direct(source, path)
-    let diags = check_program(program, [])
-    let params = "{\"uri\":" + json_escape_string(uri.clone()) + ",\"diagnostics\":" + lsp_diagnostics_array_json(diags) + "}"
+    let parse_result_lsp = lsp_parse_with_direct_checked(source, path)
+    !!! NAPRAWA (ta runda) - bledy PARSERA teraz DOLACZANE do
+    !!! diagnostyk publikowanych do edytora (wczesniej: `parse()`
+    !!! gubil je calkowicie, LSP pokazywalby co najwyzej mylace
+    !!! diagnostyki typechecka na best-effort/niekompletnym AST, BEZ
+    !!! informacji o prawdziwej przyczynie - bledzie skladni).
+    let diags = check_program(parse_result_lsp.program, [], source.clone())
+    let all_diags: List<Diagnostic> = []
+    let pei = 0
+    let pen = parse_result_lsp.errors.len()
+    while pei < pen [
+        all_diags.push(parse_result_lsp.errors[pei].clone())
+        pei = pei + 1
+    ]
+    let dei = 0
+    let den = diags.len()
+    while dei < den [
+        all_diags.push(diags[dei].clone())
+        dei = dei + 1
+    ]
+    let params = "{\"uri\":" + json_escape_string(uri.clone()) + ",\"diagnostics\":" + lsp_diagnostics_array_json(all_diags) + "}"
     lsp_send("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":" + params + "}")
 ]
 
@@ -233,7 +278,56 @@ fun lsp_send_result(id_json: Str, result_json: Str) [
 !!! `publishDiagnostics`, nie pull-owego `textDocument/diagnostic` z
 !!! LSP 3.17 - prostszy model, wystarczajacy dla Etapu 2a).
 fun lsp_capabilities_json() -> Str [
-    end "{\"capabilities\":{\"textDocumentSync\":1},\"serverInfo\":{\"name\":\"hackerc-lsp\",\"version\":\"0.4\"}}"
+    end "{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true,\"definitionProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\"]}},\"serverInfo\":{\"name\":\"hackerc-lsp\",\"version\":\"0.4\"}}"
+]
+
+!!! Tura 10 - pomocnicy do zadan pozycyjnych (hover/definition/
+!!! completion): `params.textDocument.uri`, `params.position.line/
+!!! character`.
+fun lsp_params_uri(params: JsonValue) -> Str [
+    match json_obj_get(params, "textDocument") [
+        Some(td) -> [
+            match json_obj_get(td, "uri") [
+                Some(uv) -> [
+                    match json_as_str(uv) [
+                        Some(us) -> [
+                            end us
+                        ]
+                        None -> [
+                        ]
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        None -> [
+        ]
+    ]
+    end ""
+]
+
+fun lsp_params_pos(params: JsonValue, field: Str) -> Int [
+    match json_obj_get(params, "position") [
+        Some(pv) -> [
+            match json_obj_get(pv, field) [
+                Some(fv) -> [
+                    match json_as_float(fv) [
+                        Some(f) -> [
+                            end f as Int
+                        ]
+                        None -> [
+                        ]
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        None -> [
+        ]
+    ]
+    end 0
 ]
 
 !!! -- Petla glowna --------------------------------------------------
@@ -420,6 +514,31 @@ fun lsp_run() [
                                         ]
                                         None -> [
                                         ]
+                                    ]
+                                ] elif method == "textDocument/hover" or method == "textDocument/definition" or method == "textDocument/completion" [
+                                    !! Etap 2b/2c (Tura 10, docs/LSP.md) - zadania pozycyjne. Nieznany
+                                    !! dokument -> `null` (poprawna odpowiedz LSP, nie blad).
+                                    let req_uri = lsp_params_uri(params.clone())
+                                    let req_src = ""
+                                    let req_known = false
+                                    match docs.fetch(req_uri.clone()) [
+                                        Some(dsrc) -> [
+                                            req_src = dsrc
+                                            req_known = true
+                                        ]
+                                        None -> [
+                                        ]
+                                    ]
+                                    let req_line = lsp_params_pos(params.clone(), "line")
+                                    let req_char = lsp_params_pos(params.clone(), "character")
+                                    if not req_known [
+                                        lsp_send_result(id_json, "null")
+                                    ] elif method == "textDocument/hover" [
+                                        lsp_send_result(id_json, lsp_hover_json(req_src, req_line, req_char))
+                                    ] elif method == "textDocument/definition" [
+                                        lsp_send_result(id_json, lsp_definition_json(req_uri, req_src, req_line, req_char))
+                                    ] else [
+                                        lsp_send_result(id_json, lsp_completion_json(req_src))
                                     ]
                                 ] elif has_id [
                                     !! Dowolna inna METODA ZADANIA (ma
