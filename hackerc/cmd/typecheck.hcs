@@ -1,6 +1,7 @@
 include <ast_nodes>
 include <diagnostics>
 include <typeinfer>
+get <std:string> import <str_contains::str_trim::str_starts_with>
 
 !!! ZMIANA 0.3: dodano "extern"/"c"/"cpp" (patrz `gen_get_import`/
 !!! `gen_region` w codegen.hcs). Przy okazji naprawiono
@@ -27,11 +28,23 @@ include <typeinfer>
 !!! blad E0003 (ten sam typ pomylki, ktory ZMIANA 0.3 wyzej naprawila
 !!! juz raz dla "npm"/"jsr").
 fun is_known_get_source(s: Str) -> Bool [
-    end s == "pypi" or s == "crates" or s == "std" or s == "core" or s == "selfhost" or s == "virus" or s == "vira" or s == "npm" or s == "jsr" or s == "extern" or s == "c" or s == "cpp" or s == "java" or s == "bytes" or s == "bit" or s == "hlib" or s == "work"
+    end s == "pypi" or s == "crates" or s == "std" or s == "core" or s == "selfhost" or s == "virus" or s == "vira" or s == "npm" or s == "jsr" or s == "extern" or s == "c" or s == "cpp" or s == "java" or s == "kotlin" or s == "go" or s == "bytes" or s == "bit" or s == "hlib" or s == "work"
 ]
 
 fun is_builtin_func(name: Str) -> Bool [
-    end name == "log" or name == "elog" or name == "__direct__" or name == "__fast_direct__" or name == "__native__" or name == "some" or name == "none" or name == "ok" or name == "err" or name == "read_file" or name == "write_file" or name == "dict" or name == "env_var" or name == "run_command" or name == "run_command_combined" or name == "http_get" or name == "current_dir" or name == "read_stdin_line" or name == "read_stdin_exact" or name == "write_stdout" or name == "run_command_inherit" or name == "sha256_hex"
+    !! NAPRAWA (Tura 10, patrz SESSION_LOG.md) - dopisano `args`/`exit`/
+    !! `copy_file`/`create_dir`/`dir_exists`/`list_dir`/`path_exists`/
+    !! `remove_dir_all`/`remove_file`/`__sandbox__` - byly rozpoznawane
+    !! przez `codegen.hcs` (kompiluja sie OK od dawna), ale NIE byly
+    !! tutaj, wiec KAZDE ich wywolanie dawalo falszywe `W0002: wywolanie
+    !! nieznanej funkcji`. Nieszkodliwe samo w sobie (to tylko warning),
+    !! ale przy pliku z WIELOMA takimi wywolaniami (np. `exit()` uzywane
+    !! dziesiatki razy w `hackerc/cmd/main.hcs`) generowalo TYLE
+    !! diagnostyk, ze `find_call_line_of` (nowosc tej tury - liniowy
+    !! skan zrodla PRZY KAZDEJ z nich) zamienial build w wielosekundowa
+    !! petle - realna regresja wydajnosci znaleziona i naprawiona w tej
+    !! samej turze.
+    end name == "log" or name == "elog" or name == "__direct__" or name == "__fast_direct__" or name == "__native__" or name == "__sandbox__" or name == "some" or name == "none" or name == "ok" or name == "err" or name == "read_file" or name == "write_file" or name == "dict" or name == "set" or name == "env_var" or name == "run_command" or name == "run_command_combined" or name == "http_get" or name == "current_dir" or name == "read_stdin_line" or name == "read_stdin_exact" or name == "write_stdout" or name == "run_command_inherit" or name == "sha256_hex" or name == "now_ms" or name == "args" or name == "exit" or name == "copy_file" or name == "create_dir" or name == "dir_exists" or name == "list_dir" or name == "path_exists" or name == "remove_dir_all" or name == "remove_file"
 ]
 
 fun str_starts_with_underscore(s: Str) -> Bool [
@@ -165,7 +178,9 @@ struct FnChecker [
     ret_type: Option<TypeRef>,
     fn_name: Str,
     imported_names: Dict<Str, Bool>,
-    extra_variant_names: List<Str>
+    extra_variant_names: List<Str>,
+    !! DODANE (Tura 10) - patrz `Checker.lines`.
+    lines: List<Str>
 ]
 
 impl FnChecker [
@@ -195,11 +210,11 @@ impl FnChecker [
             Some(f) -> [
                 let params = fun_decl_params(f)
                 if arg_count != params.len() [
-                    self.diags.push(Diagnostic("error", "E0001", "'" + name + "' oczekuje " + (params.len() as Str) + " argument(ow), otrzymano " + (arg_count as Str), 0, 0, 1, ""))
+                    self.diags.push(Diagnostic("error", "E0001", "'" + name + "' oczekuje " + (params.len() as Str) + " argument(ow), otrzymano " + (arg_count as Str), find_call_line_of(self.lines.clone(), name.clone()), 0, name.len(), ""))
                 ]
             ]
             None -> [
-                self.diags.push(Diagnostic("warning", "W0002", "wywolanie nieznanej funkcji '" + name + "' (jesli pochodzi z 'get <...>', to ograniczenie bootstrapu - patrz docs/ROADMAP.md)", 0, 0, 1, ""))
+                self.diags.push(Diagnostic("warning", "W0002", "wywolanie nieznanej funkcji '" + name + "' (jesli pochodzi z 'get <...>', to ograniczenie bootstrapu - patrz docs/ROADMAP.md)", find_call_line_of(self.lines.clone(), name.clone()), 0, name.len(), ""))
             ]
         ]
     ]
@@ -267,7 +282,7 @@ impl FnChecker [
                 ]
                 if not ok [
                     let fname = self.fn_name.clone()
-                    self.diags.push(Diagnostic("error", "E0011", "'?' uzyte w '" + fname + "', ktora nie zwraca Result<T,E> ani Option<T> - '?' propaguje Err/None do OTACZAJACEJ funkcji, wiec jej typ zwracany musi na to pozwalac", 0, 0, 1, ""))
+                    self.diags.push(Diagnostic("error", "E0011", "'?' uzyte w '" + fname + "', ktora nie zwraca Result<T,E> ani Option<T> - '?' propaguje Err/None do OTACZAJACEJ funkcji, wiec jej typ zwracany musi na to pozwalac", find_line_of(self.lines.clone(), "fun " + fname.clone()), 0, fname.len(), ""))
                 ]
             ]
             _ -> [
@@ -305,7 +320,7 @@ impl FnChecker [
                         match inferred [
                             Some(inf) -> [
                                 if not types_equal(some(tref.clone()), some(inf.clone())) [
-                                    self.diags.push(Diagnostic("error", "E0005", "zmienna '" + name + "' zadeklarowana jako " + tref.name + ", ale przypisana wartosc ma wywnioskowany typ " + inf.name, 0, 0, 1, ""))
+                                    self.diags.push(Diagnostic("error", "E0005", "zmienna '" + name + "' zadeklarowana jako " + tref.name + ", ale przypisana wartosc ma wywnioskowany typ " + inf.name, find_line_of(self.lines.clone(), "let " + name.clone()), 0, name.len(), ""))
                                 ]
                             ]
                             None -> [
@@ -393,11 +408,67 @@ impl FnChecker [
 
 !!! -- Checker: sprawdza CALY program -------------------------------------
 
+!!! DODANE (Tura 10, patrz docs/ROADMAP.md "numery linii w AST") -
+!!! `source: Str` na `Checker` + `find_line_of` (nizej) - PRZYBLIZONE
+!!! numery linii dla diagnostyk typechecka (byly `0, 0` na sztywno w
+!!! KAZDYM miejscu - AST nie ma pozycji). Podejscie: przeszukanie
+!!! tekstu zrodla po charakterystycznym fragmencie bledu (np. nazwa
+!!! wywolywanej funkcji), NIE prawdziwe pozycje z parsera - to samo,
+!!! swiadome przyblizenie co `lsp_features.hcs` (Etap 2b/2c). Dziala
+!!! dobrze dla typowego przypadku (jedno wystapienie problematycznego
+!!! identyfikatora); przy wielu wystapieniach trafia PIERWSZE. Brak
+!!! dopasowania (0) -> `render_many` pokaze linie 1 z pustym
+!!! kontekstem - GORSZE niz nic nie pokazac, ALE nadal lepsze niz
+!!! zawsze-0 (i tak bylo zawsze-0 wczesniej).
+!!! NAPRAWA WYDAJNOSCI (Tura 10, ten sam dzien co dodanie) - PIERWSZA
+!!! wersja robila `split_lines(source)` PRZY KAZDYM wywolaniu (kazda
+!!! diagnostyka od nowa dzielila caly plik na linie) - przy pliku z
+!!! wieloma diagnostykami (np. `hackerc/cmd/main.hcs` samo w sobie, ~70
+!!! `W0002` z limitacji cross-file typechecka bootstrapu - PRE-ISTNIEJACY,
+!!! udokumentowany fakt, NIE nowy w tej turze) `virus build` /
+!!! `hackerc build` na SOBIE SAMYM zaczal trwac >60s (wczesniej: kilka
+!!! do kilkunastu sekund) - zmierzone i naprawione w tej sesji. Teraz
+!!! bierze JUZ POCIETE linie (`Checker.lines`/`FnChecker.lines`, dzielone
+!!! RAZ w `check_program`), nie tnie ponownie za kazdym razem.
+fun find_line_of(lines: List<Str>, needle: Str) -> Int [
+    if needle == "" [
+        end 0
+    ]
+    let i = 0
+    while i < lines.len() [
+        if str_contains(lines[i].clone(), needle) [
+            end i + 1
+        ]
+        i = i + 1
+    ]
+    end 0
+]
+
+!!! Jak `find_line_of`, ale dla WYWOLAN (E0001/W0002) pomija linie
+!!! deklaracji (`fun name(...)`) - inaczej blad "za mala liczba
+!!! argumentow" wskazywalby na DEFINICJE funkcji zamiast na WYWOLANIE,
+!!! ktore faktycznie ma zly ksztalt (czesty przypadek: nazwa funkcji
+!!! pojawia sie w zrodle NAJPIERW we wlasnej definicji). Brak trafienia
+!!! poza definicjami -> spada na `find_line_of` zwykle (definicja lepsza
+!!! niz nic).
+fun find_call_line_of(lines: List<Str>, name: Str) -> Int [
+    let i = 0
+    while i < lines.len() [
+        let t = str_trim(lines[i].clone())
+        if str_contains(t, name) and not str_starts_with(t, "fun " + name + "(") and not str_starts_with(t, "pub fun " + name + "(") [
+            end i + 1
+        ]
+        i = i + 1
+    ]
+    end find_line_of(lines, name)
+]
+
 struct Checker [
     sigs: Signatures,
     diags: List<Diagnostic>,
     imported_names: Dict<Str, Bool>,
-    extra_variant_names: List<Str>
+    extra_variant_names: List<Str>,
+    lines: List<Str>
 ]
 
 impl Checker [
@@ -408,7 +479,7 @@ impl Checker [
     !!! mimo ze funkcja juz je akceptowala; teraz + "work").
     fun check_get(self, source: Str, name: Str) [
         if not is_known_get_source(source) [
-            self.diags.push(Diagnostic("error", "E0003", "nieznane zrodlo '" + source + "' w 'get <" + source + ":" + name + ">' (dozwolone: bit, bytes, c, core, cpp, crates, extern, hlib, jsr, npm, pypi, selfhost, std, vira, virus, work)", 0, 0, 1, ""))
+            self.diags.push(Diagnostic("error", "E0003", "nieznane zrodlo '" + source + "' w 'get <" + source + ":" + name + ">' (dozwolone: bit, bytes, c, core, cpp, crates, extern, go, hlib, java, jsr, kotlin, npm, pypi, selfhost, std, vira, virus, work)", find_line_of(self.lines.clone(), "get <" + source.clone() + ":"), 0, 1, ""))
         ]
     ]
 
@@ -421,7 +492,7 @@ impl Checker [
         let ret_type = fun_decl_ret_type(owned_fn.clone())
         let body = fun_decl_body(owned_fn)
 
-        let checker = FnChecker(self.sigs.clone(), [], dict(), [], dict(), ret_type, fn_name, self.imported_names.clone(), self.extra_variant_names.clone())
+        let checker = FnChecker(self.sigs.clone(), [], dict(), [], dict(), ret_type, fn_name, self.imported_names.clone(), self.extra_variant_names.clone(), self.lines.clone())
 
         let i = 0
         let n = params.len()
@@ -454,7 +525,7 @@ impl Checker [
         while j < dn [
             let dname = checker.declared_names[j]
             if not checker.used.contains(dname) and not str_starts_with_underscore(dname) [
-                checker.diags.push(Diagnostic("warning", "W0001", "zmienna '" + dname + "' jest zadeklarowana, ale nigdy nie uzyta", 0, 0, 1, ""))
+                checker.diags.push(Diagnostic("warning", "W0001", "zmienna '" + dname + "' jest zadeklarowana, ale nigdy nie uzyta", find_line_of(self.lines.clone(), "let " + dname.clone()), 0, dname.len(), ""))
             ]
             j = j + 1
         ]
@@ -500,10 +571,10 @@ fun collect_imported_names(prog: Program) -> Dict<Str, Bool> [
 !!! <Expr>`) - bez tego konstruktor wariantu z importowanego enuma
 !!! dawalby spurious W0002, bo `Signatures` widzi TYLKO BIEZACY plik
 !!! (parytet z komentarzem przy `extra_variant_names` w typecheck.py).
-fun check_program(prog: Program, extra_variant_names: List<Str>) -> List<Diagnostic> [
+fun check_program(prog: Program, extra_variant_names: List<Str>, source: Str) -> List<Diagnostic> [
     let sigs = collect_signatures(prog.clone())
     let imported_names = collect_imported_names(prog.clone())
-    let checker = Checker(sigs, [], imported_names, extra_variant_names.clone())
+    let checker = Checker(sigs, [], imported_names, extra_variant_names.clone(), split_lines(source))
 
     let i = 0
     let n = prog.body.len()
@@ -542,6 +613,6 @@ fun main() [
     let ok_body: List<Stmt> = [ReturnStmt(some(BinOp("+", NumberLit("1"), NumberLit("2"))))]
     let ok_fn = FunDecl("ok", [], some(TypeRef("Int", none(), none())), ok_body, false, [])
     let prog = Program([bad_fn, ok_fn])
-    let diags = check_program(prog, [])
+    let diags = check_program(prog, [], "")
     log("liczba diagnostyk:", diags.len())
 ]
