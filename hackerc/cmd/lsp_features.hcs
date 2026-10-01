@@ -1,0 +1,288 @@
+include <diagnostics>
+include <lexer>
+get <std:json> import <json_escape_string>
+get <std:string> import <str_trim::str_starts_with::str_join>
+
+!!! LSP Etap 2b/2c (Tura 10, patrz docs/LSP.md) - hover, definition,
+!!! completion. Implementacja OPARTA NA TEKSCIE (skan linii dokumentu),
+!!! NIE na AST - AST nie ma pozycji (patrz ROADMAP, "numery linii w
+!!! AST"), wiec definicje szukamy jako pierwsza linie zaczynajaca sie od
+!!! `fun`/`struct`/`enum`/`const`/`let` z pasujaca nazwa. To swiadome,
+!!! proste przyblizenie: brak rozroznienia zakresow (dwie funkcje o tej
+!!! samej nazwie w roznych `impl` -> pierwsza), brak wielu plikow
+!!! (tylko otwarty dokument).
+
+struct DeclInfo [
+    line: Int,
+    col: Int,
+    kind: Str,
+    name: Str
+]
+
+fun lsp_is_ident_char(c: Str) -> Bool [
+    end (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+]
+
+!!! Identyfikator pod kursorem (`character` = pozycja PRZED znakiem, jak w
+!!! LSP; kursor tuz za koncem slowa tez liczy sie jako slowo).
+fun lsp_word_at(line_text: Str, character: Int) -> Str [
+    let n = line_text.len()
+    let pos = character
+    if pos > n [
+        pos = n
+    ]
+    let start = pos
+    while start > 0 and lsp_is_ident_char(line_text.char_at(start - 1)) [
+        start = start - 1
+    ]
+    let stop = pos
+    while stop < n and lsp_is_ident_char(line_text.char_at(stop)) [
+        stop = stop + 1
+    ]
+    if stop <= start [
+        end ""
+    ]
+    end line_text.slice(start, stop)
+]
+
+fun lsp_leading_spaces(s: Str) -> Int [
+    let i = 0
+    while i < s.len() and (s.char_at(i) == " " or s.char_at(i) == "\t") [
+        i = i + 1
+    ]
+    end i
+]
+
+fun lsp_ident_prefix(s: Str) -> Str [
+    let i = 0
+    while i < s.len() and lsp_is_ident_char(s.char_at(i)) [
+        i = i + 1
+    ]
+    end s.slice(0, i)
+]
+
+!!! Jesli `text` (po wcieciu) zaczyna sie od deklaracji `fun`/`struct`/`enum`/
+!!! `const`/`let` (z opcjonalnym `pub `), zwraca (rodzaj, nazwa, kolumna
+!!! nazwy) jako DeclInfo z line=0; inaczej none().
+fun lsp_decl_on_line(line_text: Str) -> Option<DeclInfo> [
+    let lead = lsp_leading_spaces(line_text)
+    let t: Str = line_text.slice(lead, line_text.len())
+    let base = lead
+    if str_starts_with(t, "pub ") [
+        t = t.slice(4, t.len())
+        base = base + 4
+    ]
+    let kinds: List<Str> = ["fun", "struct", "enum", "const", "let"]
+    let ki = 0
+    while ki < kinds.len() [
+        let k: Str = kinds[ki].clone()
+        let prefix: Str = k + " "
+        if str_starts_with(t, prefix) [
+            let rest: Str = t.slice(prefix.len(), t.len())
+            let nm: Str = lsp_ident_prefix(rest)
+            if nm.len() > 0 [
+                end some(DeclInfo(0, base + prefix.len(), k, nm))
+            ]
+        ]
+        ki = ki + 1
+    ]
+    end none()
+]
+
+fun lsp_find_decl(lines: List<Str>, word: Str) -> Option<DeclInfo> [
+    let i = 0
+    while i < lines.len() [
+        match lsp_decl_on_line(lines[i].clone()) [
+            Some(d) -> [
+                if d.name == word [
+                    end some(DeclInfo(i, d.col, d.kind.clone(), d.name.clone()))
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        i = i + 1
+    ]
+    end none()
+]
+
+fun lsp_line_or_empty(lines: List<Str>, idx: Int) -> Str [
+    if idx >= 0 and idx < lines.len() [
+        end lines[idx].clone()
+    ]
+    end ""
+]
+
+!!! textDocument/definition -> Location albo `null`.
+fun lsp_definition_json(uri: Str, source: Str, line: Int, character: Int) -> Str [
+    let lines = split_lines(source)
+    let word = lsp_word_at(lsp_line_or_empty(lines.clone(), line), character)
+    if word == "" [
+        end "null"
+    ]
+    match lsp_find_decl(lines.clone(), word.clone()) [
+        Some(d) -> [
+            let sl = d.line as Str
+            let sc = d.col as Str
+            let ec = (d.col + d.name.len()) as Str
+            end "{\"uri\":" + json_escape_string(uri) + ",\"range\":{\"start\":{\"line\":" + sl + ",\"character\":" + sc + "},\"end\":{\"line\":" + sl + ",\"character\":" + ec + "}}}"
+        ]
+        None -> [
+            end "null"
+        ]
+    ]
+]
+
+fun lsp_builtin_doc(word: Str) -> Str [
+    if word == "log" [
+        end "log(x) -> Void - wypisuje na stdout (println)"
+    ]
+    if word == "elog" [
+        end "elog(x) -> Void - wypisuje na stderr"
+    ]
+    if word == "dict" [
+        end "dict() -> Dict<K, V> - pusty slownik (HashMap)"
+    ]
+    if word == "set" [
+        end "set() -> Set<T> - pusty zbior (HashSet)"
+    ]
+    if word == "some" or word == "none" [
+        end "Option<T>: some(x) / none()"
+    ]
+    if word == "ok" or word == "err" [
+        end "Result<T, E>: ok(x) / err(e)"
+    ]
+    if word == "read_file" [
+        end "read_file(path: Str) -> Result<Str, Str>"
+    ]
+    if word == "write_file" [
+        end "write_file(path: Str, text: Str) -> Result<Void, Str>"
+    ]
+    if word == "run_command" [
+        end "run_command(program: Str, args: List<Str>) -> Result<Str, Str> - stdout procesu"
+    ]
+    if word == "now_ms" [
+        end "now_ms() -> Int - czas w ms od epoki Unix"
+    ]
+    if word == "sha256_hex" [
+        end "sha256_hex(text: Str) -> Str"
+    ]
+    if word == "env_var" [
+        end "env_var(name: Str) -> Option<Str>"
+    ]
+    if word == "http_get" [
+        end "http_get(url: Str) -> Result<Str, Str>"
+    ]
+    end ""
+]
+
+fun lsp_keyword_doc(word: Str) -> Str [
+    if is_keyword(word.clone()) [
+        end "slowo kluczowe HackerScript: `" + word + "`"
+    ]
+    end ""
+]
+
+!!! Tekst hovera dla deklaracji: sygnatura funkcji (bez konczacego ` [`),
+!!! albo cale ciało `struct`/`enum` (do linii `]`, max 30 linii).
+fun lsp_decl_hover_text(lines: List<Str>, d: DeclInfo) -> Str [
+    let first: Str = str_trim(lines[d.line].clone())
+    if d.kind == "fun" [
+        if first.len() >= 2 and first.slice(first.len() - 2, first.len()) == " [" [
+            first = first.slice(0, first.len() - 2)
+        ]
+        end first
+    ]
+    if d.kind == "struct" or d.kind == "enum" [
+        let parts: List<Str> = [lines[d.line].clone()]
+        let j = d.line + 1
+        while j < lines.len() and j < d.line + 30 [
+            parts.push(lines[j].clone())
+            if str_trim(lines[j].clone()) == "]" [
+                j = lines.len()
+            ]
+            j = j + 1
+        ]
+        end str_join(parts, "\n")
+    ]
+    end first
+]
+
+fun lsp_hover_json(source: Str, line: Int, character: Int) -> Str [
+    let lines = split_lines(source)
+    let word = lsp_word_at(lsp_line_or_empty(lines.clone(), line), character)
+    if word == "" [
+        end "null"
+    ]
+    let text = ""
+    match lsp_find_decl(lines.clone(), word.clone()) [
+        Some(d) -> [
+            text = "```hackerscript\n" + lsp_decl_hover_text(lines.clone(), d) + "\n```"
+        ]
+        None -> [
+            let bd = lsp_builtin_doc(word.clone())
+            if bd != "" [
+                text = "```hackerscript\n" + bd + "\n```"
+            ] else [
+                text = lsp_keyword_doc(word.clone())
+            ]
+        ]
+    ]
+    if text == "" [
+        end "null"
+    ]
+    end "{\"contents\":{\"kind\":\"markdown\",\"value\":" + json_escape_string(text) + "}}"
+]
+
+fun lsp_completion_item(label: Str, kind: Int, detail: Str) -> Str [
+    end "{\"label\":" + json_escape_string(label) + ",\"kind\":" + (kind as Str) + ",\"detail\":" + json_escape_string(detail) + "}"
+]
+
+!!! textDocument/completion - slowa kluczowe (kind 14), wbudowane (3),
+!!! oraz deklaracje z otwartego dokumentu: fun(3) struct(22) enum(13)
+!!! const(21) let(6). Bez filtrowania po prefiksie (klient filtruje).
+fun lsp_completion_json(source: Str) -> Str [
+    let items: List<Str> = []
+    let kws: List<Str> = ["fun", "let", "const", "if", "else", "elif", "while", "for", "in", "return", "end", "get", "import", "using", "direct", "true", "false", "null", "struct", "enum", "match", "break", "continue", "pub", "self", "and", "or", "not", "as", "impl", "include", "native", "region", "use"]
+    let i = 0
+    while i < kws.len() [
+        items.push(lsp_completion_item(kws[i].clone(), 14, "slowo kluczowe"))
+        i = i + 1
+    ]
+    let bs: List<Str> = ["log", "elog", "dict", "set", "some", "none", "ok", "err", "read_file", "write_file", "run_command", "now_ms", "sha256_hex", "env_var", "http_get"]
+    let bi = 0
+    while bi < bs.len() [
+        items.push(lsp_completion_item(bs[bi].clone(), 3, lsp_builtin_doc(bs[bi].clone())))
+        bi = bi + 1
+    ]
+    let lines = split_lines(source)
+    let li = 0
+    let seen: Dict<Str, Bool> = dict()
+    while li < lines.len() [
+        match lsp_decl_on_line(lines[li].clone()) [
+            Some(d) -> [
+                if not seen.contains(d.name.clone()) [
+                    seen.insert(d.name.clone(), true)
+                    let ck = 6
+                    if d.kind == "fun" [
+                        ck = 3
+                    ]
+                    if d.kind == "struct" [
+                        ck = 22
+                    ]
+                    if d.kind == "enum" [
+                        ck = 13
+                    ]
+                    if d.kind == "const" [
+                        ck = 21
+                    ]
+                    items.push(lsp_completion_item(d.name.clone(), ck, str_trim(lines[li].clone())))
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        li = li + 1
+    ]
+    end "{\"isIncomplete\":false,\"items\":[" + str_join(items, ",") + "]}"
+]
