@@ -1,10 +1,76 @@
 include <ast_nodes>
+include <lexer>
 include <parser>
 include <codegen>
 include <transpiler>
 include <hlib>
 get <std:io> import <file_readable>
-get <std:string> import <str_join::str_split::str_trim::str_starts_with>
+get <std:string> import <str_join::str_split::str_trim::str_starts_with::str_replace::str_contains>
+
+!!! `using <wersja>` per plik (patrz docs/MULTI_VERSION.md) - odczyt
+!!! WYLACZNIE przez `tokenize()` (lexer.hcs), NIGDY `parse()`
+!!! (parser.hcs): zalozenie architektoniczne jest takie, ze skladnia
+!!! samego naglowka `using<...>` ORAZ zasady lexera (komentarze/biale
+!!! znaki) sa ZAMROZONE na zawsze miedzy wersjami jezyka - w
+!!! odroznieniu od reszty gramatyki, ktora MOZE sie zmieniac (to caly
+!!! sens `using <wersja>`). Gdyby `using<...>` samo w sobie kiedys
+!!! musialo sie zmienic, mechanizm ten by sie zapetlil (nie dalby sie
+!!! odczytac wersji pliku bez najpierw znajac jego wersje) - stad ta
+!!! twarda, udokumentowana zasada.
+!!! Zwraca `none()` gdy plik NIE zaczyna sie od `using <...>` (ani
+!!! `Eof`/blad tokenizacji) - wtedy plik jest w wersji domyslnej
+!!! projektu, jak dotychczas.
+fun peek_source_using_version(source: Str) -> Option<Str> [
+    let tokens = tokenize(source)
+    if tokens.len() < 3 [
+        end none()
+    ]
+    let t0 = tokens[0].clone()
+    if t0.kind != Keyword or t0.value != "using" [
+        end none()
+    ]
+    let t1 = tokens[1].clone()
+    if t1.kind != LAngle [
+        end none()
+    ]
+    let version = ""
+    let i = 2
+    let n = tokens.len()
+    while i < n and tokens[i].clone().kind != RAngle [
+        version = version + tokens[i].clone().value
+        i = i + 1
+    ]
+    if version == "" [
+        end none()
+    ]
+    end some(version)
+]
+
+!!! Parsuje `--version-map` z main.hcs: `"0.4=/sciezka1;0.5=/sciezka2"`
+!!! (`;`-rozdzielone pary `wersja=sciezka`) na `Dict<Str, Str>` - patrz
+!!! `virus/cmd/multiversion.hcs::build_version_map_flag_value`, ktore
+!!! generuje DOKLADNIE ten format po stronie `virus`. Pusty `s` (brak
+!!! flagi) -> pusty `dict()`, parytet ze starym zachowaniem.
+fun parse_version_map(s: Str) -> Dict<Str, Str> [
+    let out: Dict<Str, Str> = dict()
+    if s == "" [
+        end out
+    ]
+    let pairs = str_split(s, ";")
+    let i = 0
+    let n = pairs.len()
+    while i < n [
+        let pair = pairs[i].clone()
+        if pair != "" [
+            let parts = str_split(pair, "=")
+            if parts.len() == 2 [
+                out.insert(parts[0].clone(), parts[1].clone())
+            ]
+        ]
+        i = i + 1
+    ]
+    end out
+]
 
 const CARGO_TOML_HEADER: Str = "[package]\nname = \""
 const CARGO_TOML_MID: Str = "\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\n[[bin]]\nname = \""
@@ -269,12 +335,38 @@ fun vira_module_file_path(vira_root: Str, name: Str, version: Option<Str>) -> St
 !!! sa wspoldzielone przez `get <work:...>`; czlonek MOZE miec oba
 !!! ksztalty naraz (wlasny `cmd/main.hcs` I `lib/mod.hcs`), jesli ma
 !!! byc jednoczesnie samodzielnym narzedziem i biblioteka dla innych.
+!!! NAPRAWA (ta runda) - patrz docs/ROADMAP.md, "include <work:...>
+!!! zwraca puste moduly przy `virus build --wasm`". Przed ta naprawa
+!!! sprawdzane bylo WYLACZNIE `<d>/<member>/lib` - poprawne dla
+!!! czlonkow-bibliotek (`libs/core`, `libs/std`), ale FALSZYWE dla
+!!! czlonkow-binarek trzymajacych zrodlo w `cmd/` zamiast `lib/`
+!!! (`hackerc`, `virus`, `playground`, `hack3rc` - patrz
+!!! `find_cmd_entry` w manifest.hcs, konwencja `cmd/main.hcs` od 0.4).
+!!! Dla `include <work:hackerc::ast_nodes>` (patrz
+!!! `playground/cmd/main.hcs`) `find_workspace_root` zawsze zwracalo
+!!! `none()`, bo `<root>/hackerc/lib` nigdy nie istnieje - `hackerc` ma
+!!! TYLKO `hackerc/cmd/`. Skutek: `resolve_include_path` w
+!!! Discovery.resolve failowalo po cichu (samo ostrzezenie, patrz
+!!! `collect_module_imports`/`Discovery.resolve` nizej), WIEC modul
+!!! nigdy nie trafial do `mod_names`/`module_files` - ale
+!!! `gen_include`/`gen_get_import` w codegen.hcs dzialaja NIEZALEZNIE
+!!! od wyniku Discovery (przetwarzaja kazdy `IncludeStmt`/
+!!! `GetImportStmt` napotkany w ciele pliku) i tak emitowaly
+!!! `use crate::_hks_inc_work_hackerc__ast_nodes::*;` - stad
+!!! `error[E0432]: unresolved import` (modul deklarowany w `use`,
+!!! ale nigdy nie zapisany jako plik ani wymieniony w `mod ...;`).
+!!! Naprawa: sprawdzamy istnienie ALBO `<member>/lib`, ALBO
+!!! `<member>/cmd` - patrz tez `work_module_file_path` nizej (musi
+!!! wybrac ten sam wariant, inaczej `find_workspace_root` znajdzie
+!!! korzen, ale `work_module_file_path` nadal wskaze na nieistniejacy
+!!! `lib/<plik>.hcs`).
 fun find_workspace_root(start: Str, member_name: Str) -> Option<Str> [
     let d = to_absolute_dir(start)
     let prev_d = "\0no-such-dir"
     while d != prev_d [
-        let candidate = path_join_safe(d.clone(), member_name.clone() + "/lib")
-        if dir_exists(candidate) [
+        let lib_candidate = path_join_safe(d.clone(), member_name.clone() + "/lib")
+        let cmd_candidate = path_join_safe(d.clone(), member_name.clone() + "/cmd")
+        if dir_exists(lib_candidate) or dir_exists(cmd_candidate) [
             end some(d)
         ]
         prev_d = d.clone()
@@ -288,17 +380,33 @@ fun find_workspace_root(start: Str, member_name: Str) -> Option<Str> [
 !!! (samo `get <work:member>`) laduje w `<member>/lib/mod.hcs` -
 !!! DOKLADNIE parytet z tym, jak `get <std:nazwa>` bez `::` lądowałoby
 !!! w `libs/std/lib/mod.hcs`.
+!!!
+!!! NAPRAWA (ta runda, parytet z `find_workspace_root` wyzej): dla
+!!! czlonkow-binarek (`hackerc`/`virus`/`playground`/`hack3rc`), ktore
+!!! NIE MAJA `<member>/lib/`, sciezka `lib/...` po prostu nie istnieje
+!!! - wiec probujemy najpierw wariant `lib/` (priorytet, jak dotad, dla
+!!! czlonkow-bibliotek), a gdy plik tam nie istnieje, spadamy na
+!!! `cmd/<v>.hcs` (albo `cmd/main.hcs`, gdy `version` to `none()` -
+!!! konwencja jedynego dopuszczalnego wejscia czlonka-binarki od 0.4).
 fun work_module_file_path(workspace_root: Str, member: Str, version: Option<Str>) -> Str [
-    let path = workspace_root + "/" + member + "/lib/"
+    let lib_path = workspace_root + "/" + member + "/lib/"
+    let cmd_path = workspace_root + "/" + member + "/cmd/"
     match version [
         Some(v) -> [
-            path = path + v
+            lib_path = lib_path + v
+            cmd_path = cmd_path + v
         ]
         None -> [
-            path = path + "mod"
+            lib_path = lib_path + "mod"
+            cmd_path = cmd_path + "main"
         ]
     ]
-    end path + ".hcs"
+    lib_path = lib_path + ".hcs"
+    cmd_path = cmd_path + ".hcs"
+    if file_readable(lib_path.clone()) [
+        end lib_path
+    ]
+    end cmd_path
 ]
 
 !!! Szuka archiwum `.hlib` dla `get <hlib:name[::version]>`, w tej
@@ -366,7 +474,15 @@ fun find_hlib_file_path(name: Str, version: Option<Str>, base_dir: Str, vira_roo
 !!! `(stmt, base_dir)` w `module_stmts()` (project.py).
 struct QueueItem [
     stmt: Stmt,
-    base_dir: Str
+    base_dir: Str,
+    !! DODANE (ta runda, patrz docs/MULTI_VERSION.md - nie, patrz
+    !! docs/WORK_INCLUDE_FIX.md) - naprawa duplikacji modulow przy
+    !! `include <work:member::plik>`, gdy TEN plik SAM ma dalsze
+    !! `include <cos>` (bez prefiksu "work:") - patrz uzasadnienie przy
+    !! `collect_module_imports`/obsludze `IncludeStmt` w `resolve()`
+    !! nizej. `none()` = zwykly plik (nie zaladowany jako zaleznosc
+    !! "work" innego czlonka) - stare zachowanie bez zmian.
+    work_member: Option<Str>
 ]
 
 !!! Doklejenie `rest` DO `base` jako sciezka - jak Python `pathlib.Path
@@ -481,6 +597,24 @@ fun resolve_include_path(raw_path: Str, base_dir: Str) -> Option<Str> [
     end none()
 ]
 
+!!! Wyciaga nazwe CZLONKA z `"work:member"` albo `"work:member::plik"` -
+!!! ta sama logika co poczatek `resolve_include_path` powyzej, wydzielona
+!!! do osobnej funkcji, zeby `resolve()` (Discovery) mogla policzyc
+!!! `work_member` DLA KOLEJNEGO poziomu `collect_module_imports` PO
+!!! rozwiazaniu `effective_path` - patrz uzasadnienie przy
+!!! `QueueItem::work_member`/`collect_module_imports` powyzej.
+fun extract_work_member(path: Str) -> Option<Str> [
+    if path.len() >= 5 and path.slice(0, 5) == "work:" [
+        let rest = path.slice(5, path.len())
+        let sep = find_substr(rest, "::")
+        if sep >= 0 [
+            end some(rest.slice(0, sep))
+        ]
+        end some(rest)
+    ]
+    end none()
+]
+
 !!! Parytet z `flat_include_module_name` (project.py) - MUSI byc
 !!! identyczna jak kopia w codegen.hcs (ta sama "umowa" co
 !!! `flat_module_name`, patrz tam).
@@ -524,7 +658,26 @@ struct DiscoveredFile [
     !! ROZBUDOWA (ta runda, patrz docs/FAST_DIRECT.md) - `fast direct
     !! {backend} [ ... ]`, parytet z `blocks`/`native_engines` wyzej.
     fast_direct_blocks: List<Str>,
-    fast_direct_backends: List<Str>
+    fast_direct_backends: List<Str>,
+    !! DODANE (ta runda, patrz docs/MULTI_VERSION.md) - gdy plik
+    !! deklaruje `using <wersja>` INNA niz wersja biezacego `hackerc`
+    !! (patrz `Discovery::own_version` nizej) i dostepny jest binarny
+    !! `hackerc` tej innej wersji (patrz `Discovery::version_binaries`,
+    !! wypelniane przez `virus build` z `--version-map`), plik NIE
+    !! jest parsowany WLASNYM parserem (moglby uzywac skladni, ktorej
+    !! biezacy `hackerc` w ogole nie zna) - zamiast tego delegowany do
+    !! `<inny-hackerc> emit-module` (patrz `cmd_emit_module` w
+    !! main.hcs), a gotowy tekst Rust ladowany tutaj. `program` w takim
+    !! wypadku to PUSTY `Program([])` (plik nie bierze wtedy udzialu w
+    !! `collect_module_imports`/sygnaturach projektu - udokumentowane
+    !! ograniczenie, patrz docs/MULTI_VERSION.md, "Czego NIE robi").
+    pre_transpiled_rust: Option<Str>,
+    !! DODANE (ta runda) - patrz `QueueItem::work_member`/`CodeGen::
+    !! work_member` - propagowane az do kodegen, zeby `gen_include`
+    !! (dla `IncludeStmt` WEWNATRZ tego pliku) wiedzial, czy przepisac
+    !! goly `include <cos>` na `include <work:member::cos>` (naprawa
+    !! duplikacji modulow, patrz SESSION_LOG.md).
+    work_member: Option<Str>
 ]
 
 struct ProjectResult [
@@ -560,16 +713,100 @@ struct ProjectResult [
 struct Discovery [
     files: List<DiscoveredFile>,
     seen_flat_names: Dict<Str, Bool>,
-    warnings: List<Str>
+    warnings: List<Str>,
+    !! DODANE (ta runda, patrz docs/MULTI_VERSION.md) - wlasna wersja
+    !! JEZYKA tego binarnego `hackerc` (parytet z `VERSION` w
+    !! main.hcs) - punkt odniesienia dla `using <wersja>` per plik
+    !! (patrz `parse_and_add` nizej).
+    own_version: Str,
+    !! Mapa "wersja" -> "sciezka do binarki hackerc tej wersji",
+    !! zbudowana przez `virus build` (skan calego projektu + pobranie
+    !! brakujacych binarek, patrz `virus/cmd/multiversion.hcs`) i
+    !! przekazana przez `hackerc build --version-map`. Pusty `dict()`
+    !! (domyslnie) = brak delegacji, kazdy plik MUSI byc w wersji
+    !! `own_version` (stare zachowanie, bez zmian).
+    version_binaries: Dict<Str, Str>
 ]
 
 impl Discovery [
     !!! Parsuje jeden plik (po wyciagnieciu `direct[...]`, jak wszedzie
     !!! indziej) i dodaje go do `self.files`. Zwraca `true` przy
     !!! sukcesie.
-    fun parse_and_add(self, path: Str, flat_name: Str, source_tag: Str) -> Bool [
+    !!!
+    !!! ROZBUDOWA (ta runda, patrz docs/MULTI_VERSION.md) - PRZED
+    !!! pelnym `parse()` odczytuje (przez `peek_source_using_version`,
+    !!! WYLACZNIE `tokenize()` - patrz uzasadnienie tam) deklarowana
+    !!! wersje pliku. Gdy jest inna niz `self.own_version` I
+    !!! `self.version_binaries` ma dla niej wpis - deleguje CALY plik
+    !!! do `<inna-binarka> emit-module` (patrz `cmd_emit_module` w
+    !!! main.hcs) zamiast parsowac go samemu (mogloby sie nie udac -
+    !!! to CALY sens tej funkcji: pozwolic plikom `using <0.5>` uzywac
+    !!! skladni, ktorej TEN (`using <0.4>`) `hackerc` nie zna). Gdy
+    !!! wersja inna, ale BRAK wpisu w mapie - normalny `parse()`
+    !!! (najlepszy wysilek), plus ostrzezenie - lepsze niz cichy blad
+    !!! przy braku spojnosci `virus`/`hackerc`.
+    fun parse_and_add(self, path: Str, flat_name: Str, source_tag: Str, work_member: Option<Str>) -> Bool [
         match read_file(path.clone()) [
             Ok(source) -> [
+                let declared_version = peek_source_using_version(source.clone())
+                let declared_version_text = "?"
+                match declared_version.clone() [
+                    Some(dvt) -> [
+                        declared_version_text = dvt
+                    ]
+                    None -> [
+                    ]
+                ]
+                let delegate_to = ""
+                let should_delegate = false
+                match declared_version.clone() [
+                    Some(dv) -> [
+                        if dv != self.own_version.clone() [
+                            match self.version_binaries.fetch(dv.clone()) [
+                                Some(bin_path) -> [
+                                    delegate_to = bin_path
+                                    should_delegate = true
+                                ]
+                                None -> [
+                                    self.warnings.push(path + ": deklaruje \"using <" + dv + ">\", ale hackerc " + self.own_version.clone() + " nie dostal binarki dla wersji " + dv + " (--version-map) - parsuje WLASNYM (byc moze niekompatybilnym) parserem, jak najlepszy wysilek. Uruchom przez `virus build`, ktory dostarcza wszystkie wymagane wersje automatycznie.")
+                                ]
+                            ]
+                        ]
+                    ]
+                    None -> [
+                    ]
+                ]
+
+                if should_delegate [
+                    let tmp_out = path + ".hks_emit_" + flat_name + ".rs"
+                    let em_args: List<Str> = ["emit-module", path, "-o", tmp_out, "--module-name", flat_name]
+                    match run_command(delegate_to, em_args) [
+                        Ok(_out) -> [
+                        ]
+                        Err(e) -> [
+                            self.warnings.push(path + ": delegacja do hackerc " + declared_version_text + " (`emit-module`) nie powiodla sie: " + e)
+                            end false
+                        ]
+                    ]
+                    match read_file(tmp_out.clone()) [
+                        Ok(rust_text) -> [
+                            match remove_file(tmp_out.clone()) [
+                                Ok(_v2) -> [
+                                ]
+                                Err(_e3) -> [
+                                ]
+                            ]
+                            let empty_prog = Program([])
+                            self.files.push(DiscoveredFile(path, flat_name, source_tag, empty_prog, [], [], [], [], [], [], [], [], some(rust_text), work_member))
+                            end true
+                        ]
+                        Err(e2) -> [
+                            self.warnings.push(path + ": hackerc " + declared_version_text + " emit-module nie zapisal wyjscia (" + tmp_out + "): " + e2)
+                            end false
+                        ]
+                    ]
+                ]
+
                 let fast_direct_extraction = extract_fast_direct_blocks(source.clone())
                 let extraction = extract_direct_blocks(fast_direct_extraction.stripped_source)
                 let native_extraction = extract_native_blocks(extraction.stripped_source, native_dirname(path))
@@ -577,7 +814,7 @@ impl Discovery [
                 let hot_extraction = extract_hot_reload_markers(sandbox_extraction.stripped_source)
                 let wasm_extraction = extract_wasm_export_markers(hot_extraction.stripped_source)
                 let prog = parse(wasm_extraction.stripped_source)
-                self.files.push(DiscoveredFile(path, flat_name, source_tag, prog, extraction.blocks, native_extraction.blocks, native_extraction.engines, sandbox_extraction.blocks, hot_extraction.names, wasm_extraction.names, fast_direct_extraction.blocks, fast_direct_extraction.backends))
+                self.files.push(DiscoveredFile(path, flat_name, source_tag, prog, extraction.blocks, native_extraction.blocks, native_extraction.engines, sandbox_extraction.blocks, hot_extraction.names, wasm_extraction.names, fast_direct_extraction.blocks, fast_direct_extraction.backends, none(), work_member))
                 end true
             ]
             Err(e) -> [
@@ -598,14 +835,14 @@ impl Discovery [
     !!! dla kazdego `get <work:...>`), wiec jest liczony na biezaco w
     !!! petli nizej.
     fun resolve(self, entry: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, vira_root: Option<Str>) [
-        let added = self.parse_and_add(entry.clone(), "main", "main")
+        let added = self.parse_and_add(entry.clone(), "main", "main", none())
         if not added [
             end
         ]
 
         let queue: List<QueueItem> = []
         let entry_prog = self.files[0].program.clone()
-        collect_module_imports(entry_prog, path_parent(entry.clone()), queue)
+        collect_module_imports(entry_prog, path_parent(entry.clone()), queue, none())
 
         while queue.len() > 0 [
             let item = queue.remove(0)
@@ -655,7 +892,7 @@ impl Discovery [
                                     have_root = true
                                 ]
                                 None -> [
-                                    self.warnings.push("get <work:" + iname.clone() + "> - nie znaleziono czlonka workspace \"" + iname.clone() + "\" z wlasnym lib/mod.hcs (szukano <przodek>/" + iname.clone() + "/lib w gore od " + base_dir.clone() + ") - modul " + flat.clone() + " nie zostanie zbudowany")
+                                    self.warnings.push("get <work:" + iname.clone() + "> - nie znaleziono czlonka workspace \"" + iname.clone() + "\" z wlasnym lib/mod.hcs ani cmd/main.hcs (szukano <przodek>/" + iname.clone() + "/lib i <przodek>/" + iname.clone() + "/cmd w gore od " + base_dir.clone() + ") - modul " + flat.clone() + " nie zostanie zbudowany")
                                 ]
                             ]
                         ] elif isource == "hlib" [
@@ -689,10 +926,21 @@ impl Discovery [
 
                         if have_root [
                             if file_readable(mod_file.clone()) [
-                                let ok = self.parse_and_add(mod_file.clone(), flat, isource)
+                                !! NAPRAWA (ta runda) - patrz `QueueItem::work_member` -
+                                !! `get <work:iname::...>` czyni WSZYSTKIE dalsze GOLE
+                                !! `include <cos>` WEWNATRZ tego pliku czescia TEJ SAMEJ
+                                !! przestrzeni nazw "work:iname" (inne zrodla - std/core/
+                                !! selfhost/vira/hlib - nie maja tego problemu, ich flat-nazwy
+                                !! sa juz globalnie kanoniczne niezaleznie od tego kto je
+                                !! zaimportowal, wiec `none()`).
+                                let next_wm = none()
+                                if isource == "work" [
+                                    next_wm = some(iname.clone())
+                                ]
+                                let ok = self.parse_and_add(mod_file.clone(), flat, isource, next_wm.clone())
                                 if ok [
                                     let last_prog = self.files[self.files.len() - 1].program.clone()
-                                    collect_module_imports(last_prog, path_parent(mod_file), queue)
+                                    collect_module_imports(last_prog, path_parent(mod_file), queue, next_wm)
                                 ]
                             ] else [
                                 self.warnings.push("get <" + isource + ":" + iname + "> -> nie znaleziono " + mod_file)
@@ -701,19 +949,51 @@ impl Discovery [
                     ]
                 ]
                 IncludeStmt(path) -> [
-                    let flat = flat_include_module_name(path.clone())
+                    !!! NAPRAWA (ta runda, patrz docs/MULTI_VERSION.md -
+                    !!! nie, to osobna sprawa - patrz SESSION_LOG.md,
+                    !!! "problem z work:/nazewnictwem modulow") -
+                    !!! `effective_path`: gdy TEN `IncludeStmt` pochodzi
+                    !!! z pliku zaladowanego jako `work:member` (patrz
+                    !!! `item.work_member` wyzej w petli), a `path` NIE
+                    !!! jest juz jawnym `work:...`, przepisujemy go NA
+                    !!! `work:member::path` PRZED policzeniem
+                    !!! `flat_include_module_name`/`resolve_include_path` -
+                    !!! zapewnia, ze TEN SAM plik fizyczny zaladowany
+                    !!! bezposrednio (`include <work:hackerc::ast_nodes>`)
+                    !!! i tranzytywnie (przez `parser.hcs`, ktory sam ma
+                    !!! `include <ast_nodes>`) dostaje IDENTYCZNA nazwe
+                    !!! modulu Rust - naprawia `error[E0308]: mismatched
+                    !!! types` (dwie niezalezne kopie `struct Program`
+                    !!! itp.) odkryty w tej sesji przez `cargo build` na
+                    !!! `playground/cmd/main.hcs --wasm`.
+                    let effective_path = path.clone()
+                    match extract_work_member(path.clone()) [
+                        Some(_already_wm) -> [
+                        ]
+                        None -> [
+                            match item.work_member.clone() [
+                                Some(wm) -> [
+                                    effective_path = "work:" + wm + "::" + path.clone()
+                                ]
+                                None -> [
+                                ]
+                            ]
+                        ]
+                    ]
+                    let flat = flat_include_module_name(effective_path.clone())
                     if not self.seen_flat_names.contains(flat.clone()) [
                         self.seen_flat_names.insert(flat.clone(), true)
-                        match resolve_include_path(path.clone(), base_dir.clone()) [
+                        match resolve_include_path(effective_path.clone(), base_dir.clone()) [
                             Some(mod_file) -> [
-                                let ok = self.parse_and_add(mod_file.clone(), flat, "include")
+                                let next_wm_inc = extract_work_member(effective_path.clone())
+                                let ok = self.parse_and_add(mod_file.clone(), flat, "include", next_wm_inc.clone())
                                 if ok [
                                     let last_prog = self.files[self.files.len() - 1].program.clone()
-                                    collect_module_imports(last_prog, path_parent(mod_file), queue)
+                                    collect_module_imports(last_prog, path_parent(mod_file), queue, next_wm_inc)
                                 ]
                             ]
                             None -> [
-                                self.warnings.push("include <" + path.clone() + "> -> nie znaleziono " + path_join_safe(base_dir.clone(), path.clone() + ".hcs") + " ani " + path_join_safe(base_dir, path + "/mod.hcs"))
+                                self.warnings.push("include <" + effective_path.clone() + "> -> nie znaleziono " + path_join_safe(base_dir.clone(), path.clone() + ".hcs") + " ani " + path_join_safe(base_dir, path + "/mod.hcs"))
                             ]
                         ]
                     ]
@@ -749,7 +1029,27 @@ impl Discovery [
 !!! `hlib_extract_for_import` stubem `get <extern:...>`+`region`) -
 !!! wiec `get <hlib:x>` nigdy nie wymaga od uzytkownika pisania
 !!! `extern`/`native` samemu, tylko samego `get <hlib:x>`.
-fun collect_module_imports(prog: Program, base_dir: Str, queue: List<QueueItem>) [
+!!! NAPRAWA (ta runda, patrz docs/MULTI_VERSION.md dla kontekstu
+!!! `using <wersja>`, ale TO jest osobna sprawa) - `work_member`: gdy
+!!! `prog` zostal zaladowany jako `include <work:member::plik>` (albo
+!!! transytywnie STAD), kazdy JEGO WLASNY `include <cos>` (BEZ
+!!! prefiksu "work:") musi byc traktowany JAKBY byl `include
+!!! <work:member::cos>` - inaczej DOKLADNIE TEN SAM plik fizyczny
+!!! (np. hackerc/cmd/ast_nodes.hcs) zaladowany i BEZPOSREDNIO przez
+!!! importujacego (jako `work:hackerc::ast_nodes`, flat nazwa
+!!! `_hks_inc_work_hackerc__ast_nodes`) i TRANZYTYWNIE przez plik ktory
+!!! SAM go includuje (jako zwykle `ast_nodes`, flat nazwa
+!!! `_hks_inc_ast_nodes`, BEZ prefiksu member) dostaje DWIE ROZNE nazwy
+!!! modulu Rust - dwie NIEZALEZNE kopie tych samych `struct`/`enum`,
+!!! `error[E0308]: mismatched types` w Rust (odkryte w tej sesji przez
+!!! `cargo build` na `playground/cmd/main.hcs --wasm`, patrz
+!!! SESSION_LOG.md). Naprawa: `work_member` propagowany przez `queue`,
+!!! uzywany w `resolve()` przy `IncludeStmt` (patrz tam) do przepisania
+!!! "goly `include <cos>`" na "`include <work:member::cos>`" PRZED
+!!! policzeniem `flat_include_module_name`/`resolve_include_path` -
+!!! ujednolica nazwe modulu niezaleznie od tego, KTORY plik jako
+!!! pierwszy go zaladowal.
+fun collect_module_imports(prog: Program, base_dir: Str, queue: List<QueueItem>, work_member: Option<Str>) [
     let i = 0
     let n = prog.body.len()
     while i < n [
@@ -757,11 +1057,11 @@ fun collect_module_imports(prog: Program, base_dir: Str, queue: List<QueueItem>)
         match s.clone() [
             GetImportStmt(source, name, version, details) -> [
                 if source == "std" or source == "core" or source == "selfhost" or source == "virus" or source == "vira" or source == "hlib" or source == "work" [
-                    queue.push(QueueItem(s, base_dir.clone()))
+                    queue.push(QueueItem(s, base_dir.clone(), work_member.clone()))
                 ]
             ]
             IncludeStmt(path) -> [
-                queue.push(QueueItem(s, base_dir.clone()))
+                queue.push(QueueItem(s, base_dir.clone(), work_member.clone()))
             ]
             _ -> [
             ]
@@ -785,7 +1085,12 @@ struct ProjectSignatures [
 !!! `vira_root` `none()` -> auto-wykrywanie przez
 !!! `find_libs_root`/`find_bootstrap_root`/`find_vira_cache_root`
 !!! zaczynajac od `entry`.
-fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, vira_root: Option<Str>) -> ProjectSignatures [
+!!!
+!!! ROZBUDOWA (ta runda, patrz docs/MULTI_VERSION.md) - `own_version`/
+!!! `version_binaries` (domyslnie `"0.4"`/`dict()` u obu wywolujacych w
+!!! main.hcs - PEŁNA zgodnosc wsteczna gdy nikt nie uzywa `using
+!!! <inna-wersja>`) przekazywane DALEJ do `Discovery`, patrz tam.
+fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, vira_root: Option<Str>, own_version: Str, version_binaries: Dict<Str, Str>) -> ProjectSignatures [
     let lr = libs_root
     match lr.clone() [
         Some(_v) -> [
@@ -811,7 +1116,7 @@ fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_roo
         ]
     ]
 
-    let disc = Discovery([], dict(), [])
+    let disc = Discovery([], dict(), [], own_version, version_binaries)
     disc.resolve(entry, lr, br, vr)
 
     let functions: Dict<Str, Stmt> = dict()
@@ -1137,7 +1442,13 @@ fun trim_str(s: Str) -> Str [
 !!! najpierw zbudowac glowny entry (`cmd/main.hcs`, `bin_name =
 !!! none()`), ktory tworzy `Cargo.toml` od zera, zanim zbuduje
 !!! ktorykolwiek dodatkowy `cmd/bin/*.hcs` z `bin_name = some(...)`.
-fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, vira_root: Option<Str>, crate_name: Str, force_library: Bool, bin_name: Option<Str>) -> ProjectResult [
+!!! ROZBUDOWA (ta runda, patrz docs/MULTI_VERSION.md) - dwa nowe,
+!!! OPCJONALNE-w-praktyce parametry na koncu: `own_version` (domyslnie
+!!! `"0.4"`, patrz `VERSION` w main.hcs) i `version_binaries` (domyslnie
+!!! `dict()` - brak delegacji, stare zachowanie bez zmian). Wypelniane
+!!! przez `virus build` (patrz `virus/cmd/multiversion.hcs`) przez
+!!! `hackerc build --version-map wersja1=sciezka1;wersja2=sciezka2`.
+fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, vira_root: Option<Str>, crate_name: Str, force_library: Bool, bin_name: Option<Str>, own_version: Str, version_binaries: Dict<Str, Str>) -> ProjectResult [
     let src_dir = out_dir + "/src"
     let main_rs_path = src_dir + "/main.rs"
     let warnings: List<Str> = []
@@ -1175,7 +1486,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
         ]
     ]
 
-    let disc = Discovery([], dict(), [])
+    let disc = Discovery([], dict(), [], own_version, version_binaries)
     disc.resolve(entry.clone(), lr.clone(), br.clone(), vr.clone())
     let i = 0
     let wn = disc.warnings.len()
@@ -1184,7 +1495,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
         i = i + 1
     ]
 
-    let ps = collect_project_signatures(entry, lr, br, vr)
+    let ps = collect_project_signatures(entry, lr, br, vr, own_version, version_binaries)
     let extra = ps.sigs
 
     let needs_pyo3 = false
@@ -1206,6 +1517,18 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     let needs_native_java = false
     let native_java_sources: Dict<Str, Str> = dict()
     let native_java_names: List<Str> = []
+    !! DODANE (ta runda, patrz docs/KOTLIN.md) - parytet z
+    !! `needs_native_java`/`native_java_*` wyzej, dla `native
+    !! {kotlin}(...)`.
+    let needs_native_kotlin = false
+    let native_kotlin_sources: Dict<Str, Str> = dict()
+    let native_kotlin_names: List<Str> = []
+    !! DODANE (Tura 10, patrz docs/GO.md) - `native {go}`/`get <go:...>`.
+    let needs_native_go = false
+    let native_go_sources: Dict<Str, Str> = dict()
+    let native_go_names: List<Str> = []
+    let go_import_paths: List<Str> = []
+    let go_import_versions: List<Str> = []
     !! ROZBUDOWA (ta runda) - `sha256_hex(...)`, parytet z `needs_pyo3`.
     let needs_sha256 = false
     let hot_reload_bodies: Dict<Str, Str> = dict()
@@ -1221,7 +1544,32 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     let fn_ = disc.files.len()
     while fi < fn_ [
         let df = disc.files[fi].clone()
-        let r = transpile_program_with_extra(df.program.clone(), df.blocks.clone(), df.native_blocks.clone(), df.native_engines.clone(), df.sandbox_blocks.clone(), df.hot_reload_names.clone(), df.wasm_export_names.clone(), df.path.clone(), extra, df.fast_direct_blocks.clone(), df.fast_direct_backends.clone())
+        !! DODANE (ta runda, patrz docs/MULTI_VERSION.md) - plik
+        !! delegowany do innej wersji `hackerc` (patrz `parse_and_add`)
+        !! juz MA gotowy tekst Rust - pomija CALA reszte tej petli
+        !! (transpilacja/agregacja metadanych: `needs_pyo3`,
+        !! `hot_reload_*`, `crates_names` z `get <crates:...>`, itd. -
+        !! plik obcej wersji NIE bierze w nich udzialu, udokumentowane
+        !! ograniczenie) i tylko zapisuje modul / ustawia `entry_rust`.
+        match df.pre_transpiled_rust.clone() [
+            Some(pre_rust) -> [
+                if df.flat_name == "main" [
+                    entry_rust = pre_rust
+                ] else [
+                    let mod_out_pv = src_dir + "/" + df.flat_name + ".rs"
+                    match write_file(mod_out_pv.clone(), pre_rust) [
+                        Ok(_v3) -> [
+                            module_files.push(mod_out_pv)
+                            mod_names.push(df.flat_name)
+                        ]
+                        Err(e3) -> [
+                            warnings.push(mod_out_pv + ": " + e3)
+                        ]
+                    ]
+                ]
+            ]
+            None -> [
+        let r = transpile_program_with_extra(df.program.clone(), df.blocks.clone(), df.native_blocks.clone(), df.native_engines.clone(), df.sandbox_blocks.clone(), df.hot_reload_names.clone(), df.wasm_export_names.clone(), df.path.clone(), extra, df.fast_direct_blocks.clone(), df.fast_direct_backends.clone(), df.work_member.clone())
 
         if r.needs_pyo3 [
             needs_pyo3 = true
@@ -1291,6 +1639,71 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
             ]
             njsi = njsi + 1
         ]
+        !! DODANE (ta runda, patrz docs/KOTLIN.md) - parytet z blokiem
+        !! `native_java_*` powyzej, kind "kotlin_class" zamiast
+        !! "java_class" (virus/cmd/build.hcs je rozroznia - `kotlinc`
+        !! zamiast `javac`, patrz tam).
+        if r.needs_native_kotlin [
+            needs_native_kotlin = true
+        ]
+        let nksi = 0
+        let nksn = r.native_kotlin_order.len()
+        while nksi < nksn [
+            let ktname = r.native_kotlin_order[nksi].clone()
+            match r.native_kotlin_sources.fetch(ktname.clone()) [
+                Some(ktsrc) -> [
+                    native_kotlin_sources.insert(ktname.clone(), ktsrc)
+                    native_kotlin_names.push(ktname.clone())
+                    extern_link_specs.push("kotlin_class\t" + ktname + "\t")
+                ]
+                None -> [
+                ]
+            ]
+            nksi = nksi + 1
+        ]
+        !! DODANE (Tura 10, patrz docs/GO.md) - agregacja `native {go}`
+        !! i `get <go:...>` z kazdego pliku projektu.
+        if r.needs_native_go [
+            needs_native_go = true
+        ]
+        let ngi = 0
+        let ngn = r.native_go_order.len()
+        while ngi < ngn [
+            let goname = r.native_go_order[ngi].clone()
+            match r.native_go_sources.fetch(goname.clone()) [
+                Some(gosrc) -> [
+                    native_go_sources.insert(goname.clone(), gosrc)
+                    native_go_names.push(goname.clone())
+                ]
+                None -> [
+                ]
+            ]
+            ngi = ngi + 1
+        ]
+        let gii = 0
+        let gin = r.go_imports.len()
+        while gii < gin [
+            let gentry = r.go_imports[gii].clone()
+            let gparts = str_split(gentry, "\t")
+            let gpath = gparts[0].clone()
+            let gver = ""
+            if gparts.len() > 1 [
+                gver = gparts[1].clone()
+            ]
+            let gseen = false
+            let gsi = 0
+            while gsi < go_import_paths.len() [
+                if go_import_paths[gsi].clone() == gpath [
+                    gseen = true
+                ]
+                gsi = gsi + 1
+            ]
+            if not gseen [
+                go_import_paths.push(gpath)
+                go_import_versions.push(gver)
+            ]
+            gii = gii + 1
+        ]
         let jcpi = 0
         let jcpn = r.java_classpath_entries.len()
         while jcpi < jcpn [
@@ -1345,7 +1758,20 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
             entry_rust = r.rust_code
         ] else [
             let mod_out = src_dir + "/" + df.flat_name + ".rs"
-            match write_file(mod_out.clone(), r.rust_code) [
+            !! NAPRAWA (ta runda, patrz SESSION_LOG.md Tura 8/9) - modul
+            !! NIEBEDACY wejsciem crate'a (kazdy plik inny niz `main`)
+            !! moze miec wlasne demo `fun main()` (np. ast_nodes.hcs,
+            !! transpiler.hcs - "ten plik jest samodzielny, testowany
+            !! osobno"). Jako `pub fn main` trafia ono do glob-importu
+            !! (`use crate::modul::*;`) - w crate'cie BIBLIOTEKI (bez
+            !! wlasnego `main` w korzeniu, np. `playground --library`)
+            !! dwa takie glob-importy daja `error[E0659]: main is
+            !! ambiguous`. Prywatne `fn main` nie jest importowane globem,
+            !! a wciaz dziala lokalnie w module - zero wplywu na build
+            !! bin (tam korzen ma wlasny `fn main`, ktory i tak przeslania
+            !! glob).
+            let mod_rust = str_replace(r.rust_code, "\npub fn main() {", "\nfn main() {")
+            match write_file(mod_out.clone(), mod_rust) [
                 Ok(_v) -> [
                     module_files.push(mod_out)
                     mod_names.push(df.flat_name)
@@ -1353,6 +1779,8 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
                 Err(e) -> [
                     warnings.push(mod_out + ": " + e)
                 ]
+            ]
+        ]
             ]
         ]
         fi = fi + 1
@@ -1429,7 +1857,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
             ]
         ]
         None -> [
-            let cargo_text = cargo_toml_text(crate_name, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, needs_native_cpp, needs_wasm_bindgen, force_library, crates_names.clone(), crates_versions.clone(), needs_native_java, needs_sha256)
+            let cargo_text = cargo_toml_text(crate_name, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, needs_native_cpp, needs_wasm_bindgen, force_library, crates_names.clone(), crates_versions.clone(), needs_native_java or needs_native_kotlin, needs_sha256)
             match write_file(cargo_toml_path.clone(), cargo_text) [
                 Ok(_v) -> [
                 ]
@@ -1538,6 +1966,102 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
             ]
         ]
         nji = nji + 1
+    ]
+
+    !! DODANE (ta runda, patrz docs/KOTLIN.md) - parytet z blokiem
+    !! `native_java_*` powyzej: materializuje kazdy `native
+    !! {kotlin}(...)` jako `out_dir/kotlin/<Nazwa>.kt` - `virus build`
+    !! kompiluje go `kotlinc`iem na podstawie linii "kotlin_class" w
+    !! `.hks-extern-links.txt`.
+    let nki = 0
+    let nkn = native_kotlin_names.len()
+    if nkn > 0 [
+        let kotlin_dir = out_dir + "/kotlin"
+        match create_dir(kotlin_dir.clone()) [
+            Ok(_v) -> [
+            ]
+            Err(e) -> [
+                warnings.push(kotlin_dir + ": " + e)
+            ]
+        ]
+    ]
+    while nki < nkn [
+        let ktname = native_kotlin_names[nki].clone()
+        match native_kotlin_sources.fetch(ktname.clone()) [
+            Some(ktsrc) -> [
+                let kt_path = out_dir + "/kotlin/" + ktname + ".kt"
+                match write_file(kt_path.clone(), ktsrc) [
+                    Ok(_v) -> [
+                    ]
+                    Err(e) -> [
+                        warnings.push(kt_path + ": " + e)
+                    ]
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        nki = nki + 1
+    ]
+
+    !! DODANE (Tura 10, patrz docs/GO.md) - `native {go}`: JEDEN plik
+    !! `out_dir/go/hks_go.go` (+ `go.mod`) ze WSZYSTKIMI blokami
+    !! projektu jako funkcjami `//export hks_native_go_N`. `virus
+    !! build` kompiluje go `go build -buildmode=c-archive` (patrz linie
+    !! "go_archive"/"go_dep" w `.hks-extern-links.txt`).
+    if needs_native_go [
+        let go_dir = out_dir + "/go"
+        match create_dir(go_dir.clone()) [
+            Ok(_v) -> [
+            ]
+            Err(e) -> [
+                warnings.push(go_dir + ": " + e)
+            ]
+        ]
+        let go_src = "package main\n\nimport \"C\"\n"
+        let gimi = 0
+        while gimi < go_import_paths.len() [
+            go_src = go_src + "import \"" + go_import_paths[gimi].clone() + "\"\n"
+            gimi = gimi + 1
+        ]
+        go_src = go_src + "\n"
+        let gbi = 0
+        while gbi < native_go_names.len() [
+            let gfn = native_go_names[gbi].clone()
+            match native_go_sources.fetch(gfn.clone()) [
+                Some(gbody) -> [
+                    go_src = go_src + "//export " + gfn + "\nfunc " + gfn + "() {\n" + gbody + "\n}\n\n"
+                ]
+                None -> [
+                ]
+            ]
+            gbi = gbi + 1
+        ]
+        go_src = go_src + "func main() {}\n"
+        match write_file(go_dir + "/hks_go.go", go_src) [
+            Ok(_v) -> [
+            ]
+            Err(e) -> [
+                warnings.push(go_dir + "/hks_go.go: " + e)
+            ]
+        ]
+        match write_file(go_dir + "/go.mod", "module hksgo\n\ngo 1.21\n") [
+            Ok(_v) -> [
+            ]
+            Err(e) -> [
+                warnings.push(go_dir + "/go.mod: " + e)
+            ]
+        ]
+        extern_link_specs.push("go_archive\thksgo\t")
+        let gdi = 0
+        while gdi < go_import_paths.len() [
+            let gp = go_import_paths[gdi].clone()
+            let gfirst = str_split(gp, "/")[0].clone()
+            if str_contains(gfirst, ".") [
+                extern_link_specs.push("go_dep\t" + gp + "\t" + go_import_versions[gdi].clone())
+            ]
+            gdi = gdi + 1
+        ]
     ]
 
     !!! ZMIANA 0.3 - sidecar `.hks-extern-links.txt` (jedna linia
