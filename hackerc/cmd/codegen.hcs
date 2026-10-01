@@ -287,6 +287,19 @@ fun rust_type_name(t: TypeRef, sigs: Signatures, type_params: List<Str>) -> Str 
         ]
         end "std::collections::HashMap<" + rust_type_name_of_generic(t, sigs, type_params) + ", " + rust_type_name_of_generic2(t, sigs, type_params) + ">"
     ]
+    !!! DODANE (ta runda, patrz docs/ROADMAP.md sekcja 1 - "brak typu
+    !!! Set"). Mapowane na `std::collections::HashSet<T>` - parytet z
+    !!! `Dict` -> `HashMap` powyzej, ale z JEDNYM typem generycznym (jak
+    !!! `List`). Konstruktor pusty to builtin `set()` (patrz `gen_call`
+    !!! w `codegen.hcs`, parytet z `dict()`/`[]`), metody `.insert()`/
+    !!! `.contains()`/`.remove()`/`.len()` - patrz nizej w tym pliku.
+    if t.name == "Set" [
+        if not type_ref_has_generic(t) [
+            log("[hackerc-self] codegen: 'Set' wymaga typu elementu, np. Set<Str>")
+            end "std::collections::HashSet<()>"
+        ]
+        end "std::collections::HashSet<" + rust_type_name_of_generic(t, sigs, type_params) + ">"
+    ]
     if t.name == "Option" [
         if not type_ref_has_generic(t) [
             log("[hackerc-self] codegen: 'Option' wymaga typu wartosci, np. Option<Int>")
@@ -1737,7 +1750,46 @@ struct CodeGen [
     !! duplikaty dozwolone - `virus build` sam je odduplikuje przy
     !! skladaniu `-cp`) potrzebne PRZY KOMPILACJI `native {java}
     !! [ ... ]` (javac -cp) I w runtime (`-Djava.class.path`).
-    java_classpath_entries: List<Str>
+    java_classpath_entries: List<Str>,
+    !! DODANE (ta runda, patrz docs/KOTLIN.md) - `native {kotlin}
+    !! [ ... ]`, PELNY parytet z `needs_native_java`/`native_java_*`
+    !! wyzej (ten sam mechanizm - embedded JVM przez `hks_get_jvm()`,
+    !! patrz transpiler.hcs - Kotlin kompiluje sie do TEGO SAMEGO
+    !! bajtkodu JVM co Java, wiec RUNTIME jest identyczny; rozni sie
+    !! TYLKO kompilator (`kotlinc` zamiast `javac`, patrz
+    !! virus/cmd/build.hcs) i to, ze bajtkod Kotlina wymaga
+    !! `kotlin-stdlib.jar` na classpath w RUNTIME - stad osobna flaga
+    !! `needs_native_kotlin`, mimo wspoldzielonego `java_classpath_entries`
+    !! dla wpisow `get <java:...>`/`get <kotlin:...>` (oba silniki
+    !! kompiluja sie do jednego wspolnego `java_classes/`, wiec moga
+    !! wolac nawzajem swoje klasy). Klucz `native_kotlin_sources` to
+    !! nazwa SYNTETYCZNEGO pliku `.kt` (`HksNativeKotlinN`, bez `.kt`) -
+    !! Kotlin kompiluje funkcje najwyzszego poziomu w pliku `Foo.kt` do
+    !! statycznych metod klasy `FooKt` (konwencja "file class" Kotlina),
+    !! wiec wywolanie JNI szuka klasy `<klucz>Kt`, nie `<klucz>` (patrz
+    !! `gen_native`).
+    needs_native_kotlin: Bool,
+    native_kotlin_sources: Dict<Str, Str>,
+    native_kotlin_order: List<Str>,
+    !! DODANE (ta runda, patrz SESSION_LOG.md "problem z
+    !! work:/nazewnictwem modulow") - gdy PLIK TRANSPILOWANY PRZEZ TEN
+    !! `CodeGen` zostal sam zaladowany jako `include <work:member::...>`
+    !! (albo transytywnie stad), `gen_include` (dla WLASNYCH,
+    !! WEWNETRZNYCH `include <cos>` TEGO pliku) rozstrzyga `cos` w TEJ
+    !! SAMEJ przestrzeni nazw "work:member" - patrz tam. Musi byc
+    !! DOKLADNIE ten sam `work_member`, jaki Discovery ustawilo na
+    !! odpowiadajacym `DiscoveredFile` (patrz `project.hcs::
+    !! DiscoveredFile.work_member`/`parse_and_add`), inaczej
+    !! `Discovery` (ktora DECYDUJE jakie pliki istnieja i pod jaka
+    !! nazwa) i `gen_include` (ktore generuje `use crate::X::*` w
+    !! WYGENEROWANYM Ruscie) rozjada sie z powrotem - to byl DOKLADNIE
+    !! blad odkryty w tej sesji (`error[E0432]`/duplikaty modulow).
+    work_member: Option<Str>,
+    !! DODANE (Tura 10, patrz docs/GO.md) - `native {go} [ ... ]`/`get <go:...>`.
+    needs_native_go: Bool,
+    native_go_sources: Dict<Str, Str>,
+    native_go_order: List<Str>,
+    go_imports: List<Str>
 ]
 
 impl CodeGen [
@@ -2381,6 +2433,15 @@ impl CodeGen [
         !! {Rust}(...)` - to jest PIERWSZE miejsce, gdzie ten sam crate
         !! trafia do zwyklego builtina zamiast recznie doklejanego
         !! bloku).
+        !! DODANE (ta runda, patrz "lepsze progress bary" - docs/ROADMAP.md)
+        !! - `now_ms()` - biezacy czas w milisekundach od epoki Unix, jako
+        !! `Int`. Tylko `std::time` (bez dodatkowego crate, w
+        !! odroznieniu od `sha256_hex` powyzej) - uzywane do mierzenia
+        !! czasu trwania krokow builda w `virus` (patrz
+        !! `virus/cmd/progress.hcs`).
+        if ident_name == "now_ms" and args.len() == 0 [
+            end "(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|__d| __d.as_millis() as i64).unwrap_or(0))"
+        ]
         if ident_name == "sha256_hex" and args.len() == 1 [
             end "{\n        let mut __hks_hasher = Sha256::new();\n        __hks_hasher.update((" + self.gen_expr(args[0]) + ").as_bytes());\n        hex::encode(__hks_hasher.finalize())\n    }"
         ]
@@ -2405,6 +2466,10 @@ impl CodeGen [
         ]
         if ident_name == "dict" and args.len() == 0 [
             end "std::collections::HashMap::new()"
+        ]
+        !!! DODANE (ta runda) - `set()`, parytet z `dict()` powyzej.
+        if ident_name == "set" and args.len() == 0 [
+            end "std::collections::HashSet::new()"
         ]
         if ident_name != "" [
             match self.sigs.variant_owner.fetch(ident_name.clone()) [
@@ -2463,6 +2528,49 @@ impl CodeGen [
                             end shape.target_rendered + ".contains_key(" + key_e + ".as_str())"
                         ]
                         end shape.target_rendered + ".remove(" + key_e + ".as_str())"
+                    ]
+                    !!! DODANE (ta runda, patrz docs/ROADMAP.md sekcja 1
+                    !!! - "brak typu Set"). `HashSet::contains`/`remove`
+                    !!! biora `&Q` (referencje) - w odroznieniu od
+                    !!! `Dict` (klucze zawsze `Str`, `.as_str()`), `Set<T>`
+                    !!! moze trzymac DOWOLNY typ `T`, wiec bierzemy zwykla
+                    !!! referencje `&(...)` do wyniku `gen_expr`, nie
+                    !!! `.as_str()`. `.insert()` NIE jest tu obslugiwane -
+                    !!! `HashSet::insert(elem: T)` bierze wartosc PRZEZ
+                    !!! WARTOSC (bez `&`), wiec dziala przez zwykla,
+                    !!! domyslna sciezke kodegen metod (jak `.push()` na
+                    !!! `List` - `target.method(args)` bez modyfikacji),
+                    !!! nie potrzebuje tego specjalnego bloku. `.fetch()`
+                    !!! nie ma sensu dla `Set` (brak wartosci pod kluczem)
+                    !!! - celowo pominiete, `Set` ma tylko `contains`/
+                    !!! `remove`/`insert`/`len`.
+                    if tt2.name == "Set" [
+                        let elem_e = self.gen_expr(args[0])
+                        if shape.method_name == "contains" [
+                            end shape.target_rendered + ".contains(&(" + elem_e + "))"
+                        ]
+                        if shape.method_name == "remove" [
+                            end shape.target_rendered + ".remove(&(" + elem_e + "))"
+                        ]
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        !!! DODANE (ta runda) - `.keys()`/`.values()` na `Dict<K, V>` bez
+        !!! argumentow, parytet z blokiem `fetch`/`contains`/`remove`
+        !!! powyzej (patrz tez `infer_attr_call_type` w typeinfer.hcs).
+        !!! `HashMap::keys()`/`values()` zwracaja iteratory pozyczajace
+        !!! `self` - `.cloned().collect::<Vec<_>>()` materializuje je do
+        !!! `Vec<K>`/`Vec<V>` (ten sam ksztalt co `List<T>` wszedzie
+        !!! indziej w wygenerowanym Ruscie), zeby wynik mozna bylo
+        !!! zwrocic z funkcji/iterowac `for` bez pozyczania mapy.
+        if shape.is_method_call and (shape.method_name == "keys" or shape.method_name == "values") and args.len() == 0 [
+            match shape.target_type.clone() [
+                Some(tt2b) -> [
+                    if tt2b.name == "Dict" [
+                        end "(" + shape.target_rendered + "." + shape.method_name + "().cloned().collect::<Vec<_>>())"
                     ]
                 ]
                 None -> [
@@ -3044,21 +3152,53 @@ impl CodeGen [
             None -> [
             ]
         ]
-        if backend == "numpy" [
+        !!! ROZBUDOWA (Tura 10, patrz docs/FAST_DIRECT.md "Stan
+        !!! implementacji") - WSZYSTKIE 19 backendow maja teraz realny
+        !!! dispatch (`fast_direct_kind`), ale UCZCIWIE: DYNAMICZNY, nie
+        !!! statyczny (statyczne linkowanie PyPy/CPython/numpy do
+        !!! binarki NIE jest zaimplementowane - patrz dokument).
+        let kind = fast_direct_kind(backend.clone())
+        if kind == "pypy" [
+            self.emit("{")
+            self.indent = self.indent + 1
+            self.emit("let __hks_st = std::process::Command::new(\"pypy3\").arg(\"-c\").arg(" + python_raw_string(raw) + ").status().expect(\"fast direct {pypy}: nie mozna uruchomic 'pypy3' (zainstaluj PyPy, np. 'sudo apt install pypy3')\");")
+            self.emit("if !__hks_st.success() { panic!(\"fast direct {{pypy}} block failed\"); }")
+            self.indent = self.indent - 1
+            self.emit("}")
+            end
+        ]
+        if kind == "compiled" [
             self.needs_pyo3 = true
             self.emit("{")
             self.indent = self.indent + 1
             self.emit("Python::with_gil(|py| -> PyResult<()> {")
             self.indent = self.indent + 1
-            self.emit("py.run_bound(" + python_raw_string(raw) + ", None, None)?;")
+            self.emit("let __hks_g = pyo3::types::PyDict::new_bound(py);")
+            self.emit("__hks_g.set_item(\"__hks_code\", " + python_raw_string(raw) + ")?;")
+            self.emit("py.run_bound(" + python_raw_string(fast_direct_compiled_driver(backend.clone())) + ", Some(&__hks_g), None)?;")
             self.emit("Ok(())")
             self.indent = self.indent - 1
-            self.emit("}).expect(\"fast direct {numpy} block failed\");")
+            self.emit("}).expect(\"fast direct {" + backend + "} block failed\");")
             self.indent = self.indent - 1
             self.emit("}")
             end
         ]
-        self.emit("compile_error!(" + rust_string_literal("fast direct {" + backend + "} nie ma jeszcze prawdziwej implementacji w hackerc (tylko backend numpy dziala dzis naprawde, jako alias zwyklego direct(...) - patrz docs/FAST_DIRECT.md i docs/ROADMAP.md sekcja 8) - uzyj zwyklego direct(...) (CPython przez PyO3) zamiast fast direct {" + backend + "}.") + ");")
+        if kind == "py" [
+            self.needs_pyo3 = true
+            let full_py = fast_direct_preflight(backend.clone()) + fast_direct_prelude(backend.clone()) + "\n" + raw
+            self.emit("{")
+            self.indent = self.indent + 1
+            self.emit("Python::with_gil(|py| -> PyResult<()> {")
+            self.indent = self.indent + 1
+            self.emit("py.run_bound(" + python_raw_string(full_py) + ", None, None)?;")
+            self.emit("Ok(())")
+            self.indent = self.indent - 1
+            self.emit("}).expect(\"fast direct {" + backend + "} block failed\");")
+            self.indent = self.indent - 1
+            self.emit("}")
+            end
+        ]
+        self.emit("compile_error!(" + rust_string_literal("fast direct {" + backend + "}: nieznany backend. Dozwolone: pypy, numba, cython, numpy, polars, scipy, asyncio, uvloop, multiprocessing, jax, pythran, duckdb, cupy, vaex, numexpr, trio, aiohttp, granian, httpx, ray (patrz docs/FAST_DIRECT.md)") + ");")
     ]
 
     !!! `native` `{Silnik}` `[ ... ]` - analog `gen_direct`, ale dla
@@ -3170,6 +3310,55 @@ impl CodeGen [
             self.emit("let __hks_jvm = hks_get_jvm();")
             self.emit("let mut __hks_jenv = __hks_jvm.attach_current_thread().expect(\"nie mozna podlaczyc watku do embedded JVM (native java)\");")
             self.emit("__hks_jenv.call_static_method(\"" + class_name + "\", \"run\", \"()V\", &[]).expect(\"blok native java (" + class_name + ") zakonczyl sie bledem\");")
+            self.indent = self.indent - 1
+            self.emit("}")
+            end
+        ]
+        !!! DODANE (Tura 10, patrz docs/GO.md) - `native {go} [ ... ]`:
+        !!! surowy tekst staje sie cialem funkcji Go `hks_native_go_N()`
+        !!! z `//export` - WSZYSTKIE takie bloki projektu trafiaja do
+        !!! JEDNEGO pliku `go/hks_go.go` (Go nie pozwala zlinkowac dwoch
+        !!! archiwow c-archive z osobnymi runtime'ami), kompilowanego
+        !!! przez `virus build` (`go build -buildmode=c-archive`) do
+        !!! `libhksgo.a` i linkowanego STATYCZNIE (jak `{C++}`).
+        !!! Importy Go deklaruje sie przez `get <go:pakiet>`.
+        if engine == "go" or engine == "Go" or engine == "golang" [
+            self.needs_native_go = true
+            let go_fn = "hks_native_go_" + idx_text
+            self.native_go_sources.insert(go_fn.clone(), raw)
+            self.native_go_order.push(go_fn.clone())
+            self.emit("{")
+            self.indent = self.indent + 1
+            self.emit("extern \"C\" { fn " + go_fn + "(); }")
+            self.emit("unsafe { " + go_fn + "(); }")
+            self.indent = self.indent - 1
+            self.emit("}")
+            end
+        ]
+        !!! DODANE (ta runda, patrz docs/KOTLIN.md) - `native {kotlin}
+        !!! [ ... ]`: PELNY parytet z `{java}` powyzej (ta sama embedded
+        !!! JVM, `hks_get_jvm()`/`call_static_method` - Kotlin i Java
+        !!! kompiluja sie do TEGO SAMEGO bajtkodu JVM, wiec RUNTIME jest
+        !!! identyczny). Jedyna roznica: surowy tekst bloku staje sie
+        !!! CIALEM FUNKCJI NAJWYZSZEGO POZIOMU `fun run()` w pliku
+        !!! `HksNativeKotlinN.kt` (nie cialem metody klasy - w Kotlinie,
+        !!! w odroznieniu od Javy, funkcje NIE MUSZA byc w klasie) -
+        !!! `kotlinc` kompiluje TAKI plik do klasy `HksNativeKotlinNKt`
+        !!! (konwencja "nazwa-pliku + Kt" dla funkcji najwyzszego
+        !!! poziomu) ze statyczna metoda `run()V` - stad `class_name +
+        !!! "Kt"` w wywolaniu JNI ponizej, jedyna roznica wobec bloku
+        !!! `{java}`.
+        if engine == "kotlin" [
+            self.needs_native_kotlin = true
+            let kt_class_name = "HksNativeKotlin" + idx_text
+            let kt_src = "fun run() {\n" + raw + "\n}\n"
+            self.native_kotlin_sources.insert(kt_class_name.clone(), kt_src)
+            self.native_kotlin_order.push(kt_class_name.clone())
+            self.emit("{")
+            self.indent = self.indent + 1
+            self.emit("let __hks_jvm = hks_get_jvm();")
+            self.emit("let mut __hks_jenv = __hks_jvm.attach_current_thread().expect(\"nie mozna podlaczyc watku do embedded JVM (native kotlin)\");")
+            self.emit("__hks_jenv.call_static_method(\"" + kt_class_name + "Kt\", \"run\", \"()V\", &[]).expect(\"blok native kotlin (" + kt_class_name + ") zakonczyl sie bledem\");")
             self.indent = self.indent - 1
             self.emit("}")
             end
@@ -3328,19 +3517,37 @@ impl CodeGen [
     !!! `CLONE_NEWNS` (izolacja mount-namespace), po czym bind-remount
     !!! `/` na read-only (`mount(MS_BIND)` + `mount(MS_REMOUNT|
     !!! MS_BIND|MS_RDONLY)` - klasyczny trik, bez zadnych zewnetrznych
-    !!! narzedzi typu firejail/bwrap). Bezpieczna degradacja: brak
-    !!! uprawnien (np. brak CAP_SYS_ADMIN) -> `libc::write` NA STDERR
-    !!! (nie `eprintln!` - `pre_exec` dziala tuz po `fork()`, gdzie
-    !!! tylko funkcje async-signal-safe sa gwarantowanie bezpieczne;
-    !!! `libc::write` jest, alokujacy `println!` niekoniecznie) +
-    !!! polecenie i tak sie wykonuje, BEZ izolacji - ostrzezenie
-    !!! zamiast cichego fejla, zgodnie ze specyfikacja. Zweryfikowane
-    !!! w tej sesji w izolowanym teście PRZED wpisaniem tutaj (patrz
-    !!! docs/ROADMAP.md): proces w `CLONE_NEWNET` widzi tylko `lo`
-    !!! (bez `eth0`), zapis do `/` po bind-remount-ro konczy sie
-    !!! realnym "Read-only file system". Izoluje TYLKO podproces
-    !!! (`sh -c ...`), NIE kod HackerScript/Rust dzialajacy w tym
-    !!! samym procesie - patrz docs/ROADMAP.md.
+    !!! narzedzi typu firejail/bwrap).
+    !!!
+    !!! NAPRAWA (ta runda) - patrz docs/ROADMAP.md sekcja 5. Poprzednia
+    !!! wersja: brak uprawnien (np. brak CAP_SYS_ADMIN) -> ostrzezenie
+    !!! NA STDERR + polecenie i tak sie wykonuje, BEZ IZOLACJI. To jest
+    !!! DOKLADNIE zly kompromis dla bloku, ktorego CALA racja bytu to
+    !!! izolacja ("Zero-Cost SANDBOX") - cichy (poza jedna linia na
+    !!! stderr, ktora latwo przeoczyc w CI/logach) spadek do "uruchom
+    !!! bez piaskownicy" jest gorszy niz jawny blad, bo kod wywolujacy
+    !!! `$ ... $` mogl polegac na izolacji sieci/fs jako na gwarancji
+    !!! bezpieczenstwa. Nowe zachowanie (fail-closed, jak w opisie
+    !!! roadmapy "twardo odmowic"): gdy `unshare(CLONE_NEWNET)` ALBO
+    !!! `unshare(CLONE_NEWNS)`+bind-remount-ro sie nie powiedzie,
+    !!! dziecko konczy sie NATYCHMIAST kodem 111 (nie wykonujac
+    !!! polecenia w ogole) - `libc::_exit` (nie `std::process::exit`,
+    !!! ktore NIE jest gwarantowane async-signal-safe w `pre_exec`,
+    !!! patrz komentarz przy `libc::write` nizej), po komunikacie na
+    !!! stderr tlumaczacym DOKLADNIE ktora izolacja zawiodla i ze
+    !!! polecenie NIE zostalo uruchomione (zamiast domyslac sie, ze
+    !!! cichy fallback bez izolacji byl "bezpieczna degradacja").
+    !!! Rodzic (`__hks_sandbox_cmd.status()`) widzi wiec albo sukces z
+    !!! PELNA izolacja, albo status ukonczenia 111 - nigdy "sukces bez
+    !!! izolacji" udajacy normalny wynik. Alternatywa (jawna zgoda
+    !!! wywolujacego na uruchomienie BEZ izolacji, gdy CAP_SYS_ADMIN
+    !!! naprawde jest niedostepne np. w kontenerze bez tej capability)
+    !!! zostaje zaprojektowana, ale NIE zaimplementowana w tej rundzie -
+    !!! patrz `docs/ROADMAP.md`, planowana skladnia
+    !!! `$ polecenie $ allow_unsandboxed` jako osobny wariant parsera/
+    !!! AST (`SandboxStmt` musialby dostac drugie pole `Bool`), zeby
+    !!! zgoda byla widoczna w KODZIE ZRODLOWYM `.hcs`, nie tylko w
+    !!! zachowaniu runtime.
     fun gen_sandbox(self, idx_text: Str) [
         let raw = ""
         match self.sandbox_blocks.fetch(idx_text) [
@@ -3362,8 +3569,9 @@ impl CodeGen [
         self.indent = self.indent + 1
         self.emit("if libc::unshare(libc::CLONE_NEWNET) != 0 {")
         self.indent = self.indent + 1
-        self.emit("let __m = b\"[hackerc-sandbox] OSTRZEZENIE: brak uprawnien do izolacji sieci (CLONE_NEWNET) - uruchamiam BEZ izolacji sieciowej\\n\";")
+        self.emit("let __m = b\"[hackerc-sandbox] BLAD: brak uprawnien do izolacji sieci (CLONE_NEWNET, potrzebne CAP_SYS_ADMIN/CAP_NET_ADMIN) - polecenie NIE zostalo uruchomione (fail-closed, patrz docs/ROADMAP.md)\\n\";")
         self.emit("libc::write(2, __m.as_ptr() as *const libc::c_void, __m.len());")
+        self.emit("libc::_exit(111);")
         self.indent = self.indent - 1
         self.emit("}")
         self.emit("if libc::unshare(libc::CLONE_NEWNS) == 0 {")
@@ -3374,8 +3582,9 @@ impl CodeGen [
         self.indent = self.indent - 1
         self.emit("} else {")
         self.indent = self.indent + 1
-        self.emit("let __m = b\"[hackerc-sandbox] OSTRZEZENIE: brak uprawnien do izolacji systemu plikow (CLONE_NEWNS) - uruchamiam BEZ izolacji fs\\n\";")
+        self.emit("let __m = b\"[hackerc-sandbox] BLAD: brak uprawnien do izolacji systemu plikow (CLONE_NEWNS, potrzebne CAP_SYS_ADMIN) - polecenie NIE zostalo uruchomione (fail-closed, patrz docs/ROADMAP.md)\\n\";")
         self.emit("libc::write(2, __m.as_ptr() as *const libc::c_void, __m.len());")
+        self.emit("libc::_exit(111);")
         self.indent = self.indent - 1
         self.emit("}")
         self.emit("Ok(())")
@@ -3383,7 +3592,12 @@ impl CodeGen [
         self.emit("});")
         self.indent = self.indent - 1
         self.emit("}")
-        self.emit("__hks_sandbox_cmd.status().expect(\"$ ... $ (Zero-Cost Sandbox) blok: nie udalo sie uruchomic polecenia\");")
+        self.emit("let __hks_sandbox_status = __hks_sandbox_cmd.status().expect(\"$ ... $ (Zero-Cost Sandbox) blok: nie udalo sie uruchomic polecenia\");")
+        self.emit("if __hks_sandbox_status.code() == Some(111) {")
+        self.indent = self.indent + 1
+        self.emit("panic!(\"$ ... $ (Zero-Cost Sandbox) blok: przerwano - piaskownica (CLONE_NEWNET/CLONE_NEWNS) niedostepna w tym srodowisku, patrz komunikat powyzej\");")
+        self.indent = self.indent - 1
+        self.emit("}")
         self.indent = self.indent - 1
         self.emit("}")
     ]
@@ -3821,6 +4035,24 @@ impl CodeGen [
         ]
     ]
 
+    !!! Wariant `param_type_str` BEZ auto-`&`/`&mut` - uzywany
+    !!! WYLACZNIE dla parametrow funkcji `@wasm_export` (patrz wywolanie
+    !!! w `gen_fun()` powyzej i uzasadnienie tam). Zawsze typ "po
+    !!! wartosci" - `wasm-bindgen` sam decyduje jak przekazac dany typ
+    !!! przez granice JS/WASM (dla `String` - kopiuje z JS stringa), a
+    !!! referencje (`&String`/`&mut String`) nie sa przez niego
+    !!! wspierane dla typow spoza jego wlasnego `#[wasm_bindgen]`.
+    fun wasm_param_type_str(self, p: Param) -> Str [
+        match p.type_ref.clone() [
+            Some(pt) -> [
+                end rust_type_name(pt.clone(), self.sigs, self.current_type_params)
+            ]
+            None -> [
+                end "i64"
+            ]
+        ]
+    ]
+
     !!! Parytet z `gen_fun()` - CZYSCI/USTAWIA `env_vars` na NOWO (nowa
     !!! funkcja = nowy zasieg zmiennych, patrz uwaga o `env_vars` przy
     !!! `CodeGen` wyzej), deklaruje parametry, i emituje sygnature z
@@ -3958,7 +4190,28 @@ impl CodeGen [
             if j > 0 [
                 params_str = params_str + ", "
             ]
-            params_str = params_str + p2.name.clone() + ": " + self.param_type_str(name.clone(), p2)
+            !!! NAPRAWA (ta runda) - patrz docs/ROADMAP.md, "virus build
+            !!! --release --wasm laman sie na @wasm_export". `wasm-bindgen`
+            !!! NIE implementuje `RefFromWasmAbi` dla `&String` (tylko dla
+            !!! `&str` i wlasnych typow `#[wasm_bindgen]`) - normalna
+            !!! sciezka `param_type_str` (patrz `is_refable_type` nizej)
+            !!! dla parametrow `Str` generuje WLASNIE `&String`, co
+            !!! kompiluje sie OK dla zwyklych `pub fn`, ale rzuca
+            !!! `error[E0277]: the trait bound String: RefFromWasmAbi is
+            !!! not satisfied` pod `#[wasm_bindgen]`. Dla funkcji
+            !!! oznaczonych `@wasm_export` pomijamy wiec auto-referencje
+            !!! i bierzemy typ przez wartosc (`wasm_param_type_str`) -
+            !!! bezpieczne, bo cialo funkcji i tak dostaje `String`
+            !!! (przez wartosc) zamiast `&String`, wiec kazde uzycie
+            !!! (`.len()`, indeksowanie przez `char_at` itd.) dziala
+            !!! identycznie (auto-deref), tylko bez mozliwosci mutacji
+            !!! wywolujacego przez referencje - `@wasm_export` + `&mut`
+            !!! parametr Str i tak nie mialby sensu przez granice JS/WASM.
+            if is_wasm_export [
+                params_str = params_str + p2.name.clone() + ": " + self.wasm_param_type_str(p2)
+            ] else [
+                params_str = params_str + p2.name.clone() + ": " + self.param_type_str(name.clone(), p2)
+            ]
             j = j + 1
         ]
 
@@ -4107,8 +4360,30 @@ impl CodeGen [
     !!! Parytet z `gen_include()` (codegen.py) - `include <sciezka>`
     !!! zawsze glob-importuje (`use crate::module::*;`), bez `import
     !!! <details>` (patrz `IncludeStmt` w ast_nodes.hcs).
+    !!! NAPRAWA (ta runda, patrz SESSION_LOG.md "problem z
+    !!! work:/nazewnictwem modulow") - gdy TEN plik zostal zaladowany
+    !!! jako `include <work:member::...>` (albo transytywnie stad -
+    !!! patrz `self.work_member`, ustawiane przez `new_codegen`,
+    !!! pochodzace z `DiscoveredFile.work_member` w project.hcs),
+    !!! WLASNY, GOLY `include <path>` (bez prefiksu "work:") TEGO pliku
+    !!! jest tu przepisywany na `work:member::path` PRZED policzeniem
+    !!! `flat_include_module_name` - DOKLADNIE ta sama logika co w
+    !!! `Discovery::resolve` (project.hcs, `IncludeStmt` - MUSI dawac
+    !!! IDENTYCZNY wynik, inaczej Discovery zapisze plik pod jedna
+    !!! nazwa, a `gen_include` odwola sie do innej -> `error[E0432]`).
     fun gen_include(self, path: Str) [
-        let module = flat_include_module_name(path)
+        let effective_path = path
+        let already_work = path.len() >= 5 and path.slice(0, 5) == "work:"
+        if not already_work [
+            match self.work_member.clone() [
+                Some(wm) -> [
+                    effective_path = "work:" + wm + "::" + path
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        let module = flat_include_module_name(effective_path)
         self.emit("use crate::" + module + "::*;")
     ]
 
@@ -4227,6 +4502,35 @@ impl CodeGen [
         if source == "java" [
             self.java_classpath_entries.push(name.clone())
             self.emit("// get <java:" + name + "> - dopisane do classpath dla 'native {java}(...)' w tym pliku; kompilacja/pakowanie robi 'virus build' (patrz virus/cmd/build.hcs, docs/JAVA.md)")
+            end
+        ]
+        !! DODANE (ta runda, patrz docs/KOTLIN.md) - `get <kotlin:
+        !! sciezka.jar>`: PELNY parytet z `get <java:...>` powyzej -
+        !! CELOWO WSPOLNY `java_classpath_entries` (nie osobna lista),
+        !! bo Kotlin i Java koncza w JEDNYM `java_classes/` na WSPOLNYM
+        !! classpath (moga wolac nawzajem swoje klasy) - patrz
+        !! `virus/cmd/build.hcs`.
+        !! DODANE (Tura 10, patrz docs/GO.md) - `get <go:pakiet>` /
+        !! `get <go:sciezka/modulu::wersja>`: import Go dla blokow
+        !! `native {go}` (stdlib: `get <go:fmt>`; zewnetrzne moduly z
+        !! wersja: `get <go:github.com/google/uuid::v1.6.0>`). Wpis
+        !! "sciezka" lub "sciezka\twersja" - patrz `project.hcs`.
+        if source == "go" [
+            let go_entry = name.clone()
+            match version [
+                Some(gv) -> [
+                    go_entry = name.clone() + "\t" + gv
+                ]
+                None -> [
+                ]
+            ]
+            self.go_imports.push(go_entry)
+            self.emit("// get <go:" + name + "> - import Go dla 'native {go}(...)'; kompilacja robi 'virus build' (patrz docs/GO.md)")
+            end
+        ]
+        if source == "kotlin" [
+            self.java_classpath_entries.push(name.clone())
+            self.emit("// get <kotlin:" + name + "> - dopisane do classpath dla 'native {kotlin}(...)' w tym pliku; kompilacja/pakowanie robi 'virus build' (patrz virus/cmd/build.hcs, docs/KOTLIN.md)")
             end
         ]
         self.emit("// get <" + source + ":" + name + "> - nieznane zrodlo, pomijam import")
@@ -4523,10 +4827,10 @@ impl CodeGen [
 !!! konstruktora bylo by niezgodnoscia typow (`&Signatures` vs
 !!! `Signatures`) - **bug znaleziony i naprawiony w TEJ sesji**, ten sam
 !!! rodzaj co `extra_variant_names.clone()` w typecheck.hcs (krok 5/N).
-fun new_codegen(sigs: Signatures, boxed_fields: Dict<Str, Str>, mut_params: Dict<Str, Bool>, method_mut_params: Dict<Str, Bool>, variant_arity: Dict<Str, Int>, no_default_structs: Dict<Str, Bool>, direct_blocks: Dict<Str, Str>, native_blocks: Dict<Str, Str>, native_engines: Dict<Str, Str>, sandbox_blocks: Dict<Str, Str>, hot_reload_names: Dict<Str, Bool>, wasm_export_names: Dict<Str, Bool>, fast_direct_blocks: Dict<Str, Str>, fast_direct_backends: Dict<Str, Str>, extra_extern_fn_names: List<Str>) -> CodeGen [
+fun new_codegen(sigs: Signatures, boxed_fields: Dict<Str, Str>, mut_params: Dict<Str, Bool>, method_mut_params: Dict<Str, Bool>, variant_arity: Dict<Str, Int>, no_default_structs: Dict<Str, Bool>, direct_blocks: Dict<Str, Str>, native_blocks: Dict<Str, Str>, native_engines: Dict<Str, Str>, sandbox_blocks: Dict<Str, Str>, hot_reload_names: Dict<Str, Bool>, wasm_export_names: Dict<Str, Bool>, fast_direct_blocks: Dict<Str, Str>, fast_direct_backends: Dict<Str, Str>, extra_extern_fn_names: List<Str>, work_member: Option<Str>) -> CodeGen [
     let env_vars: Dict<Str, Option<TypeRef>> = dict()
     let empty_hr_bodies: Dict<Str, Str> = dict()
-    let gen = CodeGen(sigs.clone(), env_vars, variant_arity, boxed_fields, method_mut_params, mut_params, [], none(), [], 0, no_default_structs, false, direct_blocks, false, native_blocks, native_engines, false, sandbox_blocks, hot_reload_names, false, empty_hr_bodies, [], false, dict(), none(), none(), false, dict(), [], dict(), wasm_export_names, false, fast_direct_blocks, fast_direct_backends, false, dict(), [], [])
+    let gen = CodeGen(sigs.clone(), env_vars, variant_arity, boxed_fields, method_mut_params, mut_params, [], none(), [], 0, no_default_structs, false, direct_blocks, false, native_blocks, native_engines, false, sandbox_blocks, hot_reload_names, false, empty_hr_bodies, [], false, dict(), none(), none(), false, dict(), [], dict(), wasm_export_names, false, fast_direct_blocks, fast_direct_backends, false, dict(), [], [], false, dict(), [], work_member, false, dict(), [], [])
     !! NAPRAWIONY BUG (ta runda) - patrz komentarz przy
     !! `ExtraSignatures::extern_fn_names` w transpiler.hcs - bez tego,
     !! wywolanie funkcji `extern "C"` zadeklarowanej w `region [ ... ]`
@@ -4572,7 +4876,7 @@ fun gen_program(prog: Program) -> List<Str> [
     let empty_sandbox_blocks: Dict<Str, Str> = dict()
     let empty_hot_reload_names: Dict<Str, Bool> = dict()
     let empty_wasm_export_names: Dict<Str, Bool> = dict()
-    let gen = new_codegen(sigs, info.boxed_fields, mparams, mmparams, varity, ndstructs, empty_direct_blocks, empty_native_blocks, empty_native_engines, empty_sandbox_blocks, empty_hot_reload_names, empty_wasm_export_names, dict(), dict(), [])
+    let gen = new_codegen(sigs, info.boxed_fields, mparams, mmparams, varity, ndstructs, empty_direct_blocks, empty_native_blocks, empty_native_engines, empty_sandbox_blocks, empty_hot_reload_names, empty_wasm_export_names, dict(), dict(), [], none())
 
     let i = 0
     let n = prog.body.len()
@@ -4640,7 +4944,7 @@ fun main() [
     let empty_dict7: Dict<Str, Str> = dict()
     let empty_hr_names: Dict<Str, Bool> = dict()
     let empty_hr_bodies2: Dict<Str, Str> = dict()
-    let gen = CodeGen(empty_sigs, empty_vars, empty_dict1, empty_dict2, empty_dict3, empty_dict4, [], some(TypeRef("Str", none(), none())), [], 0, empty_dict5, false, empty_dict6, false, empty_dict7, empty_dict7, false, empty_dict7, empty_hr_names, false, empty_hr_bodies2, [], false, dict(), none(), none(), false, dict(), [], dict(), dict(), false, dict(), dict(), false, dict(), [], [])
+    let gen = CodeGen(empty_sigs, empty_vars, empty_dict1, empty_dict2, empty_dict3, empty_dict4, [], some(TypeRef("Str", none(), none())), [], 0, empty_dict5, false, empty_dict6, false, empty_dict7, empty_dict7, false, empty_dict7, empty_hr_names, false, empty_hr_bodies2, [], false, dict(), none(), none(), false, dict(), [], dict(), dict(), false, dict(), dict(), false, dict(), [], [], false, dict(), [], none(), false, dict(), [], [])
     gen.gen_stmts(body)
 
     let i = 0
@@ -4668,4 +4972,53 @@ fun main() [
         log(generated[gi])
         gi = gi + 1
     ]
+]
+
+!!! Tura 10 (patrz docs/FAST_DIRECT.md) - tablica 19 backendow `fast
+!!! direct {backend}`. Rodzaje wykonania: "pypy" (podproces `pypy3`),
+!!! "compiled" (cython/pythran - kod kompilowany W RUNTIME do
+!!! rozszerzenia, potem importowany), "py" (osadzony CPython przez PyO3
+!!! z kontrola importu backendu + opcjonalnym preludium), "" (nieznany).
+fun fast_direct_kind(b: Str) -> Str [
+    if b == "pypy" [
+        end "pypy"
+    ]
+    if b == "cython" or b == "pythran" [
+        end "compiled"
+    ]
+    if b == "numba" or b == "numpy" or b == "polars" or b == "scipy" or b == "asyncio" or b == "uvloop" or b == "multiprocessing" or b == "jax" or b == "duckdb" or b == "cupy" or b == "vaex" or b == "numexpr" or b == "trio" or b == "aiohttp" or b == "granian" or b == "httpx" or b == "ray" [
+        end "py"
+    ]
+    end ""
+]
+
+!!! Kontrola importu - czytelny blad zamiast surowego ImportError z
+!!! srodka bloku uzytkownika.
+fun fast_direct_preflight(b: Str) -> Str [
+    end "import importlib\ntry:\n    importlib.import_module('" + b + "')\nexcept Exception as __hks_e:\n    raise ImportError(\"fast direct {" + b + "}: modul '" + b + "' niedostepny (pip install " + b + "): \" + str(__hks_e))\n"
+]
+
+fun fast_direct_prelude(b: Str) -> Str [
+    if b == "uvloop" [
+        end "import asyncio, uvloop\nasyncio.set_event_loop_policy(uvloop.EventLoopPolicy())\n"
+    ]
+    if b == "multiprocessing" [
+        end "import multiprocessing as __hks_mp\n__hks_mp.set_start_method('fork', force=True)\n"
+    ]
+    if b == "ray" [
+        end "import ray\nray.init(ignore_reinit_error=True, include_dashboard=False)\n"
+    ]
+    end ""
+]
+
+!!! cython: blok = zawartosc modulu .pyx, kompilowana `pyximport` (wymaga
+!!! Cython + kompilatora C + naglowkow Pythona w SRODOWISKU URUCHOMIENIA -
+!!! kompilacja w runtime, nie build-time). pythran: blok = modul z
+!!! adnotacjami `# pythran export`, kompilowany `pythran`, po imporcie
+!!! wywolywane jest `main()` jesli zdefiniowano.
+fun fast_direct_compiled_driver(b: Str) -> Str [
+    if b == "cython" [
+        end "import os, sys, tempfile, importlib, shutil, subprocess, uuid\n__n = 'hks_fd_' + uuid.uuid4().hex\n__d = tempfile.mkdtemp(prefix='hks_fd_cython_')\n__p = os.path.join(__d, __n + '.pyx')\nwith open(__p, 'w') as __f:\n    __f.write(__hks_code)\n__py = shutil.which('python3') or shutil.which('python')\nsubprocess.check_call([__py, '-m', 'Cython.Build.Cythonize', '-3', '-i', __p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\nsys.path.insert(0, __d)\nimportlib.import_module(__n)\n"
+    ]
+    end "import os, sys, tempfile, importlib, shutil, subprocess, uuid\n__n = 'hks_fd_' + uuid.uuid4().hex\n__d = tempfile.mkdtemp(prefix='hks_fd_pythran_')\n__p = os.path.join(__d, __n + '.py')\nwith open(__p, 'w') as __f:\n    __f.write(__hks_code)\n__py = shutil.which('python3') or shutil.which('python')\nsubprocess.check_call([__py, '-c', 'import sys; from pythran.run import run; sys.argv = sys.argv[1:]; run()', 'pythran', __p, '-o', os.path.join(__d, __n + '.so')], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\nsys.path.insert(0, __d)\n__m = importlib.import_module(__n)\nif hasattr(__m, 'main'):\n    __m.main()\n"
 ]
