@@ -1,3 +1,6 @@
+get <std:term> import <c_bold_red::c_bold_yellow::c_bold_cyan::c_bold::c_gray>
+get <std:string> import <str_join>
+
 struct Diagnostic [
     severity: Str,
     code: Str,
@@ -126,6 +129,30 @@ fun render(source: Str, filename: Str, line: Int, col: Int, message: Str, code: 
 !!! przy uzyciu skompilowanego stage1 (samo-hostowanego hackerc) do
 !!! zbudowania duzych plikow w tej sesji - patrz TEZ komentarz przy
 !!! `split_lines` (druga polowa tego samego bledu).
+!!! ROZBUDOWA (ta runda) - kolorowanie w stylu `rustc` (patrz
+!!! docs/ROADMAP.md, "ladniejsze pokazywanie warningow i bledow").
+!!! `error[...]`/tag na czerwono (pogrubione), `warning[...]` na zolto
+!!! (pogrubione), `-->`/numery linii/`|` na cyjan (pogrubione, jak
+!!! `rustc`), karetki (`^^^`) w kolorze severity. Kolory przez
+!!! `std:term` (`c_bold_red`/`c_bold_yellow`/`c_bold_cyan`/`c_gray`) -
+!!! samo-wylaczajace sie pod `NO_COLOR` (patrz `colorize()` w
+!!! term.hcs), wiec BEZPIECZNE dla przekierowania do pliku/CI bez
+!!! dodatkowej logiki tutaj. `render_many`/`render`/`render_from_lines`
+!!! sa uzywane WYLACZNIE do tekstu dla czlowieka (CLI - `main.hcs::
+!!! print_diagnostics`) - LSP (`lsp.hcs`) buduje wlasny JSON
+!!! BEZPOSREDNIO z pol `Diagnostic` (`d.severity`/`d.message`/...), NIE
+!!! przez te funkcje, wiec kolorowanie tutaj NIGDY nie przecieka do
+!!! protokolu LSP.
+fun severity_tag_color(severity: Str, text: Str) -> Str [
+    if severity == "error" [
+        end c_bold_red(text)
+    ]
+    if severity == "warning" [
+        end c_bold_yellow(text)
+    ]
+    end c_bold(text)
+]
+
 fun render_from_lines(lines: List<Str>, filename: Str, line: Int, col: Int, message: Str, code: Str, severity: Str, length: Int) -> Str [
     let total = lines.len()
     let line_idx = max_int(0, min_int(line - 1, total - 1))
@@ -140,18 +167,19 @@ fun render_from_lines(lines: List<Str>, filename: Str, line: Int, col: Int, mess
 
     let safe_col = max_int(1, col)
     let safe_length = max_int(1, length)
-    let caret_line = repeat_char(" ", safe_col - 1) + repeat_char("^", safe_length)
+    let caret_line = repeat_char(" ", safe_col - 1) + severity_tag_color(severity.clone(), repeat_char("^", safe_length))
 
     let tag = severity + ""
     if code != "" [
         tag = severity + "[" + code + "]"
     ]
+    let tag_colored = severity_tag_color(severity.clone(), tag)
 
-    let out = tag + ": " + message + "\n"
-    out = out + pad + " --> " + filename + ":" + (line as Str) + ":" + (safe_col as Str) + "\n"
-    out = out + pad + " |\n"
-    out = out + gutter + " | " + src_line + "\n"
-    out = out + pad + " | " + caret_line
+    let out = tag_colored + ": " + c_bold(message) + "\n"
+    out = out + c_bold_cyan(pad + " --> ") + filename + ":" + (line as Str) + ":" + (safe_col as Str) + "\n"
+    out = out + c_bold_cyan(pad + " |") + "\n"
+    out = out + c_bold_cyan(gutter + " | ") + src_line + "\n"
+    out = out + c_bold_cyan(pad + " | ") + caret_line
     end out
 ]
 
@@ -191,6 +219,37 @@ fun render_many(source: Str, filename: Str, diagnostics: List<Diagnostic>) -> St
         i = i + 1
     ]
     end out
+]
+
+!!! DODANE (ta runda) - podsumowanie w stylu `rustc`
+!!! ("error: aborting due to 2 previous errors; 3 warnings emitted")
+!!! zamiast surowego licznika. Uzywane przez `main.hcs`
+!!! (`cmd_check`/`cmd_lint`/`cmd_build`/`cmd_emit_module`) PO
+!!! `render_many`, jako ostatnia linia.
+fun plural_pl(n: Int, one: Str, few: Str, many: Str) -> Str [
+    if n == 1 [
+        end one
+    ]
+    let last_digit = n % 10
+    let last_two = n % 100
+    if last_digit >= 2 and last_digit <= 4 and not (last_two >= 12 and last_two <= 14) [
+        end few
+    ]
+    end many
+]
+
+fun render_diagnostic_summary(errors: Int, warnings: Int) -> Str [
+    if errors == 0 and warnings == 0 [
+        end c_bold("ok") + " - brak bledow i ostrzezen"
+    ]
+    let parts: List<Str> = []
+    if errors > 0 [
+        parts.push(c_bold_red("blad: przerwano - " + (errors as Str) + " " + plural_pl(errors, "poprzedni blad", "poprzednie bledy", "poprzednich bledow")))
+    ]
+    if warnings > 0 [
+        parts.push(c_bold_yellow((warnings as Str) + " " + plural_pl(warnings, "ostrzezenie", "ostrzezenia", "ostrzezen") + " wygenerowanych"))
+    ]
+    end str_join(parts, "; ")
 ]
 
 !!! Demonstracyjne uzycie - jedna diagnostyka na fikcyjnym 3-liniowym
