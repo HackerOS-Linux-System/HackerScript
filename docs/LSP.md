@@ -95,3 +95,34 @@ LSP 3.17.
   `rust-analyzer` (osobny) vs. `gopls` (osobny) vs. `cargo`
   wbudowane narzędzia — HackerScript idzie tu bliżej modelu
   "podkomenda", żeby nie mnożyć artefaktów do zainstalowania.
+
+## Etap 2b/2c (Tura 10) - hover, definition, completion
+
+Status: **zaimplementowane, przetestowane przez surowy JSON-RPC po
+stdio** (skrypt Python otwierający `hackerc lsp` jako proces i
+wysyłający `initialize`/`didOpen`/`hover`/`definition`/`completion`).
+
+Implementacja jest **oparta na tekście** (`hackerc/cmd/lsp_features.hcs`),
+nie na AST z pozycjami (patrz ROADMAP, "numery linii w AST" — wciąż
+nierozwiązane). Deklaracje (`fun`/`struct`/`enum`/`const`/`let`) są
+wyszukiwane jako pierwsza pasująca linia zaczynająca się (po wcięciu,
+opcjonalnym `pub `) od jednego z tych słów kluczowych + nazwy.
+
+- **hover** — sygnatura `fun` (bez `[`) albo pełne ciało `struct`/`enum`
+  (do `]`, max 30 linii); dla wbudowanych (`log`, `dict`, `now_ms`, ...)
+  krótki opis; dla słów kluczowych — nazwa.
+- **definition** — pierwsza deklaracja o pasującej nazwie w OTWARTYM
+  dokumencie (brak wsparcia wielu plików / zakresów — jeśli dwie funkcje
+  w różnych `impl` mają tę samą nazwę, trafia pierwsza).
+- **completion** — słowa kluczowe + wbudowane + wszystkie deklaracje z
+  dokumentu, bez filtrowania po prefiksie (klient filtruje sam, zgodnie
+  ze standardowym zachowaniem LSP).
+
+Zweryfikowane: `initialize` deklaruje `hoverProvider`/`definitionProvider`/
+`completionProvider`; dla programu z `fun add(a,b)` i wywołaniem
+`add(1,2)` — hover zwraca poprawną sygnaturę, definition wskazuje
+dokładną linię/kolumnę `add`, completion (52 pozycje) zawiera i `add`,
+i wbudowane `log`.
+
+**Nieprzetestowane w prawdziwym edytorze** (VS Code/Neovim) — tylko
+protokół JSON-RPC bezpośrednio.
