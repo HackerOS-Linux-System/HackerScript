@@ -410,7 +410,10 @@ fun infer_ident_call_type(name: Str, env: TypeEnv) -> Option<TypeRef> [
     if name == "sha256_hex" [
         end some(make_type0("Str"))
     ]
-    if name == "some" or name == "none" or name == "ok" or name == "err" or name == "dict" [
+    if name == "now_ms" [
+        end some(make_type0("Int"))
+    ]
+    if name == "some" or name == "none" or name == "ok" or name == "err" or name == "dict" or name == "set" [
         end none()
     ]
     match env.sigs.functions.fetch(name) [
@@ -452,6 +455,35 @@ fun infer_attr_call_type(method_name: Str, target_type: Option<TypeRef>, sigs: S
                 match tt.generic2 [
                     Some(g2) -> [
                         end some(make_type1("Option", g2))
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            !!! DODANE (ta runda, patrz docs/ROADMAP.md sekcja 1 -
+            !!! "brak iteracji po Dict") - `.keys()` -> `List<K>`,
+            !!! `.values()` -> `List<V>`. Parytet z blokiem `fetch`/
+            !!! `remove` powyzej (uzywa tych samych `tt.generic`/
+            !!! `tt.generic2` z `Dict<K, V>`); kodegen w codegen.hcs
+            !!! (`gen_call`, obok bloku `fetch`/`contains`/`remove`)
+            !!! generuje odpowiednio `.keys().cloned().collect::<Vec<_>>()`
+            !!! / `.values().cloned().collect::<Vec<_>>()`. `.items()`
+            !!! (pary klucz-wartosc) ZOSTAJE do kolejnej rundy - wymaga
+            !!! typu pary/tupli, ktorego HackerScript jeszcze nie ma
+            !!! (patrz docs/ROADMAP.md, sekcja 1, ten sam akapit).
+            if method_name == "keys" and tt.name == "Dict" [
+                match tt.generic [
+                    Some(g1) -> [
+                        end some(make_type1("List", g1))
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            if method_name == "values" and tt.name == "Dict" [
+                match tt.generic2 [
+                    Some(g2) -> [
+                        end some(make_type1("List", g2))
                     ]
                     None -> [
                     ]
