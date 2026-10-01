@@ -8,7 +8,7 @@ include <project>
 include <hlib>
 include <lsp>
 get <std:io> import <file_readable>
-get <std:term> import <c_bold_green::c_bold_red::c_bold_cyan::c_red::c_gray::print_progress_line>
+get <std:term> import <c_bold_green::c_bold_red::c_bold_cyan::c_bold_yellow::c_red::c_gray::print_progress_line>
 
 const VERSION: Str = "0.4"
 
@@ -33,6 +33,22 @@ fun parse_with_direct(source: Str, src_path: Str) -> Program [
     let sandbox_extraction = extract_sandbox_blocks(native_extraction.stripped_source)
     let hot_extraction = extract_hot_reload_markers(sandbox_extraction.stripped_source)
     end parse(hot_extraction.stripped_source)
+]
+
+!!! DODANE (ta runda, patrz docs/ROADMAP.md sekcja 1 - "ParseError") -
+!!! jak `parse_with_direct` wyzej, ale przez `parse_checked()` zamiast
+!!! `parse()` - zwraca tez `List<Diagnostic>` bledow parsera zamiast je
+!!! gubic. Uzywane przez `cmd_check`/`cmd_build`/`cmd_emit_module`
+!!! (patrz tam) - raportuja te bledy PRZED typecheckiem (kolorowo,
+!!! przez ten sam `render_many`), zamiast pozwolic im utonac w
+!!! surowym `log()` pomiedzy zwyklym wyjsciem builda.
+fun parse_with_direct_checked(source: Str, src_path: Str) -> ParseResult [
+    let fast_direct_extraction = extract_fast_direct_blocks(source)
+    let extraction = extract_direct_blocks(fast_direct_extraction.stripped_source)
+    let native_extraction = extract_native_blocks(extraction.stripped_source, native_dirname(src_path))
+    let sandbox_extraction = extract_sandbox_blocks(native_extraction.stripped_source)
+    let hot_extraction = extract_hot_reload_markers(sandbox_extraction.stripped_source)
+    end parse_checked(hot_extraction.stripped_source)
 ]
 
 !!! Wypisuje diagnostyki (opcjonalnie przefiltrowane po `severity`) i
@@ -76,11 +92,20 @@ fun cmd_check(src_path: Str) -> Int [
     ]
     match read_file(src_path.clone()) [
         Ok(source) -> [
-            let program = parse_with_direct(source.clone(), src_path.clone())
-            let diags = check_program(program, [])
+            let parse_result = parse_with_direct_checked(source.clone(), src_path.clone())
+            if parse_result.errors.len() > 0 [
+                log(render_many(source, src_path.clone(), parse_result.errors.clone()))
+                log(render_diagnostic_summary(parse_result.errors.len(), 0))
+                end 1
+            ]
+            let program = parse_result.program
+            let diags = check_program(program, [], source.clone())
             let errors = print_diagnostics(source, src_path.clone(), diags.clone(), "")
+            let warn_count = diags.len() - errors
+            if diags.len() > 0 [
+                log(render_diagnostic_summary(errors, warn_count))
+            ]
             if errors > 0 [
-                elog(c_bold_red("hackerc check:") + " " + (errors as Str) + " blad(ow)")
                 end 1
             ]
             log(c_bold_green("hackerc check:") + " " + src_path + " OK (" + (diags.len() as Str) + " warning(ow))")
@@ -102,8 +127,14 @@ fun cmd_lint(src_path: Str) -> Int [
     ]
     match read_file(src_path.clone()) [
         Ok(source) -> [
-            let program = parse_with_direct(source.clone(), src_path.clone())
-            let diags = check_program(program, [])
+            let parse_result_lint = parse_with_direct_checked(source.clone(), src_path.clone())
+            if parse_result_lint.errors.len() > 0 [
+                log(render_many(source, src_path.clone(), parse_result_lint.errors.clone()))
+                log(render_diagnostic_summary(parse_result_lint.errors.len(), 0))
+                end 1
+            ]
+            let program = parse_result_lint.program
+            let diags = check_program(program, [], source.clone())
             let warnings: List<Diagnostic> = []
             let i = 0
             let n = diags.len()
@@ -118,6 +149,7 @@ fun cmd_lint(src_path: Str) -> Int [
                 end 0
             ]
             log(render_many(source, src_path, warnings))
+            log(render_diagnostic_summary(0, warnings.len()))
             end 0
         ]
         Err(e) -> [
@@ -127,14 +159,75 @@ fun cmd_lint(src_path: Str) -> Int [
     ]
 ]
 
-!!! `hackerc build <plik> -o <dir>` - pelny crate Rust, rozwiazuje
+!!! `hackerc emit-module <plik> -o <plik.rs> --module-name <nazwa>` -
+!!! NOWOSC (ta runda, patrz docs/MULTI_VERSION.md). Transpiluje JEDEN
+!!! plik `.hcs` do JEDNEGO modulu Rust, BEZ zadnej wiedzy o reszcie
+!!! projektu (pusty `empty_extra_signatures()` - brak sygnatur z innych
+!!! plikow, WIEC odwolania do funkcji/structow zdefiniowanych GDZIE
+!!! INDZIEJ w projekcie moga tu dac falszywe "nieznana funkcja" -
+!!! udokumentowane ograniczenie). Ten tryb ISTNIEJE WYLACZNIE, zeby
+!!! `Discovery::parse_and_add` w project.hcs (INNEJ, zwykle nowszej,
+!!! wersji `hackerc`) mogl zdelegowac do TEJ (starszej/innej) binarki
+!!! pojedynczy plik deklarujacy `using <ta-wersja>` w projekcie
+!!! zbudowanym domyslnie inna wersja - patrz tam. Zwraca kod wyjscia
+!!! (0 = sukces, plik `.rs` zapisany), > 0 = blad na stderr.
+fun cmd_emit_module(src_path: Str, out_path: Str, module_name: Str) -> Int [
+    if not file_readable(src_path.clone()) [
+        elog(c_red("hackerc emit-module:") + " nie znaleziono pliku " + src_path)
+        end 1
+    ]
+    match read_file(src_path.clone()) [
+        Ok(source) -> [
+            let fast_direct_extraction = extract_fast_direct_blocks(source.clone())
+            let extraction = extract_direct_blocks(fast_direct_extraction.stripped_source)
+            let native_extraction = extract_native_blocks(extraction.stripped_source, native_dirname(src_path))
+            let sandbox_extraction = extract_sandbox_blocks(native_extraction.stripped_source)
+            let hot_extraction = extract_hot_reload_markers(sandbox_extraction.stripped_source)
+            let wasm_extraction = extract_wasm_export_markers(hot_extraction.stripped_source)
+            let parse_result_em = parse_checked(wasm_extraction.stripped_source)
+            if parse_result_em.errors.len() > 0 [
+                log(render_many(source, src_path.clone(), parse_result_em.errors.clone()))
+                log(render_diagnostic_summary(parse_result_em.errors.len(), 0))
+                end 1
+            ]
+            let program = parse_result_em.program
+            let diags = check_program(program.clone(), [], source.clone())
+            let errors = print_diagnostics(source, src_path.clone(), diags.clone(), "error")
+            if errors > 0 [
+                log(render_diagnostic_summary(errors, 0))
+                end 1
+            ]
+            let r = transpile_program_with_extra(program, extraction.blocks, native_extraction.blocks, native_extraction.engines, sandbox_extraction.blocks, hot_extraction.names, wasm_extraction.names, src_path.clone(), empty_extra_signatures(), fast_direct_extraction.blocks, fast_direct_extraction.backends, none())
+            match write_file(out_path.clone(), r.rust_code) [
+                Ok(_v) -> [
+                    end 0
+                ]
+                Err(e) -> [
+                    elog(c_red("hackerc emit-module:") + " nie mozna zapisac " + out_path + ": " + e)
+                    end 1
+                ]
+            ]
+        ]
+        Err(e) -> [
+            elog(c_red("hackerc emit-module:") + " " + src_path + ": " + e)
+            end 1
+        ]
+    ]
+]
+
+
 !!! `get <std/core/selfhost:...>` rekurencyjnie. Parytet z `cmd_build`.
 !!! `out_dir`/`crate_name` juz rozpakowane (patrz uwaga na gorze pliku
 !!! o braku argv) - `out_dir`/`out_dir + "/src"` MUSZA JUZ ISTNIEC,
 !!! patrz to samo ograniczenie udokumentowane przy `build_project` w
 !!! project.hcs. `vira_root` DODANE w tej rundzie (patrz
 !!! `project.hcs::find_vira_cache_root`) - `none()` = auto-wykrywanie.
-fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, vira_root: Option<Str>, force_library: Bool, bin_name: Option<Str>) -> Int [
+!!! ROZBUDOWA (ta runda, patrz docs/MULTI_VERSION.md) - `version_binaries`
+!!! na koncu (domyslnie `dict()` u wywolania bez `--version-map` -
+!!! pelna zgodnosc wsteczna). Przekazywane do `collect_project_signatures`/
+!!! `build_project` (patrz tam) - pozwala plikom `using <inna-wersja>`
+!!! delegowac swoja transpilacje do wlasciwej binarki.
+fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, vira_root: Option<Str>, force_library: Bool, bin_name: Option<Str>, version_binaries: Dict<Str, Str>) -> Int [
     if not file_readable(src_path.clone()) [
         elog(c_red("hackerc:") + " nie znaleziono pliku " + src_path)
         end 1
@@ -142,7 +235,13 @@ fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<St
     match read_file(src_path.clone()) [
         Ok(source) -> [
             print_progress_line("Kompilacja " + src_path, 1, BUILD_STEP_COUNT, "parsowanie", true)
-            let program = parse_with_direct(source.clone(), src_path.clone())
+            let parse_result_build = parse_with_direct_checked(source.clone(), src_path.clone())
+            if parse_result_build.errors.len() > 0 [
+                log(render_many(source, src_path.clone(), parse_result_build.errors.clone()))
+                log(render_diagnostic_summary(parse_result_build.errors.len(), 0))
+                end 1
+            ]
+            let program = parse_result_build.program
 
             !!! Sygnatury calego projektu PRZED check_program - inaczej
             !!! konstruktor wariantu z zaimportowanego 'enum' (np.
@@ -151,7 +250,7 @@ fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<St
             !!! `check_program` widzi domyslnie tylko JEDEN plik -
             !!! parytet z komentarzem w cmd_build (Python).
             print_progress_line("Kompilacja " + src_path, 2, BUILD_STEP_COUNT, "zbieranie sygnatur projektu", false)
-            let ps = collect_project_signatures(src_path.clone(), libs_root.clone(), bootstrap_root.clone(), vira_root.clone())
+            let ps = collect_project_signatures(src_path.clone(), libs_root.clone(), bootstrap_root.clone(), vira_root.clone(), VERSION.to_string(), version_binaries.clone())
             let extra_variants: List<Str> = []
             let ei = 0
             let en = ps.sigs.enum_names.len()
@@ -178,20 +277,29 @@ fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<St
             ]
 
             print_progress_line("Kompilacja " + src_path, 3, BUILD_STEP_COUNT, "sprawdzanie typow", false)
-            let diags = check_program(program, extra_variants)
+            let diags = check_program(program, extra_variants, source.clone())
             let errors = print_diagnostics(source, src_path.clone(), diags.clone(), "")
             if errors > 0 [
-                elog(c_bold_red("hackerc build:") + " przerwano - " + (errors as Str) + " blad(ow) w " + src_path)
+                log(render_diagnostic_summary(errors, diags.len() - errors))
                 end 1
             ]
 
             print_progress_line("Kompilacja " + src_path, 4, BUILD_STEP_COUNT, "generowanie crate'a Rust", false)
-            let result = build_project(src_path, out_dir, libs_root, bootstrap_root, vira_root, crate_name, force_library, bin_name)
+            let result = build_project(src_path, out_dir, libs_root, bootstrap_root, vira_root, crate_name, force_library, bin_name, VERSION.to_string(), version_binaries.clone())
 
+            !!! NAPRAWA (ta runda) - ostrzezenia projektu (np. "nie
+            !!! znaleziono czlonka workspace...", patrz Discovery.warnings
+            !!! w project.hcs) byly kolorowane NA CZERWONO
+            !!! (`c_bold_red`) mimo etykiety "uwaga" - myllace, czerwony
+            !!! sugeruje blad/przerwanie, a to sa TYLKO ostrzezenia
+            !!! (kompilacja i tak kontynuuje). Teraz `c_bold_yellow`,
+            !!! parytet z tym, jak `render_diagnostic_summary`/
+            !!! `severity_tag_color` w diagnostics.hcs kolorujom
+            !!! `"warning"`.
             let wi = 0
             let wn = result.warnings.len()
             while wi < wn [
-                log(c_bold_red("hackerc build: uwaga:") + " " + result.warnings[wi])
+                log(c_bold_yellow("hackerc build: uwaga:") + " " + result.warnings[wi])
                 wi = wi + 1
             ]
 
@@ -523,15 +631,15 @@ fun cmd_transpile_legacy(src_path: Str, out_path: Str) -> Int [
 !!! Wypisuje banner `usage`/`--help` - parytet z
 !!! `build_parser().print_help()` (Python, argparse).
 fun print_usage() [
-    log("usage: hackerc [-h] [--version] {check,lint,build,fmt,lsp,hlib} ...")
+    log("usage: hackerc [-h] [--version] {check,lint,build,fmt,lsp,hlib,emit-module} ...")
     log("")
     log("Transpilator HackerScript -> Rust")
     log("")
     log("positional arguments:")
-    log("  {check,lint,build,fmt,lsp,hlib}")
+    log("  {check,lint,build,fmt,lsp,hlib,emit-module}")
     log("    check               typecheck bez generowania kodu")
     log("    lint                tylko warningi (podzbior 'check')")
-    log("    build               pelny crate Rust (Cargo.toml + src/)")
+    log("    build               pelny crate Rust (Cargo.toml + src/) [--version-map w1=p1;w2=p2 - patrz docs/MULTI_VERSION.md]")
     log("    fmt                 formatuje kod .hcs")
     log("    lsp                 Language Server (LSP) po stdio - patrz docs/LSP.md (Etap 2a: diagnostyka)")
     log("    hlib                buduj/sprawdzaj archiwa .hlib (HackerOS Lib) - patrz hlib.hcs")
@@ -539,6 +647,8 @@ fun print_usage() [
     log("      hlib inspect <plik.hlib>")
     log("      hlib verify <plik.hlib> [--pubkey HEX]")
     log("      hlib keygen [-o klucz.key]")
+    log("    emit-module         transpiluje JEDEN plik do JEDNEGO modulu .rs, bez wiedzy o reszcie projektu - uzywane WEWNETRZNIE przez `virus build` przy `using <inna-wersja>`, patrz docs/MULTI_VERSION.md")
+    log("      emit-module <plik.hcs> -o <plik.rs> --module-name <nazwa>")
     log("")
     log("options:")
     log("  -h, --help            show this help message and exit")
@@ -645,6 +755,41 @@ fun main() [
         lsp_run()
     ]
 
+    !! DODANE (ta runda, patrz docs/MULTI_VERSION.md) - `emit-module`
+    !! ma WLASNY, prostszy ksztalt argumentow (brak trybu
+    !! `check/lint/build/fmt` typu "pierwszy pozycyjny to plik +
+    !! wspolne flagi") - wlasny blok, analogicznie do `lsp` powyzej.
+    if first == "emit-module" [
+        let _rest_em = argv.remove(0)
+        let value_flags_em: List<Str> = ["-o", "--output", "--module-name"]
+        let src_em = first_positional(argv, value_flags_em)
+        if src_em == "" [
+            log("hackerc emit-module: brak wymaganego argumentu 'source'")
+            exit(1)
+        ]
+        let out_em = ""
+        match find_flag_value(argv, "-o", "--output") [
+            Some(v) -> [
+                out_em = v
+            ]
+            None -> [
+            ]
+        ]
+        if out_em == "" [
+            log("hackerc emit-module: brak wymaganej flagi -o/--output")
+            exit(1)
+        ]
+        let mod_name_em = "mod"
+        match find_flag_value(argv, "", "--module-name") [
+            Some(v) -> [
+                mod_name_em = v
+            ]
+            None -> [
+            ]
+        ]
+        exit(cmd_emit_module(src_em, out_em, mod_name_em))
+    ]
+
     if first == "check" or first == "lint" or first == "build" or first == "fmt" [
         let _rest = argv.remove(0)
         let value_flags: List<Str> = ["-o", "--output", "--crate-name", "--libs-root", "--bootstrap-root", "--bin-name"]
@@ -732,7 +877,20 @@ fun main() [
             None -> [
             ]
         ]
-        exit(cmd_build(src, out_dir, crate_name, libs_root, bootstrap_root, vira_root, force_library, bin_name))
+        !! DODANE (ta runda, patrz docs/MULTI_VERSION.md) - `--version-map
+        !! "0.4=/sciezka1;0.5=/sciezka2"`, wstawiane WYLACZNIE przez
+        !! `virus build` (patrz virus/cmd/multiversion.hcs) - reczne
+        !! wywolanie `hackerc build` bez tej flagi dziala DOKLADNIE jak
+        !! dotad (`dict()` pusty = brak delegacji miedzywersyjnej).
+        let version_binaries: Dict<Str, Str> = dict()
+        match find_flag_value(argv, "", "--version-map") [
+            Some(vm) -> [
+                version_binaries = parse_version_map(vm)
+            ]
+            None -> [
+            ]
+        ]
+        exit(cmd_build(src, out_dir, crate_name, libs_root, bootstrap_root, vira_root, force_library, bin_name, version_binaries))
     ]
 
     if first == "hlib" [
