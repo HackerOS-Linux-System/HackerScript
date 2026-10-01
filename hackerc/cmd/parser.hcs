@@ -1,9 +1,26 @@
 include <lexer>
 include <ast_nodes>
+include <diagnostics>
 
 struct Parser [
     toks: List<Token>,
-    pos: Int
+    pos: Int,
+    !! DODANE (ta runda, patrz docs/ROADMAP.md sekcja 1 - "brak
+    !! prawdziwego ParseError"). Kazdy `expect()`/inny punkt bledu
+    !! parsera DOPISUJE tutaj `Diagnostic` (severity "error") oprocz
+    !! (albo, docelowo, zamiast) samego `log()` na stdout. Parser SAM W
+    !! SOBIE nadal robi odzyskiwanie po bledzie best-effort (nie
+    !! przerywa w miejscu - jak dotad, jak wiekszosc prawdziwych
+    !! parserow z odzyskiwaniem po bledach, np. `rustc`), ale te bledy
+    !! sa TERAZ prawdziwymi, ustrukturyzowanymi diagnostykami z
+    !! poprawnym `line`/`col` (Token JUZ je ma od dawna - `struct Token`
+    !! w lexer.hcs - brakowalo tylko przekazania ich DALEJ zamiast
+    !! zgubienia w golym `log()`), a nie tylko tekstem na konsoli.
+    !! Uzyte przez nowe `parse_checked()`/`ParseResult` nizej -
+    !! wywolujacy MOZE je teraz wykryc i pokazac przez `render_many`
+    !! (ten sam kolorowy renderer co bledy typechecka), zamiast je
+    !! przeoczyc pomiedzy zwyklym `log()` budowy.
+    errors: List<Diagnostic>
 ]
 
 impl Parser [
@@ -58,6 +75,19 @@ impl Parser [
         end none()
     ]
 
+    !!! DODANE (ta runda) - jeden wspolny punkt zapisu bledu parsera:
+    !!! dopisuje `Diagnostic("error", "E0100", ...)` do `self.errors`
+    !!! (patrz `Parser.errors` wyzej) I zachowuje stary `log()` (parytet
+    !!! wsteczny - istniejacy kod/testy polegajace na tym, ze komunikat
+    !!! ladowal na stdout, nadal dostaja to samo, teraz DODATKOWO
+    !!! ustrukturyzowane). `length` - dlugosc podswietlenia w
+    !!! `render_many` (patrz diagnostics.hcs); dla pojedynczego tokenu
+    !!! to zwykle po prostu dlugosc jego tekstu.
+    fun push_error(self, message: Str, line: Int, col: Int, length: Int) [
+        self.errors.push(Diagnostic("error", "E0100", message, line, col, max_int(1, length), ""))
+        log("[hackerc-self] parser: " + message + " w linii " + (line as Str) + ", kolumna " + (col as Str))
+    ]
+
     !!! Bez prawdziwego `ParseError`/wyjatkow w tej wersji bootstrapu
     !!! (patrz "Ograniczenia") - gdy oczekiwany token nie wystepuje,
     !!! `log`-uje ostrzezenie i i tak KONSUMUJE biezacy token (best-effort,
@@ -66,7 +96,7 @@ impl Parser [
     fun expect(self, kind: TokKind, value: Option<Str>) -> Token [
         if not self.check(kind, value) [
             let bad = self.cur()
-            log("[hackerc-self] parser: nieoczekiwany token '" + bad.value + "' w linii " + (bad.line as Str) + ", kolumna " + (bad.col as Str))
+            self.push_error("nieoczekiwany token '" + bad.value + "'", bad.line, bad.col, bad.value.len())
         ]
         end self.advance()
     ]
@@ -258,7 +288,7 @@ impl Parser [
             !!! - best-effort, `log()` i kontynuacja) - to jedyny sposob
             !!! zasygnalizowania tego bledu W TYM PLIKU. `parser.py` (uzywany
             !!! dzis jako stage0) DAJE prawdziwy blad skladni (ParseError).
-            log("[hackerc-self] parser: 'get <selfhost:...>' jest zablokowane - uzyj 'include <plik>' zamiast tego")
+            self.push_error("'get <selfhost:...>' jest zablokowane - uzyj 'include <plik>' zamiast tego", self.cur().line, self.cur().col, 1)
         ]
         self.expect(Colon, none())
         let name = self.read_angle_segment()
@@ -522,7 +552,7 @@ impl Parser [
     !!! "Ograniczenia".
     fun parse_direct(self) -> Stmt [
         self.advance()
-        log("[hackerc-self] parser: 'direct' powinno byc wyciagniete na etapie preprocessing, nie parsowane")
+        self.push_error("'direct' powinno byc wyciagniete na etapie preprocessing, nie parsowane", self.cur().line, self.cur().col, 1)
         end DirectBlock([])
     ]
 
@@ -845,18 +875,50 @@ impl Parser [
             self.expect(Close, none())
             end ListLit(items)
         ]
-        log("[hackerc-self] parser: nieoczekiwany token '" + t.value + "' w linii " + (t.line as Str) + ", kolumna " + (t.col as Str))
+        self.push_error("nieoczekiwany token '" + t.value + "'", t.line, t.col, t.value.len())
         self.advance()
         end NullLit
     ]
 ]
 
 !!! `parse(source)` - odpowiednik wolnej funkcji `parse()` w parser.py
-!!! (tokenizuje, potem `Parser(tokens, 0).parse_program()`).
+!!! (tokenizuje, potem `Parser(tokens, 0).parse_program()`). Bledy
+!!! parsera (patrz `Parser.errors`) sa tu NADAL gubione (tylko `log()`
+!!! przez `push_error()`) - PARYTET WSTECZNY, zeby nie zlamac zadnego
+!!! z istniejacych wywolan `parse()` (formatter.hcs/project.hcs/
+!!! transpiler.hcs/playground.hcs - patrz docs/ROADMAP.md). Wywolujacy,
+!!! ktorzy CHCA prawdziwych, ustrukturyzowanych bledow parsera (dzis:
+!!! `hackerc check`/`build`/`emit-module` w main.hcs), uzywaja NOWEGO
+!!! `parse_checked()` ponizej zamiast tego.
 fun parse(source: Str) -> Program [
     let tokens = tokenize(source)
-    let p = Parser(tokens, 0)
+    let p = Parser(tokens, 0, [])
     end p.parse_program()
+]
+
+!!! DODANE (ta runda, patrz docs/ROADMAP.md sekcja 1 - "ParseError").
+struct ParseResult [
+    program: Program,
+    errors: List<Diagnostic>
+]
+
+!!! Jak `parse()` wyzej, ale ZWRACA rowniez `Parser.errors` (patrz
+!!! `Parser` struct/`push_error()`) zamiast je gubic - realny,
+!!! ustrukturyzowany `ParseError` (Diagnostic z prawdziwym
+!!! `line`/`col`, nie tylko tekst na stdout). Wywolujacy powinien
+!!! sprawdzic `result.errors` PRZED uzyciem `result.program` do
+!!! dalszych krokow (typecheck/codegen) - przy bledach parsera AST
+!!! moze byc niekompletny/best-effort (parser NADAL robi odzyskiwanie
+!!! po bledzie zamiast przerywac w miejscu, jak `rustc`), wiec dalsze
+!!! diagnostyki typechecka na TAKIM AST moga byc mylace/wtorne wobec
+!!! bledu parsera - patrz uzycie w `main.hcs::cmd_check`/`cmd_build`
+!!! (raportuje `result.errors` i PRZERYWA przed typecheckiem, gdy
+!!! niepuste).
+fun parse_checked(source: Str) -> ParseResult [
+    let tokens = tokenize(source)
+    let p = Parser(tokens, 0, [])
+    let prog = p.parse_program()
+    end ParseResult(prog, p.errors)
 ]
 
 !!! Demonstracyjne uzycie: parsuje maly, ale reprezentatywny fragment
