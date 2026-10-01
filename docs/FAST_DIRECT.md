@@ -1,6 +1,6 @@
 # `fast direct {backend} [ ... ]` — przyspieszony Python, statycznie linkowany
 
-Status: **projekt (Faza 1 — specyfikacja)**. Rozszerza istniejące
+Status: **zaimplementowane w wersji DYNAMICZNEJ (Tura 10) — statyczne linkowanie NIE jest zrobione** (patrz "Stan implementacji" na końcu). Rozszerza istniejące
 `direct [ ... ]` (patrz `docs/SYNTAX.md`) o wybór **backendu
 wykonania Pythona** zamiast domyślnego CPythona przez PyO3.
 
@@ -163,3 +163,35 @@ kolejna:
 6. **Grupa "specjalna"** (mają udokumentowane wyjątki od pełnej
    statyczności — patrz "Co zostaje niestatyczne"): `numba`, `cupy`,
    `ray`.
+
+
+## Stan implementacji (Tura 10) — co JEST, a czego NIE MA
+
+Wszystkie 19 identyfikatorów mają realny dispatch w
+`hackerc/cmd/codegen.hcs` (`fast_direct_kind`/`gen_fast_direct`).
+Nieznany backend daje `compile_error!` z listą dozwolonych. **Nie ma
+statycznego linkowania interpretera** (PyPy/CPython/numpy nie są
+wbudowane w binarkę) — to wymagałoby osobnego, dużego projektu
+budowania statycznego CPythona/PyPy; tu wszystkie backendy działają
+DYNAMICZNIE, na tym, co jest zainstalowane w środowisku uruchomienia.
+
+| Rodzaj | Backendy | Jak działa |
+|---|---|---|
+| `pypy` | `pypy` | podproces `pypy3 -c <kod>` (wymaga `pypy3` w PATH) |
+| `compiled` | `cython`, `pythran` | blok zapisywany do pliku w katalogu tymczasowym, kompilowany W RUNTIME (`Cython.Build.Cythonize -i` / `pythran.run`), importowany pod unikalną nazwą modułu. Wymaga kompilatora C/C++ + pakietu w runtime. Pythran: dostępne są tylko funkcje z `#pythran export`; `main()` wywoływane, jeśli wyeksportowane |
+| `py` | `numpy`, `numba`, `polars`, `scipy`, `asyncio`, `uvloop`, `multiprocessing`, `jax`, `duckdb`, `cupy`, `vaex`, `numexpr`, `trio`, `aiohttp`, `granian`, `httpx`, `ray` | osadzony CPython (PyO3, jak `direct`) + kontrola importu z czytelnym błędem + preludium (`uvloop`: polityka pętli; `multiprocessing`: start method `fork`; `ray`: `ray.init`) |
+
+**Przetestowane realnie (kompilacja + uruchomienie):** `numpy`, `pypy`,
+`asyncio`, `uvloop`, `trio`, `multiprocessing`, `cython`, `pythran`,
+`httpx`. Kontrola braku modułu przetestowana na `numba`.
+**Nieprzetestowane** (brak pakietów/GPU w środowisku pracy — ta sama
+ścieżka `py` co powyższe, więc powinny działać, jeśli pakiet jest
+zainstalowany): `numba`, `polars`, `scipy`, `jax`, `duckdb`, `cupy`,
+`vaex`, `numexpr`, `aiohttp`, `granian`, `ray`.
+
+Nie zrobione względem specyfikacji wyżej: statyczne linkowanie,
+mosty Rust-native dla `polars`/`granian`/`duckdb` bez CPythona,
+`build_wire_fast_direct_dependencies` w `virus`. Uwaga środowiskowa:
+Pythran wymaga zgodności wersji numpy z jego nagłówkami (na maszynie
+testowej pip-owy numpy 2.x kolidował z apt-owym Pythranem — trzeba
+`PYTHONPATH=/usr/lib/python3/dist-packages`).
