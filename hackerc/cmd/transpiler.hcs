@@ -3,6 +3,13 @@ include <parser>
 include <typeinfer>
 include <codegen>
 get <std:string> import <str_contains>
+!! DODANE (ta runda) - patrz naprawa `transpile_file` nizej: `create_dir`
+!! (mapowane w codegen.hcs na `std::fs::create_dir_all`, WIEC JEST
+!! rekurencyjne/idempotentne od dawna - komentarz przy `transpile_file`
+!! mowiacy inaczej byl nieaktualny, patrz docs/ROADMAP.md) + `path_dirname`
+!! do policzenia katalogu nadrzednego `out_path`.
+get <std:fs> import <create_dir_ok>
+get <std:path> import <path_dirname>
 !!! Wynik transpilacji - parytet z `@dataclass TranspileResult`.
 struct TranspileResult [
     rust_code: Str,
@@ -46,7 +53,17 @@ struct TranspileResult [
     !! `get <java:sciezka.jar>` - patrz `CodeGen::java_classpath_entries`.
     java_classpath_entries: List<Str>,
     !! ROZBUDOWA (ta runda) - `sha256_hex(...)`, patrz `CodeGen::needs_sha256`.
-    needs_sha256: Bool
+    needs_sha256: Bool,
+    !! DODANE (ta runda, patrz docs/KOTLIN.md) - `native {kotlin}(...)`,
+    !! parytet z `needs_native_java`/`native_java_*` wyzej.
+    needs_native_kotlin: Bool,
+    native_kotlin_sources: Dict<Str, Str>,
+    native_kotlin_order: List<Str>,
+    !! DODANE (Tura 10, patrz docs/GO.md) - `native {go}`/`get <go:...>`.
+    needs_native_go: Bool,
+    native_go_sources: Dict<Str, Str>,
+    native_go_order: List<Str>,
+    go_imports: List<Str>
 ]
 
 !!! ZMIANA 0.3 - skanuje najwyzszy poziom `prog` w poszukiwaniu
@@ -1259,7 +1276,7 @@ fun hot_reload_runtime_block(names: List<Str>, default_source_path: Str) -> List
     end out
 ]
 
-fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native_blocks: List<Str>, native_engines: List<Str>, sandbox_blocks: List<Str>, hot_reload_names: List<Str>, wasm_export_names: List<Str>, default_source_path: Str, extra: ExtraSignatures, fast_direct_blocks: List<Str>, fast_direct_backends: List<Str>) -> TranspileResult [
+fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native_blocks: List<Str>, native_engines: List<Str>, sandbox_blocks: List<Str>, hot_reload_names: List<Str>, wasm_export_names: List<Str>, default_source_path: Str, extra: ExtraSignatures, fast_direct_blocks: List<Str>, fast_direct_backends: List<Str>, work_member: Option<Str>) -> TranspileResult [
     let local_sigs = collect_signatures(prog.clone())
     let sigs = merge_signatures_with_extra(local_sigs, extra)
     let local_mut = compute_mut_params(prog.clone())
@@ -1276,7 +1293,7 @@ fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native
     let wasm_export_dict = names_to_bool_dict(wasm_export_names)
     let fast_direct_dict = direct_blocks_to_dict(fast_direct_blocks)
     let fast_direct_backend_dict = direct_blocks_to_dict(fast_direct_backends)
-    let gen = new_codegen(sigs, info.boxed_fields, mut_params, method_mut_params, varity, ndstructs, direct_dict, native_dict, native_engine_dict, sandbox_dict, hot_reload_dict, wasm_export_dict, fast_direct_dict, fast_direct_backend_dict, extra.extern_fn_name_list)
+    let gen = new_codegen(sigs, info.boxed_fields, mut_params, method_mut_params, varity, ndstructs, direct_dict, native_dict, native_engine_dict, sandbox_dict, hot_reload_dict, wasm_export_dict, fast_direct_dict, fast_direct_backend_dict, extra.extern_fn_name_list, work_member)
 
     let i = 0
     let n = prog.body.len()
@@ -1332,11 +1349,31 @@ fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native
     !! roboczego, o ile `java_classes/` (skopiowane przez `virus
     !! build` obok binarki, patrz `virus/cmd/build.hcs`) jedzie razem
     !! z nia.
-    if gen.needs_native_java [
+    if gen.needs_native_java or gen.needs_native_kotlin [
         header.push("static HKS_JVM: std::sync::OnceLock<jni::JavaVM> = std::sync::OnceLock::new();")
         header.push("fn hks_get_jvm() -> &'static jni::JavaVM {")
         header.push("    HKS_JVM.get_or_init(|| {")
         header.push("        let __hks_cp_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(\"java_classes\"))).map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| \"java_classes\".to_string());")
+        if gen.needs_native_kotlin [
+            !!! DODANE (ta runda, patrz docs/KOTLIN.md) - bajtkod
+            !!! Kotlina (w odroznieniu od Javy) ODWOLUJE SIE w RUNTIME
+            !!! do klas `kotlin.*` (np.
+            !!! `kotlin.jvm.internal.Intrinsics`, `kotlin.Unit`) z
+            !!! `kotlin-stdlib.jar` - to NIE JEST opcjonalne (w
+            !!! odroznieniu od `get <java:...>`/`get <kotlin:...>`
+            !!! classpath, ktore sa potrzebne TYLKO gdy kod faktycznie
+            !!! odwoluje sie do zewnetrznych klas). `virus build`
+            !!! kopiuje `kotlin-stdlib.jar` (znaleziony obok
+            !!! `kotlinc`, patrz virus/cmd/build.hcs) do
+            !!! `kotlin_classes/kotlin-stdlib.jar` OBOK finalnej
+            !!! binarki - dokladnie tak samo jak `java_classes/` (ten
+            !!! sam wzorzec `env::current_exe()`), wiec dopisujemy go
+            !!! do `-Djava.class.path` DRUGIM segmentem
+            !!! (`:`-rozdzielone, jak kazdy classpath JVM na
+            !!! Linux/macOS).
+            header.push("        let __hks_kt_stdlib = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(\"kotlin_classes\").join(\"kotlin-stdlib.jar\"))).map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| \"kotlin_classes/kotlin-stdlib.jar\".to_string());")
+            header.push("        let __hks_cp_dir = format!(\"{}:{}\", __hks_cp_dir, __hks_kt_stdlib);")
+        ]
         header.push("        let __hks_cp_opt = format!(\"-Djava.class.path={}\", __hks_cp_dir);")
         header.push("        let __hks_args = jni::InitArgsBuilder::new().option(&__hks_cp_opt).build().expect(\"nieprawidlowe argumenty inicjalizacji embedded JVM\");")
         header.push("        jni::JavaVM::new(__hks_args).expect(\"nie udalo sie wystartowac embedded JVM - czy JRE/JDK (libjvm.so) jest dostepne w tym srodowisku?\")")
@@ -1381,7 +1418,7 @@ fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native
     ]
     rust_code = rust_code + "\n"
 
-    end TranspileResult(rust_code, gen.needs_pyo3, gen.needs_native_js, gen.needs_sandbox, gen.needs_hot_reload, gen.hot_reload_bodies, gen.hot_reload_order, gen.needs_native_cpp, collect_extern_link_specs(prog), gen.native_cpp_sources, gen.native_cpp_order, gen.needs_wasm_bindgen, gen.needs_native_java, gen.native_java_sources, gen.native_java_order, gen.java_classpath_entries, needs_sha256)
+    end TranspileResult(rust_code, gen.needs_pyo3, gen.needs_native_js, gen.needs_sandbox, gen.needs_hot_reload, gen.hot_reload_bodies, gen.hot_reload_order, gen.needs_native_cpp, collect_extern_link_specs(prog), gen.native_cpp_sources, gen.native_cpp_order, gen.needs_wasm_bindgen, gen.needs_native_java, gen.native_java_sources, gen.native_java_order, gen.java_classpath_entries, needs_sha256, gen.needs_native_kotlin, gen.native_kotlin_sources, gen.native_kotlin_order, gen.needs_native_go, gen.native_go_sources, gen.native_go_order, gen.go_imports)
 ]
 
 !!! Transpiluje zrodlo `.hcs` -> `TranspileResult` (kod Rust + info czy
@@ -1417,7 +1454,7 @@ fun transpile_source_full(source: Str, filename: Str, module_name: Str, extra: E
     let hot_extraction = extract_hot_reload_markers(sandbox_extraction.stripped_source)
     let wasm_extraction = extract_wasm_export_markers(hot_extraction.stripped_source)
     let prog = parse(wasm_extraction.stripped_source)
-    end transpile_program_with_extra(prog, extraction.blocks, native_extraction.blocks, native_extraction.engines, sandbox_extraction.blocks, hot_extraction.names, wasm_extraction.names, filename, extra, fast_direct_extraction.blocks, fast_direct_extraction.backends)
+    end transpile_program_with_extra(prog, extraction.blocks, native_extraction.blocks, native_extraction.engines, sandbox_extraction.blocks, hot_extraction.names, wasm_extraction.names, filename, extra, fast_direct_extraction.blocks, fast_direct_extraction.backends, none())
 ]
 
 !!! Skrot: zwraca tylko kod Rust (bez `needs_pyo3`) - parytet z
@@ -1430,15 +1467,27 @@ fun transpile_source(source: Str, filename: Str) -> Str [
 !!! Czyta `src_path`, transpiluje, zapisuje `.rs` do `out_path` - parytet
 !!! z `transpile_file`. Uzywa wbudowanych `read_file`/`write_file`
 !!! (patrz `libs/std/lib/io.hcs`) zamiast `pathlib.Path.read_text`/
-!!! `write_text` - `mkdir(parents=True)` z Pythona NIE MA odpowiednika
-!!! (brak prymitywu tworzenia katalogow w tym bootstrapie, patrz
-!!! "Ograniczenia" ponizej i `project.hcs`) wiec `out_path` musi
-!!! wskazywac na JUZ ISTNIEJACY katalog.
+!!! `write_text`.
+!!!
+!!! NAPRAWA (ta runda) - stary komentarz w tym miejscu mowil, ze
+!!! `mkdir(parents=True)` z Pythona nie ma odpowiednika i `out_path`
+!!! musi wskazywac na juz istniejacy katalog. To bylo NIEAKTUALNE:
+!!! `create_dir` (kompilator, patrz `codegen.hcs` - mapowane wprost na
+!!! `std::fs::create_dir_all`) jest rekurencyjne od dawna, tylko
+!!! `transpile_file` nigdy go nie wywolywalo. Teraz tworzymy katalog
+!!! nadrzedny `out_path` (przez `path_dirname` + `create_dir_ok`,
+!!! idempotentne - nie przeszkadza, jesli katalog juz istnieje) PRZED
+!!! `write_file`, wiec `out_path` moze wskazywac na dowolnie zagniezdzona,
+!!! jeszcze nieistniejaca sciezke - pelny parytet z `mkdir(parents=True)`.
 fun transpile_file(src_path: Str, out_path: Str, module_name: Str) -> Result<TranspileResult, Str> [
     let read_result = read_file(src_path)
     match read_result [
         Ok(source) -> [
             let result = transpile_source_full(source, src_path, module_name, empty_extra_signatures())
+            let out_dir = path_dirname(out_path.clone())
+            if out_dir != "" and out_dir != "." [
+                create_dir_ok(out_dir)
+            ]
             let write_result = write_file(out_path, result.rust_code.clone())
             match write_result [
                 Ok(_v) -> [
