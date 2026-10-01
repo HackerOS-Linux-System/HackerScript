@@ -268,3 +268,196 @@ deklarowany "zrobiony" bez pokrycia w działającym kodzie):
   specyfikacja, w tym kolejność wdrażania w 6 grupach, w
   **`docs/FAST_DIRECT.md`**. Gramatyka już dodana do
   `docs/GRAMMAR.md`, sekcja 6.
+
+## Aktualizacja sesji (patrz SESSION_LOG.md po pelna liste zmian plik-po-pliku)
+
+Kilka punktow powyzej bylo NIEAKTUALNYCH wzgledem faktycznego stanu kodu -
+sprawdzone i skorygowane w tej sesji:
+
+* **`mkdir -p`/`create_dir`** - JUZ zaimplementowane (`create_dir` mapuje sie
+  na `std::fs::create_dir_all`, rekurencyjne). Doszlifowane: `transpile_file`
+  teraz faktycznie tworzy katalog nadrzedny `out_path` przed zapisem.
+* **`virus lsp`** - JUZ w pelni zaimplementowane i podpiete (`cmd_lsp_run` w
+  `virus/cmd/lsp.hcs`, wywolywane z `main.hcs`). Diagnostyka dziala; zakres
+  Etap 2b/2c (hover/definition/completion/rename/formatting) nadal otwarty.
+* **`virus build --jar`** - JUZ w pelni zaimplementowane (`build_package_jar`
+  + flaga `--jar` w `virus/cmd/main.hcs` -> `TargetJar`), NIE placeholder.
+* **`virus build --release --wasm`** - naprawiony realny bug: `include
+  <work:hackerc::...>` nigdy nie dzialalo dla czlonkow-binarek (`hackerc`,
+  `playground`) trzymajacych kod w `cmd/` zamiast `lib/` - patrz
+  `find_workspace_root`/`work_module_file_path` w `hackerc/cmd/project.hcs`.
+  Plus naprawiony `#[wasm_bindgen]` + parametry `&String` (nieobslugiwane
+  przez `wasm-bindgen`) - patrz `wasm_param_type_str` w `codegen.hcs`.
+* **`Dict.keys()`/`.values()`** - dodane (typeinfer.hcs + codegen.hcs).
+  `.items()` zostaje - wymaga typu pary/tupli.
+* **Sandbox `$ ... $`** - zmienione z "ostrzezenie + uruchom bez izolacji" na
+  fail-closed (kod wyjscia 111, polecenie NIE wykonuje sie bez izolacji).
+* **NOWOSC: `using <wersja>` per plik** - patrz **`docs/MULTI_VERSION.md`** -
+  rozne pliki `.hcs` w JEDNYM projekcie moga deklarowac rozne wersje jezyka;
+  `virus build` pobiera wszystkie potrzebne binarki `hackerc` i orkiestruje
+  delegacje per-plik. Plus `Virus.hk -> [package] -> all-versions => [...]`.
+* **`hack3rc`** - dodany do `[workspace]`, manifest + plan architektury
+  (frontend re-used z `hackerc`, backend Cranelift) - **implementacja
+  jeszcze NIE zaczeta** (tylko manifest/plan), patrz `docs/HACK3RC.md`
+  (do napisania w kolejnej sesji - w TEJ sesji nie zdazono).
+
+Wciaz calkowicie nieruszone: Go FFI (`get <go:>`/`native {go}`), `fast direct
+{backend}` (19 backendow), `ParseError`/numery linii w AST, typ `Set`,
+LSP Etap 2b/2c, stuby `.hlib` w `virus install`.
+
+## Aktualizacja sesji 2
+
+* **Stuby `.hlib` w `virus install`** - odkryto, ze `hackerc` JUZ ma
+  PELNA, automatyczna obsluge `get <hlib:nazwa>` (`find_hlib_file_path`/
+  `hlib_extract_for_import` w `project.hcs` - szuka `.hlib` w
+  `<projekt>/hlibs/`, generuje `region [...]` z `manifest.json` gdy brak
+  zrodla). Jedyny brakujacy element: `virus build` (zaleznosci `bytes`/
+  `bit` konczace sie na `.hlib`) tylko OSTRZEGAL "dopisz recznie" zamiast
+  skopiowac plik do `<projekt>/hlibs/<nazwa>.hlib`, gdzie `get
+  <hlib:nazwa>` juz by go znalazl. Naprawione (`virus/cmd/build.hcs`) -
+  teraz to dziala od razu, bez zadnego recznego kroku.
+* **`Set<T>`** dodany (`std::collections::HashSet`) - patrz tura 4 w
+  SESSION_LOG.md.
+* **Kolorowe diagnostyki + timing w `virus build`** - patrz tura 4 w
+  SESSION_LOG.md.
+
+Wciaz calkowicie nieruszone: Go FFI, `fast direct {backend}` (19
+backendow), `ParseError`/numery linii w AST, LSP Etap 2b/2c
+(hover/definition/completion/rename/formatting), `hack3rc/cmd/main.hcs`.
+
+## Aktualizacja sesji 3
+
+* **`ParseError`** - ZROBIONE (`Parser.errors`, `parse_checked()`,
+  wpiete do `check`/`lint`/`build`/`emit-module`/LSP). Real, ale
+  ograniczone: parser NADAL robi odzyskiwanie po bledzie (nie
+  przerywa w miejscu) - to swiadoma decyzja (parytet z `rustc`), nie
+  brak.
+* **Numery linii w AST** - CZESCIOWO: bledy PARSERA maja teraz realny
+  `line`/`col` (z `Token`). Diagnostyki TYPECHECKA (`check_program`)
+  NADAL maja `line=0, col=0` na sztywno w kazdym miejscu
+  `typecheck.hcs` - wymaga pola pozycji na KAZDYM wariancie `Expr`/
+  `Stmt`, co dotyka tysiace miejsc dopasowania w kompilatorze na raz.
+  NAJWIEKSZY pojedynczy pozostaly punkt, odlozony do sesji z dostepem
+  do `cargo build` (zbyt ryzykowne bez mozliwosci kompilacji).
+* **LSP** - zakresy diagnostyk realne dla bledow PARSERA (wczesniej
+  zawsze `(0,0)-(0,1)`), nadal `(0,0)-(0,1)` dla typechecka (patrz
+  wyzej - ten sam powod). Bledy parsera TERAZ w ogole trafiaja do LSP
+  (wczesniej byly calkowicie gubione przez `lsp_parse_with_direct`
+  uzywajace `parse()` zamiast `parse_checked()`).
+
+Wciaz calkowicie nieruszone: Go FFI, `fast direct {backend}` (19
+backendow), LSP hover/definition/completion/rename/formatting,
+`hack3rc/cmd/main.hcs`.
+
+## Aktualizacja sesji 4 - PIERWSZA realna weryfikacja przez `cargo build`
+
+W tej sesji po raz pierwszy zainstalowano `rustc`/`cargo` i faktycznie
+skompilowano `hackerc`, `virus` oraz programy testowe. Wyniki (pelne
+szczegoly w SESSION_LOG.md, Tura 7):
+
+* **`hackerc` i `virus` kompiluja sie i dzialaja** - self-hosting
+  fixed-point zweryfikowany (dwie generacje transpilacji daja
+  identyczny wynik).
+* **`Set<T>`, `Dict.keys()/values()`, `ParseError`** - zweryfikowane
+  DZIALAJACYM kodem (nie tylko czytaniem zrodla) - skompilowane I
+  URUCHOMIONE, poprawne wyniki.
+* Znalezione i naprawione 2 realne bledy kompilacji we wczesniejszych
+  turach tej sesji (`tt.generic1` -> `tt.generic`, `VERSION.clone()` ->
+  `VERSION.to_string()`) - niewidoczne bez `cargo build`.
+* **`virus build --wasm`/playground - CZESCIOWO naprawione**: oryginalny
+  zglaszany blad (`E0432 unresolved import`) jest naprawiony, ALE
+  odkryto GLEBSZY problem: `include <work:...>` nie kanonizuje nazw
+  modulow po sciezce pliku, wiec plik zaladowany i BEZPOSREDNIO (przez
+  playground) i TRANSYTYWNIE (przez parser.hcs/typecheck.hcs, ktore
+  playground tez importuje) dostaje DWIE rozne nazwy modulu = dwa
+  niezgodne typy `Program`/`Diagnostic`. Dotyczy WYLACZNIE plikow
+  uzywajacych `include <work:...>` na pliki, ktore SAME maja dalsze
+  `include` (dzis: tylko `playground`). Najwiekszy, potwierdzony-przez-
+  kompilator priorytet na kolejna sesje.
+
+Wciaz calkowicie nieruszone: Go FFI, `fast direct {backend}` (19
+backendow), LSP hover/definition/completion/rename/formatting,
+`hack3rc/cmd/main.hcs`, numery linii w AST dla typechecka.
+
+## Aktualizacja sesji 5
+
+* **`get <kotlin:>` / `native {kotlin}`** - ZROBIONE i zweryfikowane
+  end-to-end (docs/KOTLIN.md).
+* **`include <work:...>` duplikacja modulow + `main` ambiguity** -
+  ZROBIONE; `playground --library` kompiluje sie bez bledow. Do
+  sprawdzenia u Ciebie: sam target `wasm32-unknown-unknown`.
+* Wciaz nieruszone: Go FFI, `fast direct {backend}`, LSP
+  hover/definition/completion, numery linii w AST dla typechecka,
+  `hack3rc/cmd/main.hcs`.
+
+## Aktualizacja sesji 6 (Tura 10) - Go FFI, fast direct (19 backendow), LSP hover/definition/completion, numery linii w typechecku
+
+Wszystkie ponizsze zweryfikowane realna kompilacja (`rustc`/`cargo`
+1.91) + w wiekszosci realnym URUCHOMIENIEM (nie tylko `cargo build`).
+
+* **`get <go:>`/`native {go}`** - ZROBIONE, zweryfikowane end-to-end
+  (`fmt`, `strings`, dwa bloki, petle). Statyczne linkowanie (Go
+  wbudowany w binarke, `go build -buildmode=c-archive`). Moduly
+  zewnetrzne (`get <go:sciezka::wersja>`) zaimplementowane, ale
+  NIEPRZETESTOWANE (proxy.golang.org zablokowany w srodowisku pracy).
+  Patrz docs/GO.md.
+* **`fast direct {backend}` (19 backendow)** - ZROBIONE w wersji
+  DYNAMICZNEJ (nie statycznej - statyczne linkowanie CPythona/PyPy to
+  osobny, duzy projekt). 9 z 19 przetestowanych realnym uruchomieniem
+  (numpy, pypy, asyncio, uvloop, trio, multiprocessing, cython,
+  pythran, httpx) + poprawny czytelny blad przy braku modulu (numba).
+  Patrz docs/FAST_DIRECT.md, "Stan implementacji".
+* **LSP hover/definition/completion** - ZROBIONE (Etap 2b/2c),
+  zweryfikowane przez bezposredni protokol JSON-RPC (nie w prawdziwym
+  edytorze). Implementacja oparta na tekscie (skan linii), nie na
+  AST - patrz nizej. Patrz docs/LSP.md.
+* **Numery linii w AST dla diagnostyk typechecka** - ZROBIONE w wersji
+  PRZYBLIZONEJ: `Checker`/`FnChecker` dostaly pole `source: Str`,
+  wszystkie 6 miejsc tworzenia `Diagnostic` w typecheck.hcs licza teraz
+  linie przez wyszukanie tekstowe charakterystycznego fragmentu
+  (`find_line_of`) zamiast sztywnego `0, 0`. TO NIE SA prawdziwe pozycje
+  z parsera (AST nadal ich nie ma - `Expr`/`Stmt` bez zmian) - przy
+  wielu wystapieniach tego samego identyfikatora trafia PIERWSZE. Ten
+  sam kompromis co `lsp_features.hcs`. Zweryfikowane: `E0001`/`W0002`/
+  `W0001` na programie testowym wskazuja poprawne linie.
+
+Jedyny pozostaly punkt z oryginalnej listy: **`hack3rc/cmd/main.hcs`**
+(patrz docs/HACK3RC.md) - świadomie nieruszone, wymaga integracji z
+Cranelift (crates `cranelift-*`), ktorej NIE dalo sie zweryfikowac w
+tej sesji (proxy.golang.org byl zablokowany, kwestia dostepu do
+crates.io dla tych konkretnych crate'ow niezweryfikowana, a pisanie
+kilkuset linii wywolan API Cranelift bez petli kompiluj-sprawdz ma
+wysokie ryzyko bledow).
+
+## Aktualizacja sesji 6 - WSZYSTKIE pozostale punkty zrobione
+
+Wszystkie 5 pozostalych punktow z listy zrobione w Turze 10 (pelne
+szczegoly: SESSION_LOG.md):
+
+* **`fast direct {backend}`** - ZROBIONE (dynamiczne, nie statyczne) -
+  docs/FAST_DIRECT.md.
+* **`get <go:>`/`native {go}`** - ZROBIONE, zweryfikowane end-to-end -
+  docs/GO.md.
+* **LSP hover/definition/completion** - ZROBIONE (oparte na tekscie,
+  nie AST), zweryfikowane przez JSON-RPC - docs/LSP.md.
+* **Numery linii w AST dla typechecka** - ZROBIONE jako PRZYBLIZENIE
+  (przeszukanie tekstu, nie prawdziwe pozycje z parsera - pelne AST z
+  pozycjami NADAL nie istnieje, to swiadomy kompromis). Przy okazji
+  naprawiono realna dziure (`args`/`exit`/itd. nie byly w whiteliscie
+  typechecka) i ZNALEZIONO (czesciowo naprawiono) regresje wydajnosci
+  `hackerc build` na sobie samym (~20s -> 133s, WYMAGA DALSZEGO
+  ZBADANIA w kolejnej sesji).
+* **`hack3rc/cmd/main.hcs`** - ZROBIONE dla Zakresu 0.0.1 (prosta
+  arytmetyka calkowita), zweryfikowane end-to-end przez prawdziwy
+  Cranelift JIT - docs/HACK3RC.md (do zaktualizowania o wynik).
+
+**Priorytet na kolejna sesje**: zdiagnozowac i naprawic regresje
+wydajnosci `hackerc build` (Turze 10, punkt 4) - prawdopodobnie
+nadliniowe skalowanie w `build_project`/`Discovery.resolve` przy
+wiekszej liczbie plikow/instrukcji, ujawnione przez wzrost rozmiaru
+wlasnego zrodla `hackerc` w tej sesji.
+
+Nieruszone pozostaje: statyczne linkowanie dla `fast direct`, mosty
+Rust-native dla backendow bez CPythona, prawdziwe (nie przyblizone)
+numery linii w AST, pelny zakres jezyka w `hack3rc` (dzis: tylko
+arytmetyka calkowita).
