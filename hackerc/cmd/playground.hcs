@@ -22,7 +22,7 @@ fun parse_source(source: Str) -> Program [
 !!! bledow/warningow.
 fun check_source(source: Str) -> Str [
     let program = parse_source(source)
-    let diags = check_program(program, [])
+    let diags = check_program(program, [], source.clone())
     if diags.len() == 0 [
         end "OK (0 warning(ow))"
     ]
