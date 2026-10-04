@@ -66,9 +66,22 @@ struct Signatures [
     function_names: List<Str>
 ]
 
+!!! ROZBUDOWA (async) - `true` gdy deklaracja to `async fun`.
+fun fun_decl_is_async(f: Stmt) -> Bool [
+    match f [
+        FunDecl(an, ap, ar, ab, aip, atp, aasync) -> [
+            let async_copy = aasync.clone()
+            end async_copy
+        ]
+        _ -> [
+            end false
+        ]
+    ]
+]
+
 fun fun_decl_ret_type(f: Stmt) -> Option<TypeRef> [
     match f [
-        FunDecl(name, params, ret_type, body, is_pub, type_params) -> [
+        FunDecl(name, params, ret_type, body, is_pub, type_params, name_async) -> [
             end ret_type.clone()
         ]
         _ -> [
@@ -114,7 +127,7 @@ fun collect_signatures(prog: Program) -> Signatures [
         let stmt = prog.body[i]
         let stmt_copy = stmt.clone()
         match stmt [
-            FunDecl(name, params, ret_type, body, is_pub, type_params) -> [
+            FunDecl(name, params, ret_type, body, is_pub, type_params, name_async) -> [
                 functions.insert(name.clone(), stmt_copy)
                 function_names.push(name)
             ]
@@ -140,7 +153,7 @@ fun collect_signatures(prog: Program) -> Signatures [
                     let m = impl_methods[j].clone()
                     let m_copy = m.clone()
                     match m [
-                        FunDecl(mname, mparams, mret, mbody, mis_pub, mtype_params) -> [
+                        FunDecl(mname, mparams, mret, mbody, mis_pub, mtype_params, mname_async) -> [
                             methods.insert(struct_name.clone() + "::" + mname, m_copy)
                         ]
                         _ -> [
@@ -172,7 +185,7 @@ fun collect_signatures(prog: Program) -> Signatures [
                 let rn = region_sigs.len()
                 while ri < rn [
                     let rsig = region_sigs[ri].clone()
-                    let synth_fn = FunDecl(rsig.name.clone(), rsig.params.clone(), rsig.ret_type.clone(), [], false, [])
+                    let synth_fn = FunDecl(rsig.name.clone(), rsig.params.clone(), rsig.ret_type.clone(), [], false, [], false)
                     functions.insert(rsig.name.clone(), synth_fn)
                     function_names.push(rsig.name.clone())
                     ri = ri + 1
@@ -248,6 +261,11 @@ fun types_equal(a: Option<TypeRef>, b: Option<TypeRef>) -> Bool [
                     if ta.name != tb.name [
                         end false
                     ]
+                    !! ROZBUDOWA (coroutines) - typ elementu `Chan<T>` z `chan()` jest
+                    !! nieznany statycznie (wnioskuje go rustc) - kazdy `Chan<..>` pasuje.
+                    if ta.name == "Chan" [
+                        end true
+                    ]
                     !!! REKURENCYJNE wywolanie `types_equal` (nie plytkie
                     !!! `ga.name != gb.name`) - inaczej `List<Any>` (typ
                     !!! wywnioskowany pustej listy `[]`) vs `List<Diagnostic>`
@@ -305,6 +323,19 @@ fun types_equal(a: Option<TypeRef>, b: Option<TypeRef>) -> Bool [
 !!! WYWOLANIE FUNKCJI (nie zagniezdzony match) specjalnie po to, zeby
 !!! bezpiecznie obsluzyc `Box<Expr>` przychodzacy z zewnetrznego
 !!! `match Call(callee, args)`.
+!!! ROZBUDOWA (async) - nazwa funkcji, gdy `e` to `nazwa(...)`; inaczej "".
+fun call_callee_ident(e: Expr) -> Str [
+    let e2 = e.clone()
+    match e2 [
+        Call(cc, ca) -> [
+            end expr_as_ident_name(cc.clone())
+        ]
+        _ -> [
+            end ""
+        ]
+    ]
+]
+
 fun expr_as_ident_name(e: Expr) -> Str [
     let e2 = e.clone()
     match e2 [
@@ -416,6 +447,10 @@ fun infer_ident_call_type(name: Str, env: TypeEnv) -> Option<TypeRef> [
     if name == "some" or name == "none" or name == "ok" or name == "err" or name == "dict" or name == "set" [
         end none()
     ]
+    !! ROZBUDOWA (coroutines) - `chan()`/`chan(n)` -> `Chan` (typ elementu wywnioskuje rustc).
+    if name == "chan" [
+        end some(TypeRef("Chan", none(), none()))
+    ]
     match env.sigs.functions.fetch(name) [
         Some(f) -> [
             end fun_decl_ret_type(f)
@@ -495,7 +530,7 @@ fun infer_attr_call_type(method_name: Str, target_type: Option<TypeRef>, sigs: S
             match sigs.methods.fetch(tt.name.clone() + "::" + method_name) [
                 Some(fn_stmt) -> [
                     match fn_stmt [
-                        FunDecl(fname, fparams, fret, fbody, fis_pub, ftype_params) -> [
+                        FunDecl(fname, fparams, fret, fbody, fis_pub, ftype_params, fname_async) -> [
                             end fret
                         ]
                         _ -> [
@@ -547,6 +582,24 @@ fun infer_expr_type(expr: Expr, env: TypeEnv) -> Option<TypeRef> [
         UnaryOp(op, operand) -> [
             if op == "not" [
                 end some(make_type0("Bool"))
+            ]
+            !! ROZBUDOWA (async) - `await f(x)` ma typ zwracany przez `async fun f`;
+            !! `spawn ...` daje uchwyt koroutyny (typ nieznany statycznie).
+            if op == "spawn" [
+                end none()
+            ]
+            if op == "await" [
+                let aw_name = call_callee_ident(operand.clone())
+                if aw_name != "" [
+                    match env.sigs.functions.fetch(aw_name) [
+                        Some(af) -> [
+                            end fun_decl_ret_type(af)
+                        ]
+                        None -> [
+                        ]
+                    ]
+                ]
+                end none()
             ]
             end infer_expr_type(operand, env)
         ]
@@ -710,7 +763,7 @@ fun type_opt_to_str(t: Option<TypeRef>) -> Str [
 fun main() [
     let point_fields: List<Param> = [Param("x", some(make_type0("Int")), none()), Param("y", some(make_type0("Int")), none())]
     let point_decl = StructDecl("Point", point_fields, [])
-    let make_decl = FunDecl("make", [], some(make_type0("Point")), [], false, [])
+    let make_decl = FunDecl("make", [], some(make_type0("Point")), [], false, [], false)
     let prog = Program([point_decl, make_decl])
     let sigs = collect_signatures(prog)
     let vars: Dict<Str, Option<TypeRef>> = dict()
