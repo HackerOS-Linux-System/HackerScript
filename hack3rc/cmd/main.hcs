@@ -144,7 +144,7 @@ fun find_main_fun(prog: Program) -> Option<Stmt> [
     let i = 0
     while i < prog.body.len() [
         match prog.body[i].clone() [
-            FunDecl(name, _params, _ret, _body, _is_pub, _tparams) -> [
+            FunDecl(name, _params, _ret, _body, _is_pub, _tparams, _is_async) -> [
                 if name == "main" [
                     end some(prog.body[i].clone())
                 ]
@@ -291,7 +291,7 @@ fun cmd_hack3rc_build(src_path: Str, out_dir: Str) -> Int [
             match find_main_fun(prog) [
                 Some(main_stmt) -> [
                     match main_stmt [
-                        FunDecl(_name, _params, _ret, body, _is_pub, _tparams) -> [
+                        FunDecl(_name, _params, _ret, body, _is_pub, _tparams, _is_async) -> [
                             let instrs: List<Str> = []
                             let ok = true
                             let bi = 0
