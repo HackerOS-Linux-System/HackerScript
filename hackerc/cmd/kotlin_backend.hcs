@@ -1,0 +1,500 @@
+include <ast_nodes>
+include <typeinfer>
+include <codegen>
+
+struct KtGen [
+    lines: List<Str>,
+    indent: Int,
+    errors: List<Str>
+]
+
+fun kt_type(t: TypeRef) -> Str [
+    let n = t.name.clone()
+    if n == "Int" [
+        end "Long"
+    ]
+    if n == "Float" [
+        end "Double"
+    ]
+    if n == "Str" [
+        end "String"
+    ]
+    if n == "Bool" [
+        end "Boolean"
+    ]
+    let inner = "Any"
+    match t.generic.clone() [
+        Some(g) -> [
+            inner = kt_type(g)
+        ]
+        None -> [
+        ]
+    ]
+    if n == "List" [
+        end "MutableList<" + inner + ">"
+    ]
+    if n == "Option" [
+        end inner + "?"
+    ]
+    if n == "Chan" [
+        end "HksChan<" + inner + ">"
+    ]
+    if n == "Dict" [
+        let inner2 = "Any"
+        match t.generic2.clone() [
+            Some(g2) -> [
+                inner2 = kt_type(g2)
+            ]
+            None -> [
+            ]
+        ]
+        end "MutableMap<" + inner + ", " + inner2 + ">"
+    ]
+    end n
+]
+
+fun kt_type_opt(t: Option<TypeRef>) -> Str [
+    match t [
+        Some(tt) -> [
+            end kt_type(tt)
+        ]
+        None -> [
+            end ""
+        ]
+    ]
+]
+
+fun kt_escape(s: Str) -> Str [
+    let out = ""
+    let i = 0
+    let n = s.len()
+    while i < n [
+        let c = s.char_at(i)
+        if c == "\\" [
+            out = out + "\\\\"
+        ] elif c == "\"" [
+            out = out + "\\\""
+        ] elif c == "$" [
+            out = out + "\\$"
+        ] elif c == "\n" [
+            out = out + "\\n"
+        ] elif c == "\t" [
+            out = out + "\\t"
+        ] elif c == "\r" [
+            out = out + "\\r"
+        ] else [
+            out = out + c
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+!!! Wywolanie metody `cel.metoda(args)` -> tekst Kotlina ("" gdy `callee` nie jest Attr).
+!!! (osobna funkcja: `Attr` trzyma `Box<Expr>`, dopasowanie robimy tu, nie w kt_call).
+fun kt_method_text(callee: Expr, args: List<Expr>) -> Str [
+    let c2 = callee.clone()
+    match c2 [
+        Attr(target, m) -> [
+            let t = kt_expr(target)
+            if m == "push" [
+                end t + ".add(" + kt_join(args.clone()) + ")"
+            ]
+            if m == "len" [
+                end "hksLen(" + t + ")"
+            ]
+            if m == "to_string" [
+                end "(" + t + ").toString()"
+            ]
+            if m == "clone" [
+                end t
+            ]
+            end t + "." + m + "(" + kt_join(args.clone()) + ")"
+        ]
+        _ -> [
+            end ""
+        ]
+    ]
+]
+
+fun kt_join(items: List<Expr>) -> Str [
+    let out = ""
+    let i = 0
+    while i < items.len() [
+        if i > 0 [
+            out = out + ", "
+        ]
+        out = out + kt_expr(items[i].clone())
+        i = i + 1
+    ]
+    end out
+]
+
+fun kt_call(callee: Expr, args: List<Expr>) -> Str [
+    let name = expr_as_ident_name(callee.clone())
+    if name == "log" [
+        end "println(" + kt_join(args) + ")"
+    ]
+    if name == "chan" [
+        if args.len() == 0 [
+            end "HksChan(1L)"
+        ]
+        end "HksChan(" + kt_expr(args[0].clone()) + ")"
+    ]
+    if name == "some" and args.len() == 1 [
+        end "(" + kt_expr(args[0].clone()) + ")"
+    ]
+    if name == "none" [
+        end "null"
+    ]
+    if name != "" [
+        end name + "(" + kt_join(args) + ")"
+    ]
+    let mt = kt_method_text(callee.clone(), args.clone())
+    if mt != "" [
+        end mt
+    ]
+    end "(" + kt_expr(callee) + ")(" + kt_join(args) + ")"
+]
+
+fun kt_expr(e: Expr) -> Str [
+    let e2 = e.clone()
+    match e2 [
+        NumberLit(v) -> [
+            if str_contains_substring(v.clone(), ".") [
+                end v
+            ]
+            end v + "L"
+        ]
+        StringLit(v, is_doc) -> [
+            end "\"" + kt_escape(v) + "\""
+        ]
+        BoolLit(b) -> [
+            if b [
+                end "true"
+            ]
+            end "false"
+        ]
+        NullLit -> [
+            end "null"
+        ]
+        IdentExpr(nm) -> [
+            end nm
+        ]
+        ListLit(items) -> [
+            end "mutableListOf(" + kt_join(items) + ")"
+        ]
+        BinOp(op, l, r) -> [
+            let kop = op.clone()
+            if op == "and" [
+                kop = "&&"
+            ]
+            if op == "or" [
+                kop = "||"
+            ]
+            end "(" + kt_expr(l) + " " + kop + " " + kt_expr(r) + ")"
+        ]
+        UnaryOp(op, operand) -> [
+            if op == "not" [
+                end "!(" + kt_expr(operand) + ")"
+            ]
+            if op == "await" [
+                end "hksAwait(" + kt_expr(operand) + ")"
+            ]
+            if op == "spawn" [
+                end "java.util.concurrent.CompletableFuture.supplyAsync { " + kt_expr(operand) + " }"
+            ]
+            end op + kt_expr(operand)
+        ]
+        Call(callee, args) -> [
+            end kt_call(callee, args)
+        ]
+        Index(target, idx) -> [
+            end kt_expr(target) + "[(" + kt_expr(idx) + ").toInt()]"
+        ]
+        Attr(target, nm) -> [
+            end kt_expr(target) + "." + nm
+        ]
+        Cast(inner, ty) -> [
+            let kt = kt_type(ty)
+            if kt == "String" [
+                end "(" + kt_expr(inner) + ").toString()"
+            ]
+            end "(" + kt_expr(inner) + ").to" + kt + "()"
+        ]
+        _ -> [
+            end "TODO_unsupported_expr()"
+        ]
+    ]
+]
+
+impl KtGen [
+    fun pad(self) -> Str [
+        let out = ""
+        let i = 0
+        while i < self.indent [
+            out = out + "    "
+            i = i + 1
+        ]
+        end out
+    ]
+
+    fun emit(self, line: Str) [
+        self.lines.push(self.pad() + line)
+    ]
+
+    fun fail(self, what: Str) [
+        self.errors.push("lang:kotlin: " + what + " - nieobslugiwane w backendzie Kotlin (eksperymentalny)")
+    ]
+
+    fun block(self, body: List<Stmt>) [
+        self.indent = self.indent + 1
+        let i = 0
+        while i < body.len() [
+            self.stmt(body[i].clone())
+            i = i + 1
+        ]
+        self.indent = self.indent - 1
+    ]
+
+    fun params_text(self, params: List<Param>) -> Str [
+        let out = ""
+        let i = 0
+        while i < params.len() [
+            let p = params[i].clone()
+            if i > 0 [
+                out = out + ", "
+            ]
+            out = out + p.name.clone() + ": " + kt_type_opt(p.type_ref.clone())
+            match p.default_expr.clone() [
+                Some(d) -> [
+                    out = out + " = " + kt_expr(d)
+                ]
+                None -> [
+                ]
+            ]
+            i = i + 1
+        ]
+        end out
+    ]
+
+    fun stmt(self, node: Stmt) [
+        let s = node.clone()
+        match s [
+            LetStmt(name, ty, init, is_const) -> [
+                let kw = "var "
+                if is_const [
+                    kw = "val "
+                ]
+                let line = kw + name.clone()
+                let tt = kt_type_opt(ty.clone())
+                if tt != "" [
+                    line = line + ": " + tt
+                ]
+                match init [
+                    Some(v) -> [
+                        line = line + " = " + kt_expr(v)
+                    ]
+                    None -> [
+                        self.fail("`let " + name.clone() + "` bez wartosci poczatkowej")
+                    ]
+                ]
+                self.emit(line)
+            ]
+            AssignStmt(target, op, value) -> [
+                self.emit(kt_expr(target) + " " + op + " " + kt_expr(value))
+            ]
+            FunDecl(name, params, ret, body, is_pub, tparams, is_async) -> [
+                let head = "fun " + name.clone() + "(" + self.params_text(params) + ")"
+                let rt = kt_type_opt(ret.clone())
+                if rt != "" [
+                    head = head + ": " + rt
+                ]
+                self.emit(head + " {")
+                self.block(body)
+                self.emit("}")
+            ]
+            IfStmt(cond, body, elifs, else_body) -> [
+                self.emit("if (" + kt_expr(cond) + ") {")
+                self.block(body)
+                let i = 0
+                while i < elifs.len() [
+                    let arm = elifs[i].clone()
+                    self.emit("} else if (" + kt_expr(arm.cond.clone()) + ") {")
+                    self.block(arm.body.clone())
+                    i = i + 1
+                ]
+                match else_body [
+                    Some(eb) -> [
+                        self.emit("} else {")
+                        self.block(eb)
+                    ]
+                    None -> [
+                    ]
+                ]
+                self.emit("}")
+            ]
+            WhileStmt(cond, body) -> [
+                self.emit("while (" + kt_expr(cond) + ") {")
+                self.block(body)
+                self.emit("}")
+            ]
+            ForStmt(var, iterable, body) -> [
+                let it_text = kt_expr(iterable.clone())
+                let it_name = ""
+                let it_args: List<Expr> = []
+                match iterable.clone() [
+                    Call(rc, ra) -> [
+                        it_name = expr_as_ident_name(rc.clone())
+                        it_args = ra
+                    ]
+                    _ -> [
+                    ]
+                ]
+                if it_name == "range" and it_args.len() == 2 [
+                    it_text = "(" + kt_expr(it_args[0].clone()) + " until " + kt_expr(it_args[1].clone()) + ")"
+                ]
+                self.emit("for (" + var + " in " + it_text + ") {")
+                self.block(body)
+                self.emit("}")
+            ]
+            ReturnStmt(val) -> [
+                match val [
+                    Some(v) -> [
+                        self.emit("return " + kt_expr(v))
+                    ]
+                    None -> [
+                        self.emit("return")
+                    ]
+                ]
+            ]
+            BreakStmt -> [
+                self.emit("break")
+            ]
+            ContinueStmt -> [
+                self.emit("continue")
+            ]
+            ExprStmt(e) -> [
+                self.emit(kt_expr(e))
+            ]
+            StructDecl(name, fields, derives) -> [
+                let fl = ""
+                let i = 0
+                while i < fields.len() [
+                    let f = fields[i].clone()
+                    if i > 0 [
+                        fl = fl + ", "
+                    ]
+                    fl = fl + "var " + f.name.clone() + ": " + kt_type_opt(f.type_ref.clone())
+                    i = i + 1
+                ]
+                self.emit("data class " + name + "(" + fl + ")")
+            ]
+            MatchStmt(subject, arms) -> [
+                let tmp = "__m" + self.indent.to_string()
+                self.emit("val " + tmp + " = " + kt_expr(subject))
+                let i = 0
+                while i < arms.len() [
+                    let arm = arms[i].clone()
+                    if arm.variant == "Some" [
+                        self.emit("if (" + tmp + " != null) {")
+                        self.indent = self.indent + 1
+                        if arm.binds.len() > 0 [
+                            self.emit("val " + arm.binds[0].clone() + " = " + tmp)
+                        ]
+                        self.indent = self.indent - 1
+                        self.block(arm.body.clone())
+                        self.emit("}")
+                    ] elif arm.variant == "None" [
+                        self.emit("if (" + tmp + " == null) {")
+                        self.block(arm.body.clone())
+                        self.emit("}")
+                    ] else [
+                        self.fail("`match` na wariancie '" + arm.variant.clone() + "' (tylko Some/None)")
+                    ]
+                    i = i + 1
+                ]
+            ]
+            GetImportStmt(src, nm, ver, det) -> [
+                if src != "std" and src != "core" [
+                    self.fail("`get <" + src + ":" + nm + ">`")
+                ]
+            ]
+            IncludeStmt(p) -> [
+            ]
+            UsingStmt(v) -> [
+            ]
+            UseStmt(k, v) -> [
+            ]
+            GcPragma(g) -> [
+            ]
+            EnumDecl(nm, vs, ds) -> [
+                self.fail("`enum " + nm + "`")
+            ]
+            ImplDecl(nm, ms, ds) -> [
+                self.fail("`impl " + nm + "`")
+            ]
+            RegionBlock(sigs) -> [
+                self.fail("`region [ ... ]` (FFI)")
+            ]
+            DirectBlock(ls) -> [
+                self.fail("`native`/direct block")
+            ]
+            ManualBlock(b) -> [
+                self.fail("`manual` block")
+            ]
+        ]
+    ]
+]
+
+fun kt_prelude(body: Str) -> Str [
+    let out = ""
+    if str_contains_substring(body.clone(), "HksChan") [
+        out = out + "class HksChan<T>(cap: Long) {\n"
+        out = out + "    private val q = java.util.concurrent.LinkedBlockingQueue<Any>(if (cap < 1) 1 else cap.toInt())\n"
+        out = out + "    private val eof = Any()\n"
+        out = out + "    fun send(v: T): Boolean { q.put(v as Any); return true }\n"
+        out = out + "    @Suppress(\"UNCHECKED_CAST\")\n"
+        out = out + "    fun recv(): T? { val x = q.take(); if (x === eof) { q.put(eof); return null }; return x as T }\n"
+        out = out + "    fun close() { q.put(eof) }\n"
+        out = out + "    fun clone(): HksChan<T> = this\n"
+        out = out + "}\n\n"
+    ]
+    if str_contains_substring(body.clone(), "hksAwait") [
+        out = out + "fun <T> hksAwait(f: java.util.concurrent.CompletableFuture<T>): T = f.get()\n"
+        out = out + "fun <T> hksAwait(v: T): T = v\n\n"
+    ]
+    if str_contains_substring(body.clone(), "hksLen") [
+        out = out + "fun hksLen(s: String): Long = s.length.toLong()\n"
+        out = out + "fun <T> hksLen(l: List<T>): Long = l.size.toLong()\n"
+        out = out + "fun <K, V> hksLen(m: Map<K, V>): Long = m.size.toLong()\n\n"
+    ]
+    end out
+]
+
+!!! Punkt wejscia: `Program` -> tekst `Main.kt` albo blad (lista nieobslugiwanych
+!!! konstrukcji, po jednej w linii).
+fun transpile_kotlin(prog: Program) -> Result<Str, Str> [
+    let g = KtGen([], 0, [])
+    let i = 0
+    while i < prog.body.len() [
+        g.stmt(prog.body[i].clone())
+        i = i + 1
+    ]
+    if g.errors.len() > 0 [
+        let msg = ""
+        let k = 0
+        while k < g.errors.len() [
+            msg = msg + g.errors[k].clone() + "\n"
+            k = k + 1
+        ]
+        end err(msg)
+    ]
+    let body = ""
+    let j = 0
+    while j < g.lines.len() [
+        body = body + g.lines[j].clone() + "\n"
+        j = j + 1
+    ]
+    end ok("// Wygenerowane przez hackerc (use <lang:kotlin>, eksperymentalne)\n\n" + kt_prelude(body.clone()) + body)
+]
