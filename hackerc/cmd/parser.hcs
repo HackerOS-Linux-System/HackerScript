@@ -170,6 +170,27 @@ impl Parser [
             if kw == "get" [
                 end self.parse_get_import()
             ]
+            !! ROZBUDOWA - `use <lang:kotlin>`/`use <crosscompile>`/`use <arc:...>`
+            if kw == "use" [
+                end self.parse_use_directive()
+            ]
+            !! ROZBUDOWA (async) - `async fun nazwa(...) [ ... ]`
+            if kw == "async" [
+                self.advance()
+                if self.check(Keyword, some("pub")) [
+                    self.advance()
+                    let inner_a = self.parse_fun_ex(true)
+                    match inner_a [
+                        FunDecl(an, ap, ar, ab, aip, atp, aia) -> [
+                            end FunDecl(an, ap, ar, ab, true, atp, aia)
+                        ]
+                        _ -> [
+                            end inner_a
+                        ]
+                    ]
+                ]
+                end self.parse_fun_ex(true)
+            ]
             if kw == "include" [
                 end self.parse_include()
             ]
@@ -183,8 +204,8 @@ impl Parser [
                 self.advance()
                 let inner = self.parse_statement()
                 match inner [
-                    FunDecl(name, params, ret_type, body, is_pub, type_params) -> [
-                        end FunDecl(name, params, ret_type, body, true, type_params)
+                    FunDecl(name, params, ret_type, body, is_pub, type_params, fn_is_async) -> [
+                        end FunDecl(name, params, ret_type, body, true, type_params, fn_is_async)
                     ]
                     _ -> [
                         end inner
@@ -253,6 +274,27 @@ impl Parser [
             end AssignStmt(expr, op, value)
         ]
         end ExprStmt(expr)
+    ]
+
+    !!! ROZBUDOWA - `use <klucz>` albo `use <klucz:wartosc[::wiecej]>`.
+    !!! Znane klucze (walidowane w typecheck.hcs/project.hcs, nie tu):
+    !!! `lang:kotlin`, `crosscompile`, `arc:<architektura>`.
+    fun parse_use_directive(self) -> Stmt [
+        self.expect(Keyword, some("use"))
+        self.expect(LAngle, none())
+        let key = self.read_angle_segment()
+        let value: Option<Str> = none()
+        if self.check(Colon, none()) [
+            self.advance()
+            let v = self.read_angle_segment()
+            while self.check(DColon, none()) [
+                self.advance()
+                v = v + "::" + self.read_angle_segment()
+            ]
+            value = some(v)
+        ]
+        self.expect(RAngle, none())
+        end UseStmt(key, value)
     ]
 
     fun parse_using(self) -> Stmt [
@@ -447,6 +489,11 @@ impl Parser [
     ]
 
     fun parse_fun(self) -> Stmt [
+        end self.parse_fun_ex(false)
+    ]
+
+    !! ROZBUDOWA (async) - wspolna implementacja dla `fun` i `async fun`.
+    fun parse_fun_ex(self, is_async: Bool) -> Stmt [
         self.expect(Keyword, some("fun"))
         let name = self.expect(Ident, none()).value
         let type_params = self.parse_type_params()
@@ -457,7 +504,7 @@ impl Parser [
             ret_type = some(self.parse_type())
         ]
         let body = self.parse_block()
-        end FunDecl(name, params, ret_type, body, false, type_params)
+        end FunDecl(name, params, ret_type, body, false, type_params, is_async)
     ]
 
     fun parse_if(self) -> Stmt [
@@ -660,11 +707,16 @@ impl Parser [
                     self.advance()
                     is_pub_method = true
                 ]
-                let m = self.parse_fun()
+                let method_async = false
+                if self.check(Keyword, some("async")) [
+                    self.advance()
+                    method_async = true
+                ]
+                let m = self.parse_fun_ex(method_async)
                 if is_pub_method [
                     match m [
-                        FunDecl(name, params, ret_type, body, mip, type_params2) -> [
-                            m = FunDecl(name, params, ret_type, body, true, type_params2)
+                        FunDecl(name, params, ret_type, body, mip, type_params2, m_is_async) -> [
+                            m = FunDecl(name, params, ret_type, body, true, type_params2, m_is_async)
                         ]
                         _ -> [
                         ]
@@ -774,6 +826,18 @@ impl Parser [
     ]
 
     fun parse_unary(self) -> Expr [
+        !! ROZBUDOWA (async/coroutines) - `await wyrazenie` i `spawn wywolanie`
+        !! (kodowane jako `UnaryOp("await"|"spawn", ...)` - bez nowych wariantow Expr).
+        if self.check(Keyword, some("await")) [
+            self.advance()
+            let awaited = self.parse_unary()
+            end UnaryOp("await", awaited)
+        ]
+        if self.check(Keyword, some("spawn")) [
+            self.advance()
+            let spawned = self.parse_unary()
+            end UnaryOp("spawn", spawned)
+        ]
         if self.check(Op, none()) and (self.cur().value == "-" or self.cur().value == "+") [
             let op = self.advance().value
             let operand = self.parse_unary()
