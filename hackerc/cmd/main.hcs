@@ -7,6 +7,7 @@ include <transpiler>
 include <project>
 include <hlib>
 include <lsp>
+include <kotlin_backend>
 get <std:io> import <file_readable>
 get <std:term> import <c_bold_green::c_bold_red::c_bold_cyan::c_bold_yellow::c_red::c_gray::print_progress_line>
 
@@ -118,6 +119,51 @@ fun cmd_check(src_path: Str) -> Int [
     ]
 ]
 
+!!! ROZBUDOWA 0.5 - `hackerc kotlin <plik.hcs> [-o Main.kt]`: backend Kotlina
+!!! (`use <lang:kotlin>`, eksperymentalny - patrz kotlin_backend.hcs).
+fun cmd_kotlin(src_path: Str, out_path: Str) -> Int [
+    if not file_readable(src_path.clone()) [
+        elog(c_red("hackerc:") + " nie znaleziono pliku " + src_path)
+        end 1
+    ]
+    match read_file(src_path.clone()) [
+        Ok(source) -> [
+            let parse_result = parse_with_direct_checked(source.clone(), src_path.clone())
+            if parse_result.errors.len() > 0 [
+                log(render_many(source, src_path.clone(), parse_result.errors.clone()))
+                end 1
+            ]
+            match transpile_kotlin(parse_result.program) [
+                Ok(kt) -> [
+                    let dest = out_path.clone()
+                    if dest == "" [
+                        dest = "Main.kt"
+                    ]
+                    match write_file(dest.clone(), kt) [
+                        Ok(_w) -> [
+                            log(c_bold_green("hackerc kotlin:") + " " + dest)
+                            end 0
+                        ]
+                        Err(e) -> [
+                            elog(c_red("hackerc:") + " " + dest + ": " + e)
+                            end 1
+                        ]
+                    ]
+                ]
+                Err(msgs) -> [
+                    elog(c_red("hackerc kotlin:") + " " + src_path)
+                    elog(msgs)
+                    end 1
+                ]
+            ]
+        ]
+        Err(e) -> [
+            elog(c_red("hackerc:") + " " + src_path + ": " + e)
+            end 1
+        ]
+    ]
+]
+
 !!! `hackerc lint <plik>` - tylko warningi (podzbior `check`). Parytet
 !!! z `cmd_lint`.
 fun cmd_lint(src_path: Str) -> Int [
@@ -221,7 +267,7 @@ fun cmd_emit_module(src_path: Str, out_path: Str, module_name: Str) -> Int [
 !!! o braku argv) - `out_dir`/`out_dir + "/src"` MUSZA JUZ ISTNIEC,
 !!! patrz to samo ograniczenie udokumentowane przy `build_project` w
 !!! project.hcs. `vira_root` DODANE w tej rundzie (patrz
-!!! `project.hcs::find_vira_cache_root`) - `none()` = auto-wykrywanie.
+!!! `project.hcs::find_bit_cache_root`) - `none()` = auto-wykrywanie.
 !!! ROZBUDOWA (ta runda, patrz docs/MULTI_VERSION.md) - `version_binaries`
 !!! na koncu (domyslnie `dict()` u wywolania bez `--version-map` -
 !!! pelna zgodnosc wsteczna). Przekazywane do `collect_project_signatures`/
@@ -790,6 +836,24 @@ fun main() [
         exit(cmd_emit_module(src_em, out_em, mod_name_em))
     ]
 
+    if first == "kotlin" [
+        let _rest_k = argv.remove(0)
+        let src_k = first_positional(argv, ["-o", "--output"])
+        if src_k == "" [
+            log("hackerc kotlin: brak wymaganego argumentu 'source'")
+            exit(1)
+        ]
+        let out_k = ""
+        match find_flag_value(argv, "-o", "--output") [
+            Some(v) -> [
+                out_k = v
+            ]
+            None -> [
+            ]
+        ]
+        exit(cmd_kotlin(src_k, out_k))
+    ]
+
     if first == "check" or first == "lint" or first == "build" or first == "fmt" [
         let _rest = argv.remove(0)
         let value_flags: List<Str> = ["-o", "--output", "--crate-name", "--libs-root", "--bootstrap-root", "--bin-name"]
@@ -849,10 +913,10 @@ fun main() [
             None -> [
             ]
         ]
-        !! DODANE w tej rundzie (patrz project.hcs::find_vira_cache_root) -
+        !! DODANE w tej rundzie (patrz project.hcs::find_bit_cache_root) -
         !! analogiczne do --libs-root/--bootstrap-root, none() = auto-wykrywanie.
         let vira_root: Option<Str> = none()
-        match find_flag_value(argv, "", "--vira-root") [
+        match find_flag_value(argv, "", "--bit-root") [
             Some(v) -> [
                 vira_root = some(v)
             ]
