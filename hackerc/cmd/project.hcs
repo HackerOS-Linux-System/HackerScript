@@ -1,3 +1,4 @@
+include <async_rt>
 include <ast_nodes>
 include <lexer>
 include <parser>
@@ -270,11 +271,11 @@ fun find_bootstrap_root(start: Str) -> Option<Str> [
 !!! biblioteki C/C++ budowanej przez `cc`, rowniez wywolywanej przez
 !!! `get <extern:...> use <...>` + `region [ ... ]`, NIGDY jako .hcs
 !!! do sparsowania - stad rowniez pomijane w kolejce ponizej.
-fun find_vira_cache_root(start: Str) -> Option<Str> [
+fun find_bit_cache_root(start: Str) -> Option<Str> [
     let d = to_absolute_dir(start)
     let prev_d = "\0no-such-dir"
     while d != prev_d [
-        let candidate = path_join_safe(d.clone(), "cache/libs/vira")
+        let candidate = path_join_safe(d.clone(), "cache/libs/bit")
         if dir_exists(candidate.clone()) [
             end some(candidate)
         ]
@@ -294,7 +295,7 @@ fun find_vira_cache_root(start: Str) -> Option<Str> [
 !!! typu "git" MUSZA wiec miec `mod.hcs` w korzeniu repo, zeby byly
 !!! importowalne jako `get <vira:nazwa>` bez `::` (udokumentowana
 !!! konwencja, patrz docs/ROADMAP.md i naglowek vira.hcs).
-fun vira_module_file_path(vira_root: Str, name: Str, version: Option<Str>) -> Str [
+fun bit_module_file_path(vira_root: Str, name: Str, version: Option<Str>) -> Str [
     let path = vira_root + "/" + name + "/"
     match version [
         Some(v) -> [
@@ -376,7 +377,7 @@ fun find_workspace_root(start: Str, member_name: Str) -> Option<Str> [
 ]
 
 !!! `<workspace_root>/<member>/lib/<wersja-jako-plik>.hcs` - analog
-!!! `vira_module_file_path`, dla `get <work:member[::plik]>`. Brak `::`
+!!! `bit_module_file_path`, dla `get <work:member[::plik]>`. Brak `::`
 !!! (samo `get <work:member>`) laduje w `<member>/lib/mod.hcs` -
 !!! DOKLADNIE parytet z tym, jak `get <std:nazwa>` bez `::` lądowałoby
 !!! w `libs/std/lib/mod.hcs`.
@@ -827,7 +828,7 @@ impl Discovery [
     !!! Faza 1 (discovery): parsuje `entry` + rekurencyjnie kazdy
     !!! zaimportowany modul `std`/`core`/`selfhost`/`vira`/`work` - BFS
     !!! po `GetImportStmt`. Parytet z `_resolve_project_files`.
-    !!! `vira_root` DODANE w tej rundzie (patrz `find_vira_cache_root`).
+    !!! `vira_root` DODANE w tej rundzie (patrz `find_bit_cache_root`).
     !!! `work` (NOWOSC 0.4, patrz `find_workspace_root`) NIE dostaje
     !!! wlasnego parametru "root" tutaj - w przeciwienstwie do
     !!! `vira_root`/`libs_root`/`bootstrap_root` (policzonych RAZ dla
@@ -866,14 +867,14 @@ impl Discovery [
                                     self.warnings.push("get <selfhost:" + iname.clone() + "> - nie znaleziono katalogu bootstrap/hackerc-self/ - modul " + flat.clone() + " nie zostanie zbudowany")
                                 ]
                             ]
-                        ] elif isource == "vira" [
+                        ] elif isource == "bit" [
                             match vira_root.clone() [
                                 Some(vr) -> [
-                                    mod_file = vira_module_file_path(vr, iname.clone(), iversion.clone())
+                                    mod_file = bit_module_file_path(vr, iname.clone(), iversion.clone())
                                     have_root = true
                                 ]
                                 None -> [
-                                    self.warnings.push("get <vira:" + iname.clone() + "> - nie znaleziono katalogu cache/libs/vira/ - uruchom `virus install vira " + iname.clone() + "` (modul " + flat.clone() + " nie zostanie zbudowany)")
+                                    self.warnings.push("get <bit:" + iname.clone() + "> - nie znaleziono katalogu cache/libs/bit/ - uruchom `bit install " + iname.clone() + "` albo `virus install bit " + iname.clone() + "` (modul " + flat.clone() + " nie zostanie zbudowany)")
                                 ]
                             ]
                         ] elif isource == "work" [
@@ -909,7 +910,7 @@ impl Discovery [
                                     ]
                                 ]
                                 None -> [
-                                    self.warnings.push("get <hlib:" + iname.clone() + "> - nie znaleziono .hlib. Sprawdzone: <vira>/" + iname.clone() + "/" + iname.clone() + ".hlib, hlibs/" + iname.clone() + ".hlib (w projekcie i katalogach nadrzednych), libs/hlib/" + iname.clone() + ".hlib, /usr/lib/HackerOS/HackerScript/hlibs/" + iname.clone() + ".hlib. Zbuduj jeden przez `hackerc build --hlib " + iname.clone() + ".hcs`.")
+                                    self.warnings.push("get <hlib:" + iname.clone() + "> - nie znaleziono .hlib. Sprawdzone: <bit>/" + iname.clone() + "/" + iname.clone() + ".hlib, hlibs/" + iname.clone() + ".hlib (w projekcie i katalogach nadrzednych), libs/hlib/" + iname.clone() + ".hlib, /usr/lib/HackerOS/HackerScript/hlibs/" + iname.clone() + ".hlib. Zbuduj jeden przez `hackerc build --hlib " + iname.clone() + ".hcs`.")
                                 ]
                             ]
                         ] else [
@@ -1016,12 +1017,12 @@ impl Discovery [
 !!! `base_dir` (katalog pliku `prog` pochodzi z) jest doczepiany do
 !!! kazdego elementu - potrzebny pozniej WYLACZNIE dla `IncludeStmt`.
 !!! `vira` DODANE w tej rundzie - TYLKO dla bibliotek Vira typu "git"
-!!! (patrz `find_vira_cache_root`) - `static-lib`/`shared-lib`/
+!!! (patrz `find_bit_cache_root`) - `static-lib`/`shared-lib`/
 !!! `rust-lib` (ani `get <c:...>`/`get <cpp:...>`, DODANE w 0.3) nie sa
 !!! .hcs zrodlem, wiec nigdy nie trafiaja tutaj (nie ma dla nich
 !!! zadnego pliku do sparsowania - sa uzywane przez
 !!! `get <extern:nazwa> use <tryb>` + `region [ ... ]` po
-!!! podlinkowaniu, patrz komentarz przy `find_vira_cache_root`
+!!! podlinkowaniu, patrz komentarz przy `find_bit_cache_root`
 !!! powyzej). `hlib` DODANE w 0.4 (patrz `hlib.hcs` i
 !!! `find_hlib_file_path` powyzej) - w odroznieniu od `vira`/`c`/`cpp`
 !!! ZAWSZE konczy sie plikiem `.hcs` do sparsowania (badz to prawdziwym
@@ -1056,7 +1057,7 @@ fun collect_module_imports(prog: Program, base_dir: Str, queue: List<QueueItem>,
         let s = prog.body[i].clone()
         match s.clone() [
             GetImportStmt(source, name, version, details) -> [
-                if source == "std" or source == "core" or source == "selfhost" or source == "virus" or source == "vira" or source == "hlib" or source == "work" [
+                if source == "std" or source == "core" or source == "selfhost" or source == "virus" or source == "bit" or source == "hlib" or source == "work" [
                     queue.push(QueueItem(s, base_dir.clone(), work_member.clone()))
                 ]
             ]
@@ -1083,7 +1084,7 @@ struct ProjectSignatures [
 !!! wydzielona do samodzielnego uzycia - parytet z
 !!! `collect_project_signatures`. `libs_root`/`bootstrap_root`/
 !!! `vira_root` `none()` -> auto-wykrywanie przez
-!!! `find_libs_root`/`find_bootstrap_root`/`find_vira_cache_root`
+!!! `find_libs_root`/`find_bootstrap_root`/`find_bit_cache_root`
 !!! zaczynajac od `entry`.
 !!!
 !!! ROZBUDOWA (ta runda, patrz docs/MULTI_VERSION.md) - `own_version`/
@@ -1112,7 +1113,7 @@ fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_roo
         Some(_v) -> [
         ]
         None -> [
-            vr = find_vira_cache_root(entry.clone())
+            vr = find_bit_cache_root(entry.clone())
         ]
     ]
 
@@ -1143,7 +1144,7 @@ fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_roo
         while si < sn [
             let stmt = df.program.body[si].clone()
             match stmt.clone() [
-                FunDecl(name, params, ret, body, is_pub, type_params) -> [
+                FunDecl(name, params, ret, body, is_pub, type_params, name_async) -> [
                     functions.insert(name.clone(), stmt)
                     function_names.push(name)
                 ]
@@ -1161,7 +1162,7 @@ fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_roo
                     while mi < mn [
                         let m = impl_methods[mi].clone()
                         match m.clone() [
-                            FunDecl(mname, mparams, mret, mbody, mis_pub, mtype_params) -> [
+                            FunDecl(mname, mparams, mret, mbody, mis_pub, mtype_params, mname_async) -> [
                                 let key = struct_name.clone() + "::" + mname.clone()
                                 methods.insert(key.clone(), m)
                                 method_names.push(key)
@@ -1302,6 +1303,8 @@ fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, ne
         !!! potrzeby jednego srodowiska.
         if deps_names[i] == "ureq" [
             deps_lines = deps_lines + deps_names[i] + " = { version = \"" + deps_versions[i] + "\", features = [\"native-certs\"] }\n"
+        ] elif deps_names[i] == "tokio" [
+            deps_lines = deps_lines + "tokio = { version = \"" + deps_versions[i] + "\", features = [\"rt-multi-thread\", \"sync\", \"time\"] }\n"
         ] elif deps_names[i] == "ed25519-dalek" [
             deps_lines = deps_lines + deps_names[i] + " = { version = \"" + deps_versions[i] + "\", features = [\"rand_core\"] }\n"
         ] else [
@@ -1319,6 +1322,12 @@ fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, ne
     if needs_native_cpp [
         build_deps_section = "\n[build-dependencies]\ncc = \"1\"\n"
     ]
+    !! ROZBUDOWA 0.5 ("kompilacja tak dobra jak Zig") - profil `release`:
+    !! `lto = "fat"` + `codegen-units = 1` (pelna optymalizacja miedzymodulowa,
+    !! odpowiednik `-OReleaseFast` Zig), `strip = true` (male binarki),
+    !! `opt-level = 3`. `panic` zostaje domyslne (unwind) - `catch_unwind`/
+    !! hot-reload/pyo3 tego wymagaja. Cross-kompilacja: patrz virus/cmd/crossbuild.hcs.
+    build_deps_section = build_deps_section + "\n[profile.release]\nopt-level = 3\nlto = \"fat\"\ncodegen-units = 1\nstrip = true\n"
     !! NOWOSC 0.4 - `[lib]` (cdylib+rlib, `src/lib.rs`) zamiast `[[bin]]`
     !! (`src/main.rs`) gdy ten crate ma co najmniej jedna funkcje
     !! `@wasm_export` - patrz `CARGO_TOML_WASM_MID` powyzej i
@@ -1397,6 +1406,42 @@ fun insert_mod_declarations(entry_rust: Str, mod_names: List<Str>) -> Str [
             joined = joined + "\n"
         ]
         m = m + 1
+    ]
+    end joined
+]
+
+!!! ROZBUDOWA - jak `insert_mod_declarations`, ale wstawia DOWOLNY naglowek
+!!! (np. `use ...;`) PO wiodacych liniach `//`/`#![...]`/pustych (E0753).
+fun insert_raw_header(text: Str, header: Str) -> Str [
+    let lines = split_lines_local(text)
+    let insert_at = 0
+    let j = 0
+    let ln = lines.len()
+    let scanning = true
+    while j < ln and scanning [
+        let line = lines[j]
+        let is_leading = starts_with(line.clone(), "//") or starts_with(line.clone(), "#![") or trim_str(line.clone()) == ""
+        if is_leading [
+            insert_at = j + 1
+        ] else [
+            scanning = false
+        ]
+        j = j + 1
+    ]
+    let joined = ""
+    let k = 0
+    while k < ln [
+        if k == insert_at [
+            joined = joined + header + "\n"
+        ]
+        joined = joined + lines[k]
+        if k < ln - 1 [
+            joined = joined + "\n"
+        ]
+        k = k + 1
+    ]
+    if insert_at >= ln [
+        joined = joined + "\n" + header + "\n"
     ]
     end joined
 ]
@@ -1482,7 +1527,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
         Some(_v) -> [
         ]
         None -> [
-            vr = find_vira_cache_root(entry.clone())
+            vr = find_bit_cache_root(entry.clone())
         ]
     ]
 
@@ -1525,6 +1570,10 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     let native_kotlin_names: List<Str> = []
     !! DODANE (Tura 10, patrz docs/GO.md) - `native {go}`/`get <go:...>`.
     let needs_native_go = false
+    !! ROZBUDOWA (async/coroutines) - agregacja `TranspileResult::needs_async_rt`.
+    let needs_async_rt = false
+    !! ROZBUDOWA (use <...>) - zebrane dyrektywy `use <klucz[:wartosc]>` z calego projektu.
+    let use_lines: List<Str> = []
     let native_go_sources: Dict<Str, Str> = dict()
     let native_go_names: List<Str> = []
     let go_import_paths: List<Str> = []
@@ -1666,6 +1715,9 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
         if r.needs_native_go [
             needs_native_go = true
         ]
+        if r.needs_async_rt [
+            needs_async_rt = true
+        ]
         let ngi = 0
         let ngn = r.native_go_order.len()
         while ngi < ngn [
@@ -1748,6 +1800,32 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
                         ]
                     ]
                 ]
+                UseStmt(use_k, use_v) -> [
+                    let use_val = ""
+                    match use_v.clone() [
+                        Some(uvv) -> [
+                            use_val = uvv
+                        ]
+                        None -> [
+                        ]
+                    ]
+                    if use_k == "lang" or use_k == "crosscompile" or use_k == "arc" [
+                        let use_line = use_k.clone() + "\t" + use_val
+                        let use_dup = false
+                        let udi = 0
+                        while udi < use_lines.len() [
+                            if use_lines[udi] == use_line [
+                                use_dup = true
+                            ]
+                            udi = udi + 1
+                        ]
+                        if not use_dup [
+                            use_lines.push(use_line)
+                        ]
+                    ] else [
+                        warnings.push(df.path.clone() + ": nieznana dyrektywa `use <" + use_k + ">` - znane: lang:kotlin, crosscompile, arc:<architektura>")
+                    ]
+                ]
                 _ -> [
                 ]
             ]
@@ -1771,6 +1849,9 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
             !! bin (tam korzen ma wlasny `fn main`, ktory i tak przeslania
             !! glob).
             let mod_rust = str_replace(r.rust_code, "\npub fn main() {", "\nfn main() {")
+            if r.needs_async_rt [
+                mod_rust = insert_raw_header(mod_rust, "#[allow(unused_imports)]\nuse crate::_hks_async_rt::*;")
+            ]
             match write_file(mod_out.clone(), mod_rust) [
                 Ok(_v) -> [
                     module_files.push(mod_out)
@@ -1787,6 +1868,29 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     ]
 
     entry_rust = insert_mod_declarations(entry_rust, mod_names)
+    !! ROZBUDOWA (async/coroutines) - runtime `src/_hks_async_rt.rs` + `tokio`.
+    if needs_async_rt [
+        entry_rust = insert_raw_header(entry_rust, "#[allow(dead_code, unused_imports)]\nmod _hks_async_rt;\n#[allow(unused_imports)]\nuse crate::_hks_async_rt::*;")
+        match write_file(src_dir + "/_hks_async_rt.rs", async_runtime_text()) [
+            Ok(_v) -> [
+            ]
+            Err(e) -> [
+                warnings.push("_hks_async_rt.rs: " + e)
+            ]
+        ]
+        let tk_has = false
+        let tk_i = 0
+        while tk_i < crates_names.len() [
+            if crates_names[tk_i] == "tokio" [
+                tk_has = true
+            ]
+            tk_i = tk_i + 1
+        ]
+        if not tk_has [
+            crates_names.push("tokio")
+            crates_versions.push("1")
+        ]
+    ]
     !! NOWOSC 0.4 - `needs_wasm_bindgen` jest w pelni znane dopiero TU
     !! (po petli po wszystkich plikach) - dopiero teraz przełączamy
     !! docelowa sciezke pliku wejsciowego z `src/main.rs` na
@@ -2082,6 +2186,20 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
             ]
             Err(e) -> [
                 warnings.push(links_path + ": " + e)
+            ]
+        ]
+    ]
+
+    !!! ROZBUDOWA - sidecar `.hks-use.txt` (linie "klucz\twartosc") z dyrektyw
+    !!! `use <lang:..>`/`use <crosscompile>`/`use <arc:..>` - czytany przez
+    !!! `virus build` (patrz virus/cmd/crossbuild.hcs). Brak pliku = brak dyrektyw.
+    if use_lines.len() > 0 [
+        let use_path = out_dir + "/.hks-use.txt"
+        match write_file(use_path.clone(), str_join(use_lines.clone(), "\n") + "\n") [
+            Ok(_v) -> [
+            ]
+            Err(e) -> [
+                warnings.push(use_path + ": " + e)
             ]
         ]
     ]
