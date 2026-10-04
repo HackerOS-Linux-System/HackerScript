@@ -293,6 +293,14 @@ fun rust_type_name(t: TypeRef, sigs: Signatures, type_params: List<Str>) -> Str 
     !!! `List`). Konstruktor pusty to builtin `set()` (patrz `gen_call`
     !!! w `codegen.hcs`, parytet z `dict()`/`[]`), metody `.insert()`/
     !!! `.contains()`/`.remove()`/`.len()` - patrz nizej w tym pliku.
+    !! ROZBUDOWA (coroutines) - `Chan<T>` -> `HksChan<T>` (patrz hackerc/rt/hks_async_rt.rs).
+    if t.name == "Chan" [
+        if not type_ref_has_generic(t) [
+            log("[hackerc-self] codegen: 'Chan' wymaga typu elementu, np. Chan<Int>")
+            end "HksChan<()>"
+        ]
+        end "HksChan<" + rust_type_name_of_generic(t, sigs, type_params) + ">"
+    ]
     if t.name == "Set" [
         if not type_ref_has_generic(t) [
             log("[hackerc-self] codegen: 'Set' wymaga typu elementu, np. Set<Str>")
@@ -582,7 +590,7 @@ fun char_str_type_of_let_call(s: Stmt, sigs: Signatures) -> Option<TypeRef> [
                                         match sigs.functions.fetch(fname) [
                                             Some(fn_stmt) -> [
                                                 match fn_stmt [
-                                                    FunDecl(n2, p2, ret2, b2, pub2, tp2) -> [
+                                                    FunDecl(n2, p2, ret2, b2, pub2, tp2, n2_async) -> [
                                                         end ret2
                                                     ]
                                                     _ -> [
@@ -1450,7 +1458,7 @@ fun compute_mut_params(prog: Program) -> Dict<Str, Bool> [
     while i < n [
         let stmt = prog.body[i]
         match stmt [
-            FunDecl(name, params, ret_type, body, is_pub, type_params) -> [
+            FunDecl(name, params, ret_type, body, is_pub, type_params, name_async) -> [
                 let tracker = mutated_names_in_body(body)
                 let j = 0
                 let on = tracker.order.len()
@@ -1491,7 +1499,7 @@ fun compute_method_mut_params(prog: Program, extra_method_mut_params: Dict<Str, 
                 while j < mn [
                     let m = methods[j].clone()
                     match m [
-                        FunDecl(mname, mparams, mret, mbody, mis_pub, mtype_params) -> [
+                        FunDecl(mname, mparams, mret, mbody, mis_pub, mtype_params, mname_async) -> [
                             let key = struct_name.clone() + "::" + mname.clone()
                             let tracker = mutated_names_in_body(mbody.clone())
                             let k = 0
@@ -1789,7 +1797,12 @@ struct CodeGen [
     needs_native_go: Bool,
     native_go_sources: Dict<Str, Str>,
     native_go_order: List<Str>,
-    go_imports: List<Str>
+    go_imports: List<Str>,
+    !! ROZBUDOWA (async/coroutines) - `in_async`: czy aktualnie generowane cialo
+    !! to `async fn` (wtedy `await` => `.await`); `needs_async_rt`: program uzywa
+    !! async/spawn/chan (=> runtime + tokio w Cargo.toml).
+    in_async: Bool,
+    needs_async_rt: Bool
 ]
 
 impl CodeGen [
@@ -2471,6 +2484,40 @@ impl CodeGen [
         if ident_name == "set" and args.len() == 0 [
             end "std::collections::HashSet::new()"
         ]
+        !! ROZBUDOWA (coroutines) - `chan()` / `chan(n)` -> `HksChan::new(n)`.
+        if ident_name == "chan" and args.len() <= 1 [
+            if args.len() == 0 [
+                end "HksChan::new(1)"
+            ]
+            end "HksChan::new(" + self.gen_expr(args[0]) + ")"
+        ]
+        match callee.clone() [
+            Attr(ch_target, ch_method) -> [
+                if ch_method == "send" or ch_method == "recv" or ch_method == "close" [
+                    let ch_ty = self.infer_type(ch_target.clone())
+                    let is_chan = false
+                    match ch_ty [
+                        Some(cht) -> [
+                            is_chan = cht.name == "Chan"
+                        ]
+                        None -> [
+                        ]
+                    ]
+                    if is_chan [
+                        if ch_method == "close" [
+                            end self.gen_expr(ch_target) + ".close()"
+                        ]
+                        let ch_call = self.gen_expr(ch_target) + "." + ch_method + "(" + self.gen_args_list(args) + ")"
+                        if self.in_async [
+                            end "(" + ch_call + ").await"
+                        ]
+                        end "hks_block_on(" + ch_call + ")"
+                    ]
+                ]
+            ]
+            _ -> [
+            ]
+        ]
         if ident_name != "" [
             match self.sigs.variant_owner.fetch(ident_name.clone()) [
                 Some(enum_name) -> [
@@ -2673,6 +2720,30 @@ impl CodeGen [
             UnaryOp(op, operand) -> [
                 if op == "not" [
                     end "!(" + self.gen_expr(operand) + ")"
+                ]
+                !! ROZBUDOWA (async/coroutines)
+                if op == "await" [
+                    if self.in_async [
+                        end "(" + self.gen_expr(operand) + ").await"
+                    ]
+                    end "hks_block_on(" + self.gen_expr(operand) + ")"
+                ]
+                if op == "spawn" [
+                    let spawn_async = false
+                    let sp_name = call_callee_ident(operand.clone())
+                    if sp_name != "" [
+                        match self.sigs.functions.fetch(sp_name) [
+                            Some(sp_f) -> [
+                                spawn_async = fun_decl_is_async(sp_f)
+                            ]
+                            None -> [
+                            ]
+                        ]
+                    ]
+                    if spawn_async [
+                        end "hks_spawn(" + self.gen_expr(operand) + ")"
+                    ]
+                    end "hks_spawn_blocking(move || " + self.gen_expr(operand) + ")"
                 ]
                 end op + "(" + self.gen_expr(operand) + ")"
             ]
@@ -4122,7 +4193,7 @@ impl CodeGen [
         self.emit("")
     ]
 
-    fun gen_fun(self, name: Str, params: List<Param>, ret_type: Option<TypeRef>, body: List<Stmt>, type_params: List<Str>) [
+    fun gen_fun(self, name: Str, params: List<Param>, ret_type: Option<TypeRef>, body: List<Stmt>, type_params: List<Str>, is_async: Bool) [
         let is_marked_hot = false
         match self.hot_reload_input_names.fetch(name.clone()) [
             Some(_v) -> [
@@ -4229,7 +4300,21 @@ impl CodeGen [
             self.emit("#[wasm_bindgen]")
             self.needs_wasm_bindgen = true
         ]
-        self.emit("pub fn " + name + gen_head + "(" + params_str + ")" + ret + " {")
+        self.in_async = is_async
+        let fn_kw = "pub fn "
+        let emitted_name = name.clone()
+        if is_async [
+            self.needs_async_rt = true
+            fn_kw = "pub async fn "
+            !! `async fun main` - zwykle `fn main()` blokuje na runtime.
+            if name == "main" [
+                emitted_name = "hks_main_async"
+                self.emit("pub fn main() {")
+                self.emit("    hks_block_on(hks_main_async());")
+                self.emit("}")
+            ]
+        ]
+        self.emit(fn_kw + emitted_name + gen_head + "(" + params_str + ")" + ret + " {")
         self.indent = self.indent + 1
         let str_param_names: List<Str> = []
         let k = 0
@@ -4274,6 +4359,7 @@ impl CodeGen [
         let name = fun_decl_name(m.clone())
         let params = fun_decl_params(m.clone())
         let ret_type = fun_decl_ret_type(m.clone())
+        let m_for_async = m.clone()
         let body = fun_decl_body(m)
 
         self.env_vars = dict()
@@ -4325,7 +4411,14 @@ impl CodeGen [
         ]
 
         self.current_ret_type = ret_type
-        self.emit("pub fn " + name + "(" + params_str + ")" + ret + " {")
+        let m_async = fun_decl_is_async(m_for_async)
+        self.in_async = m_async
+        let m_kw = "pub fn "
+        if m_async [
+            self.needs_async_rt = true
+            m_kw = "pub async fn "
+        ]
+        self.emit(m_kw + name + "(" + params_str + ")" + ret + " {")
         self.indent = self.indent + 1
         self.gen_stmts(body)
         self.indent = self.indent - 1
@@ -4395,7 +4488,7 @@ impl CodeGen [
         !!! samego crate'a (patrz Discovery.resolve), wiec tu trzeba
         !!! juz tylko wyemitowac `use crate::<flat_module_name>::*;`
         !!! (albo `::{a, b};` dla `get <work:x> import <a::b>`).
-        if source == "std" or source == "core" or source == "selfhost" or source == "virus" or source == "vira" or source == "work" or source == "hlib" [
+        if source == "std" or source == "core" or source == "selfhost" or source == "virus" or source == "bit" or source == "work" or source == "hlib" [
             let module = flat_module_name(source, name.clone(), version)
             if details.len() > 0 [
                 self.emit("use crate::" + module + "::{" + self.join_binds(details) + "};")
@@ -4458,27 +4551,10 @@ impl CodeGen [
         !!! `use <static>`).
         !!! ZMIANA 0.4 - `get <bytes:nazwa>`/`get <bit:nazwa>`: parytet
         !!! DOKLADNIE z `vira` (nie z `c`/`cpp`) - deklaruje zaleznosc od
-        !!! biblioteki natywnej pobranej/zbudowanej przez `virus install
-        !!! bytes|bit ...` (rejestry Bytes-Repository/index.json wzgl.
-        !!! bit-io/repo-list.json - patrz `virus/cmd/bytes_repo.hcs`/
-        !!! `virus/cmd/bit_repo.hcs`), podpinanej do linkera przez `virus
-        !!! build` (`build_wire_extern_dependencies` w
-        !!! `virus/cmd/build.hcs`, dokladnie tak jak dla "vira"). Sama
-        !!! deklaracja `get` tutaj NIE tworzy wywolywalnych sygnatur -
-        !!! do tego wciaz sluzy `get <extern:...> use <...>` +
-        !!! `region [ ... ]`, chyba ze pobrany artefakt to `.hlib`
-        !!! (HackerScript-owy format) - wtedy `virus install` sam
-        !!! wypisuje gotowy stub `get <extern:...> use <dynamic> region
-        !!! [ ... ]` (patrz `hlib_extract_for_import` w
-        !!! `hackerc/cmd/hlib.hcs`).
-        if source == "bytes" or source == "bit" [
-            let registry_label = "Bytes-Repository (H#)"
-            if source == "bit" [
-                registry_label = "bit-io (Hacker Lang)"
-            ]
-            self.emit("// get <" + source + ":" + name + "> - zaleznosc z rejestru " + registry_label + "; pobierz/zbuduj przez 'virus install " + source + " " + name + "' (patrz virus/cmd/" + source + "_repo.hcs), linkowana automatycznie przez 'virus build'; sygnatury FFI importuj osobnym 'get <extern:" + name + "> use <static|dynamic>' + 'region [ ... ]', chyba ze 'virus install' wygenerowal juz taki stub z pobranego .hlib")
-            end
-        ]
+        !!! ZMIANA 0.5 - `get <bytes:..>` i `get <vira:..>` USUNIETE (zastapil je
+        !!! `bit`). `get <bit:nazwa>` / `get <bit:nazwa::plik>` jest teraz zwyklym
+        !!! MODULEM .hcs z `cache/libs/bit/<nazwa>/` (jak `get <std:..>`/`get <work:..>`),
+        !!! wiec laduje sie w galezi `use crate::<modul>::*;` wyzej.
         if source == "c" or source == "cpp" [
             let lang_label = "C"
             if source == "cpp" [
@@ -4741,6 +4817,19 @@ impl CodeGen [
             UsingStmt(version) -> [
                 self.emit("// using <" + version + "> (wymagana wersja hackerc)")
             ]
+            UseStmt(use_k, use_v) -> [
+                !! dyrektywy budowania (`use <lang:..>`, `use <crosscompile>`, `use <arc:..>`)
+                !! sa czytane przez project.hcs/virus - tu tylko slad w wygenerowanym kodzie.
+                let use_c = "// use <" + use_k
+                match use_v.clone() [
+                    Some(uvv) -> [
+                        use_c = use_c + ":" + uvv
+                    ]
+                    None -> [
+                    ]
+                ]
+                self.emit(use_c + ">")
+            ]
             GetImportStmt(source, name, version, details) -> [
                 self.seen_real_toplevel_item = true
                 self.gen_get_import(source, name, version, details)
@@ -4768,9 +4857,9 @@ impl CodeGen [
                 self.seen_real_toplevel_item = true
                 self.gen_region(sigs)
             ]
-            FunDecl(fname, fparams, fret, fbody, fis_pub, ftype_params) -> [
+            FunDecl(fname, fparams, fret, fbody, fis_pub, ftype_params, fname_async) -> [
                 self.seen_real_toplevel_item = true
-                self.gen_fun(fname, fparams, fret, fbody, ftype_params)
+                self.gen_fun(fname, fparams, fret, fbody, ftype_params, fname_async)
             ]
             LetStmt(cname, ctype, cvalue, cis_const) -> [
                 if cis_const [
@@ -4830,7 +4919,7 @@ impl CodeGen [
 fun new_codegen(sigs: Signatures, boxed_fields: Dict<Str, Str>, mut_params: Dict<Str, Bool>, method_mut_params: Dict<Str, Bool>, variant_arity: Dict<Str, Int>, no_default_structs: Dict<Str, Bool>, direct_blocks: Dict<Str, Str>, native_blocks: Dict<Str, Str>, native_engines: Dict<Str, Str>, sandbox_blocks: Dict<Str, Str>, hot_reload_names: Dict<Str, Bool>, wasm_export_names: Dict<Str, Bool>, fast_direct_blocks: Dict<Str, Str>, fast_direct_backends: Dict<Str, Str>, extra_extern_fn_names: List<Str>, work_member: Option<Str>) -> CodeGen [
     let env_vars: Dict<Str, Option<TypeRef>> = dict()
     let empty_hr_bodies: Dict<Str, Str> = dict()
-    let gen = CodeGen(sigs.clone(), env_vars, variant_arity, boxed_fields, method_mut_params, mut_params, [], none(), [], 0, no_default_structs, false, direct_blocks, false, native_blocks, native_engines, false, sandbox_blocks, hot_reload_names, false, empty_hr_bodies, [], false, dict(), none(), none(), false, dict(), [], dict(), wasm_export_names, false, fast_direct_blocks, fast_direct_backends, false, dict(), [], [], false, dict(), [], work_member, false, dict(), [], [])
+    let gen = CodeGen(sigs.clone(), env_vars, variant_arity, boxed_fields, method_mut_params, mut_params, [], none(), [], 0, no_default_structs, false, direct_blocks, false, native_blocks, native_engines, false, sandbox_blocks, hot_reload_names, false, empty_hr_bodies, [], false, dict(), none(), none(), false, dict(), [], dict(), wasm_export_names, false, fast_direct_blocks, fast_direct_backends, false, dict(), [], [], false, dict(), [], work_member, false, dict(), [], [], false, false)
     !! NAPRAWIONY BUG (ta runda) - patrz komentarz przy
     !! `ExtraSignatures::extern_fn_names` w transpiler.hcs - bez tego,
     !! wywolanie funkcji `extern "C"` zadeklarowanej w `region [ ... ]`
@@ -4944,7 +5033,7 @@ fun main() [
     let empty_dict7: Dict<Str, Str> = dict()
     let empty_hr_names: Dict<Str, Bool> = dict()
     let empty_hr_bodies2: Dict<Str, Str> = dict()
-    let gen = CodeGen(empty_sigs, empty_vars, empty_dict1, empty_dict2, empty_dict3, empty_dict4, [], some(TypeRef("Str", none(), none())), [], 0, empty_dict5, false, empty_dict6, false, empty_dict7, empty_dict7, false, empty_dict7, empty_hr_names, false, empty_hr_bodies2, [], false, dict(), none(), none(), false, dict(), [], dict(), dict(), false, dict(), dict(), false, dict(), [], [], false, dict(), [], none(), false, dict(), [], [])
+    let gen = CodeGen(empty_sigs, empty_vars, empty_dict1, empty_dict2, empty_dict3, empty_dict4, [], some(TypeRef("Str", none(), none())), [], 0, empty_dict5, false, empty_dict6, false, empty_dict7, empty_dict7, false, empty_dict7, empty_hr_names, false, empty_hr_bodies2, [], false, dict(), none(), none(), false, dict(), [], dict(), dict(), false, dict(), dict(), false, dict(), [], [], false, dict(), [], none(), false, dict(), [], [], false, false)
     gen.gen_stmts(body)
 
     let i = 0
@@ -4963,7 +5052,7 @@ fun main() [
     let point_fields: List<Param> = [Param("x", some(TypeRef("Int", none(), none())), none()), Param("y", some(TypeRef("Int", none(), none())), none())]
     let point_decl = StructDecl("Point", point_fields, [])
     let sum_body: List<Stmt> = [ReturnStmt(some(BinOp("+", NumberLit("1"), NumberLit("2"))))]
-    let sum_fun = FunDecl("add_one_two", [], some(TypeRef("Int", none(), none())), sum_body, false, [])
+    let sum_fun = FunDecl("add_one_two", [], some(TypeRef("Int", none(), none())), sum_body, false, [], false)
     let demo_prog = Program([point_decl, sum_fun])
     let generated = gen_program(demo_prog)
     let gi = 0
