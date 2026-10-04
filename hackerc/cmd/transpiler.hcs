@@ -63,7 +63,10 @@ struct TranspileResult [
     needs_native_go: Bool,
     native_go_sources: Dict<Str, Str>,
     native_go_order: List<Str>,
-    go_imports: List<Str>
+    go_imports: List<Str>,
+    !! ROZBUDOWA (async/coroutines) - program uzywa async/await/spawn/Chan
+    !! => crate potrzebuje `src/_hks_async_rt.rs` + zaleznosci `tokio`.
+    needs_async_rt: Bool
 ]
 
 !!! ZMIANA 0.3 - skanuje najwyzszy poziom `prog` w poszukiwaniu
@@ -1418,7 +1421,14 @@ fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native
     ]
     rust_code = rust_code + "\n"
 
-    end TranspileResult(rust_code, gen.needs_pyo3, gen.needs_native_js, gen.needs_sandbox, gen.needs_hot_reload, gen.hot_reload_bodies, gen.hot_reload_order, gen.needs_native_cpp, collect_extern_link_specs(prog), gen.native_cpp_sources, gen.native_cpp_order, gen.needs_wasm_bindgen, gen.needs_native_java, gen.native_java_sources, gen.native_java_order, gen.java_classpath_entries, needs_sha256, gen.needs_native_kotlin, gen.native_kotlin_sources, gen.native_kotlin_order, gen.needs_native_go, gen.native_go_sources, gen.native_go_order, gen.go_imports)
+    !! ROZBUDOWA (async) - wykrycie uzycia runtime po wygenerowanym kodzie
+    !! (gen_expr/gen_call nie moga mutowac CodeGen - borrow checker).
+    let async_rt_needed = gen.needs_async_rt
+    if str_contains_substring(rust_code.clone(), "hks_block_on(") or str_contains_substring(rust_code.clone(), "HksChan") or str_contains_substring(rust_code.clone(), "hks_spawn") or str_contains_substring(rust_code.clone(), "hks_sleep_ms") [
+        async_rt_needed = true
+    ]
+
+    end TranspileResult(rust_code, gen.needs_pyo3, gen.needs_native_js, gen.needs_sandbox, gen.needs_hot_reload, gen.hot_reload_bodies, gen.hot_reload_order, gen.needs_native_cpp, collect_extern_link_specs(prog), gen.native_cpp_sources, gen.native_cpp_order, gen.needs_wasm_bindgen, gen.needs_native_java, gen.native_java_sources, gen.native_java_order, gen.java_classpath_entries, needs_sha256, gen.needs_native_kotlin, gen.native_kotlin_sources, gen.native_kotlin_order, gen.needs_native_go, gen.native_go_sources, gen.native_go_order, gen.go_imports, async_rt_needed)
 ]
 
 !!! Transpiluje zrodlo `.hcs` -> `TranspileResult` (kod Rust + info czy
