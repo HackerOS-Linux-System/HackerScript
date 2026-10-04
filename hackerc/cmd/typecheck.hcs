@@ -28,7 +28,7 @@ get <std:string> import <str_contains::str_trim::str_starts_with>
 !!! blad E0003 (ten sam typ pomylki, ktory ZMIANA 0.3 wyzej naprawila
 !!! juz raz dla "npm"/"jsr").
 fun is_known_get_source(s: Str) -> Bool [
-    end s == "pypi" or s == "crates" or s == "std" or s == "core" or s == "selfhost" or s == "virus" or s == "vira" or s == "npm" or s == "jsr" or s == "extern" or s == "c" or s == "cpp" or s == "java" or s == "kotlin" or s == "go" or s == "bytes" or s == "bit" or s == "hlib" or s == "work"
+    end s == "pypi" or s == "crates" or s == "std" or s == "core" or s == "selfhost" or s == "virus" or s == "npm" or s == "jsr" or s == "extern" or s == "c" or s == "cpp" or s == "java" or s == "kotlin" or s == "go" or s == "bit" or s == "hlib" or s == "work"
 ]
 
 fun is_builtin_func(name: Str) -> Bool [
@@ -44,7 +44,7 @@ fun is_builtin_func(name: Str) -> Bool [
     !! skan zrodla PRZY KAZDEJ z nich) zamienial build w wielosekundowa
     !! petle - realna regresja wydajnosci znaleziona i naprawiona w tej
     !! samej turze.
-    end name == "log" or name == "elog" or name == "__direct__" or name == "__fast_direct__" or name == "__native__" or name == "__sandbox__" or name == "some" or name == "none" or name == "ok" or name == "err" or name == "read_file" or name == "write_file" or name == "dict" or name == "set" or name == "env_var" or name == "run_command" or name == "run_command_combined" or name == "http_get" or name == "current_dir" or name == "read_stdin_line" or name == "read_stdin_exact" or name == "write_stdout" or name == "run_command_inherit" or name == "sha256_hex" or name == "now_ms" or name == "args" or name == "exit" or name == "copy_file" or name == "create_dir" or name == "dir_exists" or name == "list_dir" or name == "path_exists" or name == "remove_dir_all" or name == "remove_file"
+    end name == "log" or name == "elog" or name == "__direct__" or name == "__fast_direct__" or name == "__native__" or name == "__sandbox__" or name == "some" or name == "none" or name == "ok" or name == "err" or name == "read_file" or name == "write_file" or name == "dict" or name == "set" or name == "chan" or name == "env_var" or name == "run_command" or name == "run_command_combined" or name == "http_get" or name == "current_dir" or name == "read_stdin_line" or name == "read_stdin_exact" or name == "write_stdout" or name == "run_command_inherit" or name == "sha256_hex" or name == "now_ms" or name == "args" or name == "exit" or name == "copy_file" or name == "create_dir" or name == "dir_exists" or name == "list_dir" or name == "path_exists" or name == "remove_dir_all" or name == "remove_file"
 ]
 
 fun str_starts_with_underscore(s: Str) -> Bool [
@@ -58,7 +58,7 @@ fun str_starts_with_underscore(s: Str) -> Bool [
 
 fun fun_decl_name(f: Stmt) -> Str [
     match f [
-        FunDecl(name, params, ret_type, body, is_pub, type_params) -> [
+        FunDecl(name, params, ret_type, body, is_pub, type_params, name_async) -> [
             end name
         ]
         _ -> [
@@ -69,7 +69,7 @@ fun fun_decl_name(f: Stmt) -> Str [
 
 fun fun_decl_params(f: Stmt) -> List<Param> [
     match f [
-        FunDecl(name, params, ret_type, body, is_pub, type_params) -> [
+        FunDecl(name, params, ret_type, body, is_pub, type_params, name_async) -> [
             end params.clone()
         ]
         _ -> [
@@ -80,7 +80,7 @@ fun fun_decl_params(f: Stmt) -> List<Param> [
 
 fun fun_decl_body(f: Stmt) -> List<Stmt> [
     match f [
-        FunDecl(name, params, ret_type, body, is_pub, type_params) -> [
+        FunDecl(name, params, ret_type, body, is_pub, type_params, name_async) -> [
             end body.clone()
         ]
         _ -> [
@@ -479,7 +479,7 @@ impl Checker [
     !!! mimo ze funkcja juz je akceptowala; teraz + "work").
     fun check_get(self, source: Str, name: Str) [
         if not is_known_get_source(source) [
-            self.diags.push(Diagnostic("error", "E0003", "nieznane zrodlo '" + source + "' w 'get <" + source + ":" + name + ">' (dozwolone: bit, bytes, c, core, cpp, crates, extern, go, hlib, java, jsr, kotlin, npm, pypi, selfhost, std, vira, virus, work)", find_line_of(self.lines.clone(), "get <" + source.clone() + ":"), 0, 1, ""))
+            self.diags.push(Diagnostic("error", "E0003", "nieznane zrodlo '" + source + "' w 'get <" + source + ":" + name + ">' (dozwolone: bit, c, core, cpp, crates, extern, go, hlib, java, jsr, kotlin, npm, pypi, selfhost, std, virus, work)", find_line_of(self.lines.clone(), "get <" + source.clone() + ":"), 0, 1, ""))
         ]
     ]
 
@@ -584,7 +584,7 @@ fun check_program(prog: Program, extra_variant_names: List<Str>, source: Str) ->
             GetImportStmt(source, name, version, details) -> [
                 checker.check_get(source, name)
             ]
-            FunDecl(fname, fparams, fret, fbody, fis_pub, ftype_params) -> [
+            FunDecl(fname, fparams, fret, fbody, fis_pub, ftype_params, fname_async) -> [
                 checker.check_fun(prog.body[i], none())
             ]
             ImplDecl(struct_name, methods, type_params) -> [
@@ -609,9 +609,9 @@ fun check_program(prog: Program, extra_variant_names: List<Str>, source: Str) ->
 !!! `fun ok() -> Int [ end 1 + 2 ]` (czyste).
 fun main() [
     let bad_body: List<Stmt> = [LetStmt("x", none(), some(NumberLit("1")), false)]
-    let bad_fn = FunDecl("bad", [], some(TypeRef("Int", none(), none())), bad_body, false, [])
+    let bad_fn = FunDecl("bad", [], some(TypeRef("Int", none(), none())), bad_body, false, [], false)
     let ok_body: List<Stmt> = [ReturnStmt(some(BinOp("+", NumberLit("1"), NumberLit("2"))))]
-    let ok_fn = FunDecl("ok", [], some(TypeRef("Int", none(), none())), ok_body, false, [])
+    let ok_fn = FunDecl("ok", [], some(TypeRef("Int", none(), none())), ok_body, false, [], false)
     let prog = Program([bad_fn, ok_fn])
     let diags = check_program(prog, [], "")
     log("liczba diagnostyk:", diags.len())
