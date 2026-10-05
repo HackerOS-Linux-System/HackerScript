@@ -1,7 +1,7 @@
 fun async_runtime_lines() -> List<Str> [
     let out: List<Str> = []
     out.push("//! HackerScript - runtime async/await + coroutines + channels.")
-    out.push("//! Plik generowany przez `hackerc` (zrodlo: hackerc/rt/hks_async_rt.rs).")
+    out.push("//! Plik generowany przez `hackerc` (zrodlo: hackerc/cmd/async_rt.hcs).")
     out.push("//! Wymaga crate'a `tokio` (features: rt-multi-thread, sync, time) - dopisywany")
     out.push("//! do Cargo.toml AUTOMATYCZNIE, tylko gdy program uzywa async/spawn/Chan.")
     out.push("#![allow(dead_code, unused_imports)]")
