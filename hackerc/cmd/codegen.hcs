@@ -293,7 +293,7 @@ fun rust_type_name(t: TypeRef, sigs: Signatures, type_params: List<Str>) -> Str 
     !!! `List`). Konstruktor pusty to builtin `set()` (patrz `gen_call`
     !!! w `codegen.hcs`, parytet z `dict()`/`[]`), metody `.insert()`/
     !!! `.contains()`/`.remove()`/`.len()` - patrz nizej w tym pliku.
-    !! ROZBUDOWA (coroutines) - `Chan<T>` -> `HksChan<T>` (patrz hackerc/rt/hks_async_rt.rs).
+    !! ROZBUDOWA (coroutines) - `Chan<T>` -> `HksChan<T>` (patrz hackerc/cmd/async_rt.hcs).
     if t.name == "Chan" [
         if not type_ref_has_generic(t) [
             log("[hackerc-self] codegen: 'Chan' wymaga typu elementu, np. Chan<Int>")
