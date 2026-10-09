@@ -145,7 +145,7 @@ impl Parser [
         self.expect(Open, none())
         self.skip_newlines_collect_comments()
         let stmts: List<Stmt> = []
-        while not self.check(Close, none()) [
+        while not self.check(Close, none()) and not self.at_end() [
             let stmt = self.parse_statement()
             stmts.push(stmt)
             self.skip_newlines_collect_comments()
@@ -278,7 +278,8 @@ impl Parser [
 
     !!! ROZBUDOWA - `use <klucz>` albo `use <klucz:wartosc[::wiecej]>`.
     !!! Znane klucze (walidowane w typecheck.hcs/project.hcs, nie tu):
-    !!! `lang:kotlin`, `crosscompile`, `arc:<architektura>`.
+    !!! `lang:kotlin`, `lang:javascript`, `mode:website`, `crosscompile`,
+    !!! `arc:<architektura>`.
     fun parse_use_directive(self) -> Stmt [
         self.expect(Keyword, some("use"))
         self.expect(LAngle, none())
@@ -630,7 +631,7 @@ impl Parser [
         self.expect(Open, none())
         self.skip_newlines()
         let fields: List<Param> = []
-        while not self.check(Close, none()) [
+        while not self.check(Close, none()) and not self.at_end() [
             let fname = self.expect(Ident, none()).value
             self.expect(Colon, none())
             let ftype = self.parse_type()
@@ -651,7 +652,7 @@ impl Parser [
         self.expect(Open, none())
         self.skip_newlines()
         let variants: List<EnumVariant> = []
-        while not self.check(Close, none()) [
+        while not self.check(Close, none()) and not self.at_end() [
             let vname = self.expect(Ident, none()).value
             let vfields: List<TypeRef> = []
             if self.check(LParen, none()) [
@@ -690,7 +691,7 @@ impl Parser [
         self.expect(Open, none())
         self.skip_newlines()
         let methods: List<Stmt> = []
-        while not self.check(Close, none()) [
+        while not self.check(Close, none()) and not self.at_end() [
             if self.check(DocComment, none()) [
                 self.advance()
                 self.skip_newlines()
@@ -737,7 +738,7 @@ impl Parser [
         self.expect(Open, none())
         self.skip_newlines()
         let arms: List<MatchArm> = []
-        while not self.check(Close, none()) [
+        while not self.check(Close, none()) and not self.at_end() [
             let vname = self.expect(Ident, none()).value
             let binds: List<Str> = []
             if self.check(LParen, none()) [
@@ -926,7 +927,7 @@ impl Parser [
             self.advance()
             let items: List<Expr> = []
             self.skip_newlines()
-            while not self.check(Close, none()) [
+            while not self.check(Close, none()) and not self.at_end() [
                 items.push(self.parse_expr())
                 self.skip_newlines()
                 if not self.check(Comma, none()) [
