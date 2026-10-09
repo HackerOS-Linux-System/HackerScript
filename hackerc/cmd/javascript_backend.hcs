@@ -1,0 +1,1067 @@
+include <ast_nodes>
+include <typeinfer>
+include <codegen>
+include <js_runtime>
+get <std:string> import <str_split::str_replace>
+
+!!! ROZBUDOWA 0.6 - backend JavaScript: `use <lang:javascript>` oraz
+!!! `use <mode:website>` (HackerScript dla stron). Patrz docs/JAVASCRIPT.md
+!!! i docs/WEBSITE.md.
+!!!
+!!! AST -> tekst JavaScript (ES2020, bez zaleznosci). Roznica wzgledem
+!!! Kotlina: pelny zakres jezyka (struct/enum/impl/match/Option/Result/
+!!! `?`/async/await/spawn/kanaly/Dict), a typy z typeinfer.hcs sluza do
+!!! rozstrzygania semantyki, ktorej JS nie rozroznia (dzielenie Int
+!!! obcina, `==` na kolekcjach jest strukturalne).
+!!!
+!!! Model danych: Int/Float -> number, Str -> string, Bool -> boolean,
+!!! List -> Array, Dict -> Map, struct -> klasa, enum -> klasa z polami
+!!! `$` (nazwa wariantu) i `v` (tablica pol), Option/Result jak enum
+!!! (HksOption/HksResult w runtime).
+
+struct JsGen [
+    lines: List<Str>,
+    indent: Int,
+    errors: List<Str>,
+    env: TypeEnv,
+    site: Bool,
+    scope_names: List<Str>,
+    scope_marks: List<Int>,
+    user_methods: List<Str>,
+    has_main: Bool,
+    npm_imports: List<Str>
+]
+
+fun js_list_has(items: List<Str>, x: Str) -> Bool [
+    let i = 0
+    while i < items.len() [
+        if items[i] == x [
+            end true
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+!!! Slowa zarezerwowane JS, ktore nie moga byc nazwami zmiennych/funkcji.
+fun js_ident(n: Str) -> Str [
+    let reserved = " function var new class this delete typeof void with yield default switch case do in of instanceof let const export import package interface static public private protected enum await async arguments eval try catch throw finally debugger super extends undefined NaN Infinity null true false "
+    if str_contains_substring(reserved, " " + n + " ") [
+        end n + "_"
+    ]
+    end n
+]
+
+fun js_escape(s: Str) -> Str [
+    let out = ""
+    let i = 0
+    let n = s.len()
+    while i < n [
+        let c = s.char_at(i)
+        if c == "\\" [
+            out = out + "\\\\"
+        ] elif c == "\"" [
+            out = out + "\\\""
+        ] elif c == "\n" [
+            out = out + "\\n"
+        ] elif c == "\t" [
+            out = out + "\\t"
+        ] elif c == "\r" [
+            out = out + "\\r"
+        ] else [
+            out = out + c
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+fun js_type_name(t: Option<TypeRef>) -> Str [
+    match t [
+        Some(tt) -> [
+            end tt.name.clone()
+        ]
+        None -> [
+            end ""
+        ]
+    ]
+]
+
+fun js_default_for(t: Option<TypeRef>) -> Str [
+    let n = js_type_name(t)
+    if n == "Int" or n == "Float" [
+        end "0"
+    ]
+    if n == "Str" [
+        end "\"\""
+    ]
+    if n == "Bool" [
+        end "false"
+    ]
+    if n == "List" [
+        end "[]"
+    ]
+    if n == "Dict" [
+        end "new Map()"
+    ]
+    if n == "Option" [
+        end "none()"
+    ]
+    end "null"
+]
+
+impl JsGen [
+    fun pad(self) -> Str [
+        let out = ""
+        let i = 0
+        while i < self.indent [
+            out = out + "    "
+            i = i + 1
+        ]
+        end out
+    ]
+
+    fun emit(self, line: Str) [
+        self.lines.push(self.pad() + line)
+    ]
+
+    fun fail(self, what: Str) [
+        self.errors.push("lang:javascript: " + what + " - nieobslugiwane w backendzie JavaScript")
+    ]
+
+    fun push_scope(self) [
+        self.scope_marks.push(self.scope_names.len())
+    ]
+
+    fun pop_scope(self) [
+        let mark = self.scope_marks[self.scope_marks.len() - 1]
+        self.scope_marks.pop()
+        while self.scope_names.len() > mark [
+            self.scope_names.pop()
+        ]
+    ]
+
+    !!! true gdy `name` jest juz zadeklarowane w BIEZACYM zakresie.
+    fun declared_here(self, name: Str) -> Bool [
+        let start = 0
+        if self.scope_marks.len() > 0 [
+            start = self.scope_marks[self.scope_marks.len() - 1]
+        ]
+        let i = start
+        while i < self.scope_names.len() [
+            if self.scope_names[i] == name [
+                end true
+            ]
+            i = i + 1
+        ]
+        end false
+    ]
+
+    fun declare_name(self, name: Str) [
+        self.scope_names.push(name)
+    ]
+
+    fun tname(self, e: Expr) -> Str [
+        end js_type_name(infer_expr_type(e, self.env.clone()))
+    ]
+
+    fun is_user_type(self, n: Str) -> Bool [
+        end js_list_has(self.env.sigs.struct_names.clone(), n) or js_list_has(self.env.sigs.enum_names.clone(), n)
+    ]
+
+    fun join(self, items: List<Expr>) -> Str [
+        let out = ""
+        let i = 0
+        while i < items.len() [
+            if i > 0 [
+                out = out + ", "
+            ]
+            out = out + self.expr(items[i].clone())
+            i = i + 1
+        ]
+        end out
+    ]
+
+    fun ident_expr(self, nm: Str) -> Str [
+        if not self.env.is_declared(nm.clone()) [
+            match self.env.sigs.variant_owner.fetch(nm.clone()) [
+                Some(owner) -> [
+                    end "new " + js_ident(owner) + "(\"" + nm + "\", [])"
+                ]
+                None -> [
+                    let unused = 0
+                ]
+            ]
+        ]
+        end js_ident(nm)
+    ]
+
+    fun binop(self, op: Str, l: Expr, r: Expr) -> Str [
+        let a = self.expr(l.clone())
+        let b = self.expr(r.clone())
+        if op == "and" [
+            end "(" + a + " && " + b + ")"
+        ]
+        if op == "or" [
+            end "(" + a + " || " + b + ")"
+        ]
+        if op == "==" or op == "!=" [
+            let lt = self.tname(l.clone())
+            let rt = self.tname(r.clone())
+            let structural = lt == "List" or lt == "Dict" or lt == "Option" or lt == "Result" or self.is_user_type(lt.clone()) or rt == "List" or rt == "Dict" or rt == "Option" or rt == "Result" or self.is_user_type(rt.clone())
+            if structural [
+                if op == "==" [
+                    end "hks_eq(" + a + ", " + b + ")"
+                ]
+                end "(!hks_eq(" + a + ", " + b + "))"
+            ]
+            if op == "==" [
+                end "(" + a + " === " + b + ")"
+            ]
+            end "(" + a + " !== " + b + ")"
+        ]
+        if op == "/" [
+            let lt2 = self.tname(l.clone())
+            let rt2 = self.tname(r.clone())
+            if lt2 == "Float" or rt2 == "Float" [
+                end "(" + a + " / " + b + ")"
+            ]
+            if lt2 == "Int" and rt2 == "Int" [
+                end "hks_idiv(" + a + ", " + b + ")"
+            ]
+            end "hks_div(" + a + ", " + b + ")"
+        ]
+        end "(" + a + " " + op + " " + b + ")"
+    ]
+
+    fun cast(self, inner: Expr, ty: TypeRef) -> Str [
+        let x = self.expr(inner.clone())
+        let n = ty.name.clone()
+        if n == "Str" [
+            end "String(" + x + ")"
+        ]
+        if n == "Float" [
+            end "Number(" + x + ")"
+        ]
+        if n == "Int" [
+            let st = self.tname(inner.clone())
+            if st == "Str" [
+                end "parseInt(" + x + ", 10)"
+            ]
+            end "Math.trunc(Number(" + x + "))"
+        ]
+        if n == "Bool" [
+            end "Boolean(" + x + ")"
+        ]
+        end x
+    ]
+
+    fun call(self, callee: Expr, args: List<Expr>) -> Str [
+        let name = expr_as_ident_name(callee.clone())
+        if name != "" [
+            if name == "log" [
+                end "console.log(" + self.join(args.clone()) + ")"
+            ]
+            if name == "elog" [
+                end "console.error(" + self.join(args.clone()) + ")"
+            ]
+            if js_list_has(self.env.sigs.struct_names.clone(), name.clone()) [
+                end "new " + js_ident(name) + "(" + self.join(args.clone()) + ")"
+            ]
+            match self.env.sigs.variant_owner.fetch(name.clone()) [
+                Some(owner) -> [
+                    end "new " + js_ident(owner) + "(\"" + name + "\", [" + self.join(args.clone()) + "])"
+                ]
+                None -> [
+                    let unused = 0
+                ]
+            ]
+            end js_ident(name) + "(" + self.join(args.clone()) + ")"
+        ]
+        let c2 = callee.clone()
+        match c2 [
+            Attr(target, m) -> [
+                end self.method_call(target.clone(), m.clone(), args.clone())
+            ]
+            _ -> [
+                let unused2 = 0
+            ]
+        ]
+        end "(" + self.expr(callee) + ")(" + self.join(args) + ")"
+    ]
+
+    fun method_call(self, target: Expr, m: Str, args: List<Expr>) -> Str [
+        let t = self.expr(target.clone())
+        let tn = self.tname(target.clone())
+        let a = self.join(args.clone())
+        let n = args.len()
+        let passthrough = t + "." + m + "(" + a + ")"
+        if m == "clone" and n == 0 and not js_list_has(self.user_methods.clone(), "clone") [
+            end "hks_clone(" + t + ")"
+        ]
+        if self.is_user_type(tn.clone()) [
+            end passthrough
+        ]
+        if tn == "" and js_list_has(self.user_methods.clone(), m.clone()) [
+            end passthrough
+        ]
+        if m == "len" and n == 0 [
+            end "hks_len(" + t + ")"
+        ]
+        if m == "clone" and n == 0 [
+            end "hks_clone(" + t + ")"
+        ]
+        if m == "pop" and n == 0 [
+            end "hks_pop(" + t + ")"
+        ]
+        if m == "contains" and n == 1 [
+            end "hks_contains(" + t + ", " + a + ")"
+        ]
+        if m == "insert" and n == 2 [
+            end "hks_insert(" + t + ", " + a + ")"
+        ]
+        if m == "remove" and n == 1 [
+            end "hks_remove(" + t + ", " + a + ")"
+        ]
+        if m == "fetch" and n == 1 [
+            end "hks_fetch(" + t + ", " + a + ")"
+        ]
+        if m == "clear" and n == 0 [
+            end "hks_clear(" + t + ")"
+        ]
+        if m == "sort" and n == 0 [
+            end "hks_sort(" + t + ")"
+        ]
+        if m == "truncate" and n == 1 [
+            end "hks_truncate(" + t + ", " + a + ")"
+        ]
+        if m == "char_at" and n == 1 [
+            end "hks_char_at(" + t + ", " + a + ")"
+        ]
+        if m == "extend" and n == 1 [
+            end t + ".push(..." + a + ")"
+        ]
+        if m == "keys" and n == 0 [
+            end "Array.from(" + t + ".keys())"
+        ]
+        if m == "values" and n == 0 [
+            end "Array.from(" + t + ".values())"
+        ]
+        if m == "to_string" and n == 0 [
+            end "String(" + t + ")"
+        ]
+        if m == "starts_with" [
+            end t + ".startsWith(" + a + ")"
+        ]
+        if m == "ends_with" [
+            end t + ".endsWith(" + a + ")"
+        ]
+        if m == "to_upper" [
+            end t + ".toUpperCase()"
+        ]
+        if m == "to_lower" [
+            end t + ".toLowerCase()"
+        ]
+        if m == "replace" and n == 2 [
+            end t + ".split(" + self.expr(args[0].clone()) + ").join(" + self.expr(args[1].clone()) + ")"
+        ]
+        end passthrough
+    ]
+
+    fun expr(self, e: Expr) -> Str [
+        let e2 = e.clone()
+        match e2 [
+            NumberLit(v) -> [
+                end v
+            ]
+            StringLit(v, is_doc) -> [
+                end "\"" + js_escape(v.clone()) + "\""
+            ]
+            BoolLit(b) -> [
+                if b [
+                    end "true"
+                ]
+                end "false"
+            ]
+            NullLit -> [
+                end "null"
+            ]
+            IdentExpr(nm) -> [
+                end self.ident_expr(nm.clone())
+            ]
+            ListLit(items) -> [
+                end "[" + self.join(items.clone()) + "]"
+            ]
+            BinOp(op, l, r) -> [
+                end self.binop(op.clone(), l.clone(), r.clone())
+            ]
+            UnaryOp(op, operand) -> [
+                let x = self.expr(operand.clone())
+                if op == "not" [
+                    end "(!" + x + ")"
+                ]
+                if op == "await" [
+                    end "(await " + x + ")"
+                ]
+                if op == "spawn" [
+                    end "hks_spawn(() => " + x + ")"
+                ]
+                end "(" + op + x + ")"
+            ]
+            Call(callee, args) -> [
+                end self.call(callee.clone(), args.clone())
+            ]
+            Index(target, idx) -> [
+                end "hks_at(" + self.expr(target.clone()) + ", " + self.expr(idx.clone()) + ")"
+            ]
+            Attr(target, nm) -> [
+                end self.expr(target.clone()) + "." + nm
+            ]
+            Cast(inner, ty) -> [
+                end self.cast(inner.clone(), ty.clone())
+            ]
+            TryOp(inner) -> [
+                end "hks_try(" + self.expr(inner.clone()) + ")"
+            ]
+        ]
+    ]
+
+    fun block(self, body: List<Stmt>) [
+        self.indent = self.indent + 1
+        self.push_scope()
+        let i = 0
+        while i < body.len() [
+            self.stmt(body[i].clone())
+            i = i + 1
+        ]
+        self.pop_scope()
+        self.indent = self.indent - 1
+    ]
+
+    fun params_text(self, params: List<Param>) -> Str [
+        let out = ""
+        let first = true
+        let i = 0
+        while i < params.len() [
+            let p = params[i].clone()
+            if p.name != "self" [
+                if not first [
+                    out = out + ", "
+                ]
+                first = false
+                out = out + js_ident(p.name.clone())
+                match p.default_expr.clone() [
+                    Some(d) -> [
+                        out = out + " = " + self.expr(d)
+                    ]
+                    None -> [
+                        let unused = 0
+                    ]
+                ]
+            ]
+            i = i + 1
+        ]
+        end out
+    ]
+
+    fun declare_params(self, params: List<Param>) [
+        let i = 0
+        while i < params.len() [
+            let p = params[i].clone()
+            self.declare_name(p.name.clone())
+            self.env.declare(p.name.clone(), p.type_ref.clone())
+            i = i + 1
+        ]
+    ]
+
+    !!! Cialo funkcji/metody. Gdy uzyto `?` (hks_try), calosc w try/catch
+    !!! lapiacym wczesny powrot.
+    fun function_body(self, params: List<Param>, body: List<Stmt>, is_method: Bool) [
+        let saved_env = self.env.clone()
+        self.env = TypeEnv(self.env.sigs.clone(), dict())
+        self.indent = self.indent + 1
+        self.push_scope()
+        if is_method [
+            self.emit("const self = this;")
+        ]
+        self.declare_params(params.clone())
+        let start = self.lines.len()
+        let i = 0
+        while i < body.len() [
+            self.stmt(body[i].clone())
+            i = i + 1
+        ]
+        self.pop_scope()
+        self.indent = self.indent - 1
+        let uses_try = false
+        let k = start
+        while k < self.lines.len() [
+            if str_contains_substring(self.lines[k].clone(), "hks_try(") [
+                uses_try = true
+            ]
+            k = k + 1
+        ]
+        if uses_try [
+            let wrapped: List<Str> = []
+            let w = 0
+            while w < start [
+                wrapped.push(self.lines[w].clone())
+                w = w + 1
+            ]
+            wrapped.push(self.pad() + "    try {")
+            let b = start
+            while b < self.lines.len() [
+                wrapped.push("    " + self.lines[b].clone())
+                b = b + 1
+            ]
+            wrapped.push(self.pad() + "    } catch ($e) {")
+            wrapped.push(self.pad() + "        if ($e instanceof HksRet) return $e.v;")
+            wrapped.push(self.pad() + "        throw $e;")
+            wrapped.push(self.pad() + "    }")
+            self.lines = wrapped
+        ]
+        self.env = saved_env
+    ]
+
+    fun fun_decl(self, name: Str, params: List<Param>, body: List<Stmt>, is_async: Bool) [
+        let kw = "function "
+        if is_async [
+            kw = "async function "
+        ]
+        let pt = self.params_text(params.clone())
+        self.emit(kw + js_ident(name.clone()) + "(" + pt + ") {")
+        self.function_body(params.clone(), body.clone(), false)
+        self.emit("}")
+    ]
+
+    fun let_stmt(self, name: Str, ty: Option<TypeRef>, init: Option<Expr>, is_const: Bool) [
+        let jn = js_ident(name.clone())
+        let value = ""
+        let inferred = ty.clone()
+        match init.clone() [
+            Some(v) -> [
+                value = self.expr(v.clone())
+                match ty.clone() [
+                    Some(tt) -> [
+                        let unused = 0
+                    ]
+                    None -> [
+                        inferred = infer_expr_type(v.clone(), self.env.clone())
+                    ]
+                ]
+            ]
+            None -> [
+                value = js_default_for(ty.clone())
+            ]
+        ]
+        self.env.declare(name.clone(), inferred)
+        if self.declared_here(name.clone()) [
+            self.emit(jn + " = " + value + ";")
+        ] else [
+            let kw = "let "
+            if is_const [
+                kw = "const "
+            ]
+            self.declare_name(name.clone())
+            self.emit(kw + jn + " = " + value + ";")
+        ]
+    ]
+
+    fun assign(self, target: Expr, op: Str, value: Expr) [
+        let t2 = target.clone()
+        match t2 [
+            Index(base, idx) -> [
+                let b = self.expr(base.clone())
+                let i = self.expr(idx.clone())
+                let tmp = "$t" + self.indent.to_string()
+                let rhs = self.expr(value.clone())
+                if op == "=" [
+                    self.emit("{ const " + tmp + " = " + b + "; " + tmp + "[hks_ix(" + tmp + ", " + i + ")] = " + rhs + "; }")
+                ] else [
+                    let bop = op.clone()
+                    self.emit("{ const " + tmp + " = " + b + ", " + tmp + "i = hks_ix(" + tmp + ", " + i + "); " + tmp + "[" + tmp + "i] " + bop + " " + rhs + "; }")
+                ]
+            ]
+            _ -> [
+                let t = self.expr(target.clone())
+                if op == "/=" [
+                    let lt = self.tname(target.clone())
+                    let rt = self.tname(value.clone())
+                    let rhs2 = self.expr(value.clone())
+                    if lt == "Float" or rt == "Float" [
+                        self.emit(t + " /= " + rhs2 + ";")
+                    ] elif lt == "Int" and rt == "Int" [
+                        self.emit(t + " = hks_idiv(" + t + ", " + rhs2 + ");")
+                    ] else [
+                        self.emit(t + " = hks_div(" + t + ", " + rhs2 + ");")
+                    ]
+                ] else [
+                    let rhs3 = self.expr(value.clone())
+                    self.emit(t + " " + op + " " + rhs3 + ";")
+                ]
+            ]
+        ]
+    ]
+
+    fun match_stmt(self, subject: Expr, arms: List<MatchArm>) [
+        let tmp = "$m" + self.indent.to_string()
+        self.emit("{")
+        self.indent = self.indent + 1
+        let subj = self.expr(subject.clone())
+        self.emit("const " + tmp + " = " + subj + ";")
+        let first = true
+        let i = 0
+        while i < arms.len() [
+            let arm = arms[i].clone()
+            let head = ""
+            if arm.variant == "_" [
+                if first [
+                    head = "{"
+                ] else [
+                    head = "} else {"
+                ]
+            ] else [
+                let cond = tmp + ".$ === \"" + arm.variant.clone() + "\""
+                if first [
+                    head = "if (" + cond + ") {"
+                ] else [
+                    head = "} else if (" + cond + ") {"
+                ]
+            ]
+            self.emit(head)
+            self.indent = self.indent + 1
+            self.push_scope()
+            let b = 0
+            while b < arm.binds.len() [
+                let bn = arm.binds[b].clone()
+                if bn != "_" [
+                    self.emit("const " + js_ident(bn.clone()) + " = " + tmp + ".v[" + b.to_string() + "];")
+                    self.declare_name(bn.clone())
+                    self.env.declare(bn.clone(), none())
+                ]
+                b = b + 1
+            ]
+            let k = 0
+            let body = arm.body.clone()
+            while k < body.len() [
+                self.stmt(body[k].clone())
+                k = k + 1
+            ]
+            self.pop_scope()
+            self.indent = self.indent - 1
+            first = false
+            i = i + 1
+        ]
+        if not first [
+            self.emit("}")
+        ]
+        self.indent = self.indent - 1
+        self.emit("}")
+    ]
+
+    fun for_stmt(self, var: Str, iterable: Expr, body: List<Stmt>) [
+        let jv = js_ident(var.clone())
+        let it_name = ""
+        let it_args: List<Expr> = []
+        match iterable.clone() [
+            Call(rc, ra) -> [
+                it_name = expr_as_ident_name(rc.clone())
+                it_args = ra.clone()
+            ]
+            _ -> [
+                let unused = 0
+            ]
+        ]
+        self.push_scope()
+        self.declare_name(var.clone())
+        if it_name == "range" and (it_args.len() == 1 or it_args.len() == 2) [
+            let lo = "0"
+            let hi = ""
+            if it_args.len() == 2 [
+                lo = self.expr(it_args[0].clone())
+                hi = self.expr(it_args[1].clone())
+            ] else [
+                hi = self.expr(it_args[0].clone())
+            ]
+            self.env.declare(var.clone(), some(make_type0("Int")))
+            self.emit("for (let " + jv + " = " + lo + "; " + jv + " < " + hi + "; " + jv + "++) {")
+        ] else [
+            let elem: Option<TypeRef> = none()
+            match infer_expr_type(iterable.clone(), self.env.clone()) [
+                Some(lt) -> [
+                    if lt.name == "List" [
+                        match lt.generic.clone() [
+                            Some(g) -> [
+                                elem = some(make_type0(g.name.clone()))
+                            ]
+                            None -> [
+                                let unused9 = 0
+                            ]
+                        ]
+                    ]
+                ]
+                None -> [
+                    let unused2 = 0
+                ]
+            ]
+            self.env.declare(var.clone(), elem)
+            let itext = self.expr(iterable.clone())
+            self.emit("for (const " + jv + " of " + itext + ") {")
+        ]
+        self.block(body.clone())
+        self.pop_scope()
+        self.emit("}")
+    ]
+
+    fun stmt(self, node: Stmt) [
+        let s = node.clone()
+        match s [
+            LetStmt(name, ty, init, is_const) -> [
+                self.let_stmt(name.clone(), ty.clone(), init.clone(), is_const)
+            ]
+            AssignStmt(target, op, value) -> [
+                self.assign(target.clone(), op.clone(), value.clone())
+            ]
+            FunDecl(name, params, ret, body, is_pub, tparams, is_async) -> [
+                self.fun_decl(name.clone(), params.clone(), body.clone(), is_async)
+            ]
+            IfStmt(cond, body, elifs, else_body) -> [
+                let ctext = self.expr(cond.clone())
+                self.emit("if (" + ctext + ") {")
+                self.block(body.clone())
+                let i = 0
+                while i < elifs.len() [
+                    let arm = elifs[i].clone()
+                    let atext = self.expr(arm.cond.clone())
+                    self.emit("} else if (" + atext + ") {")
+                    self.block(arm.body.clone())
+                    i = i + 1
+                ]
+                match else_body.clone() [
+                    Some(eb) -> [
+                        self.emit("} else {")
+                        self.block(eb.clone())
+                    ]
+                    None -> [
+                        let unused = 0
+                    ]
+                ]
+                self.emit("}")
+            ]
+            WhileStmt(cond, body) -> [
+                let wtext = self.expr(cond.clone())
+                self.emit("while (" + wtext + ") {")
+                self.block(body.clone())
+                self.emit("}")
+            ]
+            ForStmt(var, iterable, body) -> [
+                self.for_stmt(var.clone(), iterable.clone(), body.clone())
+            ]
+            ReturnStmt(val) -> [
+                match val.clone() [
+                    Some(v) -> [
+                        let rtext = self.expr(v.clone())
+                        self.emit("return " + rtext + ";")
+                    ]
+                    None -> [
+                        self.emit("return;")
+                    ]
+                ]
+            ]
+            BreakStmt -> [
+                self.emit("break;")
+            ]
+            ContinueStmt -> [
+                self.emit("continue;")
+            ]
+            ExprStmt(e) -> [
+                let is_doc_stmt = false
+                match e.clone() [
+                    StringLit(dv, dflag) -> [
+                        is_doc_stmt = dflag
+                    ]
+                    _ -> [
+                        let unused10 = 0
+                    ]
+                ]
+                if not is_doc_stmt [
+                    let etext = self.expr(e.clone())
+                    self.emit(etext + ";")
+                ]
+            ]
+            MatchStmt(subject, arms) -> [
+                self.match_stmt(subject.clone(), arms.clone())
+            ]
+            ManualBlock(body) -> [
+                self.emit("{")
+                self.block(body.clone())
+                self.emit("}")
+            ]
+            GetImportStmt(src, nm, ver, det) -> [
+                if src == "npm" [
+                    if self.site [
+                        self.fail("`get <npm:" + nm + ">` w trybie website (uzyj wlasnego <script> w index.html)")
+                    ] else [
+                        self.npm_imports.push(nm.clone())
+                    ]
+                ] elif src != "std" and src != "core" [
+                    self.fail("`get <" + src + ":" + nm + ">`")
+                ]
+            ]
+            IncludeStmt(p) -> [
+                let unused3 = 0
+            ]
+            UsingStmt(v) -> [
+                let unused4 = 0
+            ]
+            UseStmt(k, v) -> [
+                let unused5 = 0
+            ]
+            GcPragma(g) -> [
+                let unused6 = 0
+            ]
+            StructDecl(nm, fields, ds) -> [
+                self.emit_struct(nm.clone(), fields.clone())
+            ]
+            EnumDecl(nm, vs, ds) -> [
+                self.emit("class " + js_ident(nm.clone()) + " { constructor(t, v) { this.$ = t; this.v = v; } }")
+            ]
+            ImplDecl(nm, ms, ds) -> [
+                self.emit_impl(nm.clone(), ms.clone())
+            ]
+            RegionBlock(sigs) -> [
+                self.fail("`region [ ... ]` (FFI)")
+            ]
+            DirectBlock(ls) -> [
+                self.fail("blok `direct`/`native`")
+            ]
+        ]
+    ]
+
+    fun emit_struct(self, name: Str, fields: List<Param>) [
+        let ps = ""
+        let i = 0
+        while i < fields.len() [
+            if i > 0 [
+                ps = ps + ", "
+            ]
+            ps = ps + js_ident(fields[i].name.clone())
+            i = i + 1
+        ]
+        self.emit("class " + js_ident(name.clone()) + " {")
+        self.indent = self.indent + 1
+        self.emit("constructor(" + ps + ") {")
+        self.indent = self.indent + 1
+        let k = 0
+        while k < fields.len() [
+            let f = fields[k].clone()
+            let fv = js_ident(f.name.clone())
+            match f.default_expr.clone() [
+                Some(d) -> [
+                    let dtext = self.expr(d.clone())
+                    self.emit("this." + f.name.clone() + " = " + fv + " === undefined ? " + dtext + " : " + fv + ";")
+                ]
+                None -> [
+                    self.emit("this." + f.name.clone() + " = " + fv + ";")
+                ]
+            ]
+            k = k + 1
+        ]
+        self.indent = self.indent - 1
+        self.emit("}")
+        self.indent = self.indent - 1
+        self.emit("}")
+    ]
+
+    fun emit_impl(self, tname: Str, methods: List<Stmt>) [
+        let i = 0
+        while i < methods.len() [
+            match methods[i].clone() [
+                FunDecl(mname, params, ret, body, is_pub, tparams, is_async) -> [
+                    let kw = "function"
+                    if is_async [
+                        kw = "async function"
+                    ]
+                    let mpt = self.params_text(params.clone())
+                    self.emit(js_ident(tname.clone()) + ".prototype." + mname.clone() + " = " + kw + "(" + mpt + ") {")
+                    self.function_body(params.clone(), body.clone(), true)
+                    self.emit("};")
+                ]
+                _ -> [
+                    let unused = 0
+                ]
+            ]
+            i = i + 1
+        ]
+    ]
+]
+
+!!! Skleja runtime: dolacza tylko te kawalki, ktorych znaczniki wystepuja w
+!!! wygenerowanym kodzie (z domknieciem zaleznosci miedzy kawalkami).
+fun js_assemble_runtime(body: Str, site: Bool) -> Str [
+    let chunks = js_runtime_chunks()
+    let n = chunks.len() / 3
+    let included: List<Bool> = []
+    let i = 0
+    while i < n [
+        included.push(false)
+        i = i + 1
+    ]
+    let acc = body.clone()
+    let changed = true
+    while changed [
+        changed = false
+        let c = 0
+        while c < n [
+            if not included[c] [
+                let cname = chunks[c * 3].clone()
+                let allowed = true
+                if site and cname == "node_io" [
+                    allowed = false
+                ]
+                if not site and cname == "web_dom" [
+                    allowed = false
+                ]
+                if allowed [
+                    let markers = str_split(chunks[c * 3 + 1].clone(), " ")
+                    let hit = false
+                    let m = 0
+                    while m < markers.len() [
+                        if markers[m] != "" and str_contains_substring(acc.clone(), markers[m].clone()) [
+                            hit = true
+                        ]
+                        m = m + 1
+                    ]
+                    if hit [
+                        included[c] = true
+                        acc = acc + "\n" + chunks[c * 3 + 2].clone()
+                        changed = true
+                    ]
+                ]
+            ]
+            c = c + 1
+        ]
+    ]
+    let out = ""
+    let k = 0
+    while k < n [
+        if included[k] [
+            out = out + chunks[k * 3 + 2].clone() + "\n"
+        ]
+        k = k + 1
+    ]
+    end out
+]
+
+!!! Punkt wejscia: `Program` -> tekst JavaScript albo blad (lista
+!!! nieobslugiwanych konstrukcji). `site` = tryb `use <mode:website>`.
+fun transpile_js(prog: Program, site: Bool) -> Result<Str, Str> [
+    let sigs = collect_signatures(prog.clone())
+    let g = JsGen([], 0, [], TypeEnv(sigs.clone(), dict()), site, [], [], [], false, [])
+    let ui = 0
+    while ui < prog.body.len() [
+        match prog.body[ui].clone() [
+            ImplDecl(inm, ims, ids) -> [
+                let mi = 0
+                while mi < ims.len() [
+                    match ims[mi].clone() [
+                        FunDecl(mn, mp, mr, mb, mpub, mt, ma) -> [
+                            g.user_methods.push(mn.clone())
+                        ]
+                        _ -> [
+                            let unused = 0
+                        ]
+                    ]
+                    mi = mi + 1
+                ]
+            ]
+            FunDecl(fnm, fp, fr, fb, fpub, ft, fa) -> [
+                if fnm == "main" [
+                    g.has_main = true
+                ]
+            ]
+            _ -> [
+                let unused2 = 0
+            ]
+        ]
+        ui = ui + 1
+    ]
+    g.indent = 1
+    g.push_scope()
+    !!! Kolejnosc: klasy (struct/enum) -> impl -> reszta (funkcje, let).
+    let pass = 0
+    while pass < 3 [
+        let i = 0
+        while i < prog.body.len() [
+            let st = prog.body[i].clone()
+            let is_type = false
+            let is_impl = false
+            match st.clone() [
+                StructDecl(a1, a2, a3) -> [
+                    is_type = true
+                ]
+                EnumDecl(b1, b2, b3) -> [
+                    is_type = true
+                ]
+                ImplDecl(c1, c2, c3) -> [
+                    is_impl = true
+                ]
+                _ -> [
+                    let unused3 = 0
+                ]
+            ]
+            if pass == 0 and is_type [
+                g.stmt(st.clone())
+            ]
+            if pass == 1 and is_impl [
+                g.stmt(st.clone())
+            ]
+            if pass == 2 and not is_type and not is_impl [
+                g.stmt(st.clone())
+            ]
+            i = i + 1
+        ]
+        pass = pass + 1
+    ]
+    if g.errors.len() > 0 [
+        let msg = ""
+        let k = 0
+        while k < g.errors.len() [
+            msg = msg + g.errors[k].clone() + "\n"
+            k = k + 1
+        ]
+        end err(msg)
+    ]
+    let body = ""
+    let j = 0
+    while j < g.lines.len() [
+        body = body + g.lines[j].clone() + "\n"
+        j = j + 1
+    ]
+    let entry = ""
+    if g.has_main [
+        if site [
+            entry = "    const $start = () => {\n        try {\n            const r = main();\n            if (r && typeof r.catch === \"function\") r.catch((e) => console.error(e));\n        } catch (e) { console.error(e); }\n    };\n    if (document.readyState === \"loading\") document.addEventListener(\"DOMContentLoaded\", $start); else $start();\n"
+        ] else [
+            entry = "    Promise.resolve().then(() => main()).catch((e) => {\n        console.error(e instanceof Error ? e.message : e);\n        process.exit(e && e.message && String(e.message).startsWith(\"hks panic\") ? 101 : 1);\n    });\n"
+        ]
+    ]
+    let requires = ""
+    let r = 0
+    while r < g.npm_imports.len() [
+        let pkg = g.npm_imports[r].clone()
+        requires = requires + "    const " + js_ident(str_replace(str_replace(pkg.clone(), "-", "_"), "/", "_")) + " = require(\"" + pkg + "\");\n"
+        r = r + 1
+    ]
+    let program_text = requires + body + entry
+    let rt = js_assemble_runtime(program_text.clone(), site)
+    let header = "// Wygenerowane przez hackerc (use <lang:javascript>"
+    if site [
+        header = header + ", use <mode:website>"
+    ]
+    header = header + ")\n"
+    if not site [
+        header = header + "\"use strict\";\n"
+    ]
+    end ok(header + rt + "(function () {\n" + program_text + "})();\n")
+]
