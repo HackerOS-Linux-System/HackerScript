@@ -118,6 +118,26 @@ impl Point [
 ]
 ```
 
+## Dyrektywy `use <klucz:wartość>` i features crate'ów
+
+Dyrektywy na poziomie pliku wejściowego wybierają cel kompilacji. Rozpoznawane
+klucze: `lang`, `mode`, `crosscompile`, `arc`.
+
+| Dyrektywa | Znaczenie |
+|---|---|
+| `use <lang:javascript>` (alias `js`) | `hackerc build` generuje JavaScript (Node.js) zamiast crate'a Rust — patrz `docs/JAVASCRIPT.md` |
+| `use <mode:website>` | `hackerc build` generuje stronę (`index.html` + `app.js`) — patrz `docs/WEBSITE.md` |
+| `use <lang:kotlin>` | eksperymentalny backend Kotlina (`hackerc kotlin`) |
+| `use <crosscompile>`, `use <arc:architektura>` | zapisywane w pliku pomocniczym dla `bit`/`virus` |
+
+`get <crates:nazwa::wersja>` dodaje zależność Cargo. Od wersji 0.6 część po
+pierwszym `+` to **features** Cargo (rozdzielone `+`):
+
+```
+get <crates:cranelift-codegen::0.116+all-arch>
+```
+daje w `Cargo.toml`: `cranelift-codegen = { version = "0.116", features = ["all-arch"] }`.
+
 ## System modułów
 
 ```
