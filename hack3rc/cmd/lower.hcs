@@ -1,0 +1,2114 @@
+include <work:hackerc::ast_nodes>
+include <work:hackerc::diagnostics>
+get <std:string> import <str_join::str_split::str_contains::str_to_int::str_index_of::str_replace>
+
+!!! hack3rc 0.2 - frontend: analiza semantyczna + lowering AST -> IR.
+!!!
+!!! Wejscie: `Program` z parsera hackerc (include <work:hackerc::parser>).
+!!! Wyjscie: tekstowe IR w postaci S-wyrazen (patrz docs/HACK3RC.md,
+!!! sekcja "IR"), ktore backend Cranelift (backend.hcs) zamienia na
+!!! natywny kod. CALA analiza typow i lowering to czysty HackerScript.
+!!!
+!!! Typy w analizie sa napisami: `i` Int, `f` Float, `b` Bool, `s` Str,
+!!! `u` Unit, `S:Nazwa` struct, `E:Nazwa` enum, `L<T>` lista, `O<T>`
+!!! Option, `?` blad (cicho propagowany, bez kaskady komunikatow).
+!!! W IR sa tylko typy maszynowe: i, f, b oraz p (wskaznik) - patrz
+!!! `ty_mach`.
+!!!
+!!! Model pamieci: struct/enum/lista/Option to obiekty na stercie
+!!! zarzadzanej przez konserwatywny GC z runtime.hcs; wartosc to
+!!! wskaznik, a `.clone()` robi gleboka kopie (deskryptory typow
+!!! `(data ...)` mowia runtime, ktore pola sa wskaznikami do kopiowania).
+!!! Zakres 0.2: struct (pola, konstruktory, metody w `impl`), enum z
+!!! polami + `match`, listy (`List<T>`), `Option<T>` (some/none),
+!!! napisy (`+`, ==, len, `as Str`), plus rdzen z 0.1 (funkcje, petle,
+!!! logika, Int/Float/Bool). Wszystko inne daje czytelny blad.
+
+struct Ex [
+    ir: Str,
+    ty: Str
+]
+
+struct LowerResult [
+    ir: Str,
+    diags: List<Diagnostic>
+]
+
+!!! ---------------------------------------------------------------
+!!! Operacje na napisach-typach
+!!! ---------------------------------------------------------------
+
+fun ty_starts(t: Str, p: Str) -> Bool [
+    if t.len() < p.len() [
+        end false
+    ]
+    end t.slice(0, p.len()) == p
+]
+
+fun ty_is_list(t: Str) -> Bool [
+    end ty_starts(t, "L<")
+]
+
+fun ty_is_opt(t: Str) -> Bool [
+    end ty_starts(t, "O<")
+]
+
+fun ty_is_struct(t: Str) -> Bool [
+    end ty_starts(t, "S:")
+]
+
+fun ty_is_enum(t: Str) -> Bool [
+    end ty_starts(t, "E:")
+]
+
+!!! Typ, ktorego wartosc trzeba kopiowac gleboko w `.clone()`
+!!! (Str jest niezmienny, wiec jest wspoldzielony).
+fun ty_deep(t: Str) -> Bool [
+    end ty_is_list(t.clone()) or ty_is_opt(t.clone()) or ty_is_struct(t.clone()) or ty_is_enum(t.clone())
+]
+
+!!! Wnetrze `L<...>` / `O<...>`.
+fun ty_inner(t: Str) -> Str [
+    if t.len() < 3 [
+        end "?"
+    ]
+    end t.slice(2, t.len() - 1)
+]
+
+!!! Typ maszynowy IR dla typu jezyka.
+fun ty_mach(t: Str) -> Str [
+    if t == "i" or t == "f" or t == "b" or t == "u" [
+        end t
+    ]
+    end "p"
+]
+
+fun tag_name(t: Str) -> Str [
+    if t == "i" [
+        end "Int"
+    ]
+    if t == "f" [
+        end "Float"
+    ]
+    if t == "b" [
+        end "Bool"
+    ]
+    if t == "s" [
+        end "Str"
+    ]
+    if t == "u" [
+        end "Unit"
+    ]
+    if ty_is_struct(t.clone()) or ty_is_enum(t.clone()) [
+        end t.slice(2, t.len())
+    ]
+    if ty_is_list(t.clone()) [
+        end "List<" + tag_name(ty_inner(t.clone())) + ">"
+    ]
+    if ty_is_opt(t.clone()) [
+        end "Option<" + tag_name(ty_inner(t.clone())) + ">"
+    ]
+    end "?"
+]
+
+!!! Nazwa bezpieczna w symbolu (litery/cyfry/_).
+fun ty_mangle(t: Str) -> Str [
+    let out = ""
+    let i = 0
+    while i < t.len() [
+        let c = t.char_at(i)
+        if c == "<" or c == ">" or c == ":" [
+            out = out + "_"
+        ] else [
+            out = out + c
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+fun ir_load(t: Str, addr: Str, off: Int) -> Str [
+    end "(load " + ty_mach(t) + " " + addr + " " + (off as Str) + ")"
+]
+
+fun ir_store(t: Str, addr: Str, off: Int, val: Str) -> Str [
+    end "(store " + ty_mach(t) + " " + addr + " " + (off as Str) + " " + val + ")"
+]
+
+fun split_types(s: Str) -> List<Str> [
+    let out: List<Str> = []
+    if s == "" [
+        end out
+    ]
+    end str_split(s, ";")
+]
+
+!!! Wbudowane funkcje: "symbol|parametry|wynik" albo "" gdy to nie
+!!! wbudowana. Parametry to ciag znacznikow (np. "ff"). Symbole
+!!! trafiaja do libm/runtime (hks_*), wiec sa linkowane z `-lm`.
+fun builtin_sig(name: Str) -> Str [
+    if name == "sqrt" [
+        end "sqrt|f|f"
+    ]
+    if name == "sin" [
+        end "sin|f|f"
+    ]
+    if name == "cos" [
+        end "cos|f|f"
+    ]
+    if name == "tan" [
+        end "tan|f|f"
+    ]
+    if name == "exp" [
+        end "exp|f|f"
+    ]
+    if name == "ln" [
+        end "log|f|f"
+    ]
+    if name == "floor" [
+        end "floor|f|f"
+    ]
+    if name == "ceil" [
+        end "ceil|f|f"
+    ]
+    if name == "fabs" [
+        end "fabs|f|f"
+    ]
+    if name == "pow" [
+        end "pow|ff|f"
+    ]
+    if name == "abs" [
+        end "hks_abs|i|i"
+    ]
+    if name == "read_int" [
+        end "hks_read_int||i"
+    ]
+    if name == "exit" [
+        end "hks_exit|i|u"
+    ]
+    end ""
+]
+
+!!! Nazwa konstrukcji do komunikatu "nieobslugiwane".
+fun stmt_kind(s: Stmt) -> Str [
+    match s [
+        RegionBlock(_a) -> [
+            end "region/extern"
+        ]
+        DirectBlock(_a) -> [
+            end "direct"
+        ]
+        ManualBlock(_a) -> [
+            end "manual"
+        ]
+        GcPragma(_a) -> [
+            end "gc"
+        ]
+        GetImportStmt(_a, _b, _c, _d) -> [
+            end "get"
+        ]
+        IncludeStmt(_a) -> [
+            end "include"
+        ]
+        FunDecl(_a, _b, _c, _d, _e, _f, _g) -> [
+            end "zagniezdzona funkcja"
+        ]
+        StructDecl(_a, _b, _c) -> [
+            end "struct"
+        ]
+        EnumDecl(_a, _b, _c) -> [
+            end "enum"
+        ]
+        ImplDecl(_a, _b, _c) -> [
+            end "impl"
+        ]
+        MatchStmt(_a, _b) -> [
+            end "match"
+        ]
+        _ -> [
+            end "ta konstrukcja"
+        ]
+    ]
+]
+
+!!! Czy lista instrukcji ZAWSZE konczy sie `end` (kazda sciezka).
+fun always_returns(body: List<Stmt>) -> Bool [
+    let i = 0
+    while i < body.len() [
+        let s = body[i].clone()
+        match s [
+            ReturnStmt(_v) -> [
+                end true
+            ]
+            MatchStmt(_subject, arms) -> [
+                let all_ret = arms.len() > 0
+                let k = 0
+                while k < arms.len() [
+                    let arm = arms[k].clone()
+                    if not always_returns(arm.body.clone()) [
+                        all_ret = false
+                    ]
+                    k = k + 1
+                ]
+                if all_ret [
+                    end true
+                ]
+            ]
+            IfStmt(_c, then_body, elifs, else_opt) -> [
+                match else_opt [
+                    Some(else_body) -> [
+                        let all_ret2 = always_returns(then_body.clone())
+                        let k2 = 0
+                        while k2 < elifs.len() [
+                            let arm2 = elifs[k2].clone()
+                            if not always_returns(arm2.body.clone()) [
+                                all_ret2 = false
+                            ]
+                            k2 = k2 + 1
+                        ]
+                        if not always_returns(else_body.clone()) [
+                            all_ret2 = false
+                        ]
+                        if all_ret2 [
+                            end true
+                        ]
+                    ]
+                    None -> [
+                        let unused = 0
+                    ]
+                ]
+            ]
+            _ -> [
+                let unused2 = 0
+            ]
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+!!! Nazwa wywolywanej funkcji, gdy callee to goly identyfikator ("" w p.p.).
+fun callee_ident(e: Expr) -> Str [
+    match e [
+        IdentExpr(n) -> [
+            end n.clone()
+        ]
+        _ -> [
+            end ""
+        ]
+    ]
+]
+
+!!! Rozbija " ir1 ir2 ir3" (wynik lower_args) na liste wyrazen S-expr.
+fun split_ir_args(s: Str) -> List<Str> [
+    let out: List<Str> = []
+    let depth = 0
+    let cur = ""
+    let in_str = false
+    let i = 0
+    while i < s.len() [
+        let c = s.char_at(i)
+        if in_str [
+            cur = cur + c
+            if c == "\\" and i + 1 < s.len() [
+                cur = cur + s.char_at(i + 1)
+                i = i + 1
+            ] elif c == "\"" [
+                in_str = false
+            ]
+        ] elif c == "\"" [
+            in_str = true
+            cur = cur + c
+        ] elif c == "(" [
+            depth = depth + 1
+            cur = cur + c
+        ] elif c == ")" [
+            depth = depth - 1
+            cur = cur + c
+        ] elif c == " " and depth == 0 [
+            if cur != "" [
+                out.push(cur)
+                cur = ""
+            ]
+        ] else [
+            cur = cur + c
+        ]
+        i = i + 1
+    ]
+    if cur != "" [
+        out.push(cur)
+    ]
+    end out
+]
+
+struct Lw [
+    names: List<Str>,
+    vids: List<Str>,
+    vtys: List<Str>,
+    vparam: List<Bool>,
+    marks: List<Int>,
+    fn_names: List<Str>,
+    fn_params: List<Str>,
+    fn_rets: List<Str>,
+    st_names: List<Str>,
+    st_fnames: List<Str>,
+    st_ftypes: List<Str>,
+    en_names: List<Str>,
+    vr_names: List<Str>,
+    vr_enum: List<Str>,
+    vr_idx: List<Int>,
+    vr_ftypes: List<Str>,
+    m_keys: List<Str>,
+    m_params: List<Str>,
+    m_rets: List<Str>,
+    descs: List<Str>,
+    data_decls: List<Str>,
+    ext_syms: List<Str>,
+    ext_decls: List<Str>,
+    diags: List<Diagnostic>,
+    lines: List<Str>,
+    filename: Str,
+    cur_fn: Str,
+    cur_ret: Str,
+    loop_depth: Int,
+    counter: Int
+]
+
+impl Lw [
+    fun err(self, code: Str, msg: Str) [
+        self.err_h(code, msg, "")
+    ]
+
+    !!! Blad z miejscem w zrodle: szuka `hint` (pierwsze wystapienie od
+    !!! poczatku biezacej funkcji); bez trafienia wskazuje linie `fun`.
+    fun err_h(self, code: Str, msg: Str, hint: Str) [
+        let line = 0
+        let col = 0
+        let start = 0
+        if self.cur_fn != "" [
+            let needle = "fun " + self.cur_fn + "("
+            let i = 0
+            while i < self.lines.len() [
+                if str_contains(self.lines[i].clone(), needle) [
+                    line = i + 1
+                    start = i
+                    i = self.lines.len()
+                ]
+                i = i + 1
+            ]
+        ]
+        if hint != "" [
+            let j = start
+            while j < self.lines.len() [
+                match str_index_of(self.lines[j].clone(), hint.clone()) [
+                    Some(pos) -> [
+                        line = j + 1
+                        col = pos + 1
+                        j = self.lines.len()
+                    ]
+                    None -> [
+                        let unused = 0
+                    ]
+                ]
+                j = j + 1
+            ]
+        ]
+        if line == 0 [
+            line = 1
+        ]
+        let where_fn = ""
+        if self.cur_fn != "" [
+            where_fn = " (w funkcji '" + self.cur_fn + "')"
+        ]
+        self.diags.push(Diagnostic("error", code, msg + where_fn, line, col, 1, self.filename.clone()))
+    ]
+
+    fun fresh(self) -> Str [
+        self.counter = self.counter + 1
+        end "v" + (self.counter as Str)
+    ]
+
+    fun push_scope(self) [
+        self.marks.push(self.names.len())
+    ]
+
+    fun pop_scope(self) [
+        let mark = self.marks[self.marks.len() - 1]
+        self.marks.pop()
+        while self.names.len() > mark [
+            self.names.pop()
+            self.vids.pop()
+            self.vtys.pop()
+            self.vparam.pop()
+        ]
+    ]
+
+    fun declare(self, name: Str, ty: Str) -> Str [
+        end self.declare_p(name, ty, false)
+    ]
+
+    fun declare_p(self, name: Str, ty: Str, is_param: Bool) -> Str [
+        let id = self.fresh()
+        self.names.push(name)
+        self.vids.push(id.clone())
+        self.vtys.push(ty)
+        self.vparam.push(is_param)
+        end id
+    ]
+
+    fun lookup(self, name: Str) -> Int [
+        let i = self.names.len() - 1
+        while i >= 0 [
+            if self.names[i] == name [
+                end i
+            ]
+            i = i - 1
+        ]
+        end -1
+    ]
+
+    fun is_local(self, name: Str) -> Bool [
+        end self.lookup(name) >= 0
+    ]
+
+    fun find_in(self, items: List<Str>, name: Str) -> Int [
+        let i = 0
+        while i < items.len() [
+            if items[i] == name [
+                end i
+            ]
+            i = i + 1
+        ]
+        end -1
+    ]
+
+    fun find_fn(self, name: Str) -> Int [
+        end self.find_in(self.fn_names.clone(), name)
+    ]
+
+    fun find_struct(self, name: Str) -> Int [
+        end self.find_in(self.st_names.clone(), name)
+    ]
+
+    fun find_variant(self, name: Str) -> Int [
+        end self.find_in(self.vr_names.clone(), name)
+    ]
+
+    fun is_type_name(self, name: Str) -> Bool [
+        end self.find_struct(name.clone()) >= 0 or self.find_in(self.en_names.clone(), name.clone()) >= 0
+    ]
+
+    !!! Rejestruje deklaracje `(extern sym ret (typy))` raz na symbol.
+    fun need_ext(self, sym: Str, params: Str, ret: Str) [
+        let i = 0
+        while i < self.ext_syms.len() [
+            if self.ext_syms[i] == sym [
+                end
+            ]
+            i = i + 1
+        ]
+        self.ext_syms.push(sym.clone())
+        let plist = ""
+        let k = 0
+        while k < params.len() [
+            if k > 0 [
+                plist = plist + " "
+            ]
+            plist = plist + params.slice(k, k + 1)
+            k = k + 1
+        ]
+        self.ext_decls.push("(extern " + sym + " " + ret + " (" + plist + "))")
+    ]
+
+    !!! Deskryptor typu dla runtime (gleboki clone): `(data sym 0 slowa maska)`.
+    !!! Bit i maski = slowo i obiektu jest wskaznikiem do skopiowania.
+    fun need_desc(self, sym: Str, nwords: Int, mask: Int) [
+        let i = 0
+        while i < self.descs.len() [
+            if self.descs[i] == sym [
+                end
+            ]
+            i = i + 1
+        ]
+        self.descs.push(sym.clone())
+        self.data_decls.push("(data " + sym + " 0 " + (nwords as Str) + " " + (mask as Str) + ")")
+    ]
+
+    fun bad(self) -> Ex [
+        end Ex("(i 0)", "?")
+    ]
+
+    !!! TypeRef (z kodu zrodlowego) -> napis-typ; "?" + blad gdy nieobslugiwany.
+    fun type_of_ref(self, tr: TypeRef) -> Str [
+        let n = tr.name.clone()
+        if n == "Int" [
+            end "i"
+        ]
+        if n == "Float" [
+            end "f"
+        ]
+        if n == "Bool" [
+            end "b"
+        ]
+        if n == "Str" [
+            end "s"
+        ]
+        if n == "List" or n == "Option" [
+            let inner = "?"
+            match tr.generic.clone() [
+                Some(g) -> [
+                    inner = self.type_of_ref(g.clone())
+                ]
+                None -> [
+                    inner = "?"
+                ]
+            ]
+            if inner == "?" [
+                self.err_h("H0300", "typ '" + n + "' wymaga poprawnego parametru (np. " + n + "<Int>)", n.clone())
+                end "?"
+            ]
+            if n == "List" [
+                end "L<" + inner + ">"
+            ]
+            end "O<" + inner + ">"
+        ]
+        if self.find_struct(n.clone()) >= 0 [
+            end "S:" + n
+        ]
+        if self.find_in(self.en_names.clone(), n.clone()) >= 0 [
+            end "E:" + n
+        ]
+        self.err_h("H0301", "nieobslugiwany typ '" + n + "' (dozwolone: Int, Float, Bool, Str, List<T>, Option<T>, struct, enum)", n.clone())
+        end "?"
+    ]
+
+    !!! ---------------------------------------------------------------
+    !!! Obiekty na stercie
+    !!! ---------------------------------------------------------------
+
+    !!! Alokacja obiektu + zapis pol. `tag` >= 0 zapisuje tag enuma w
+    !!! slowie 0 (pola zaczynaja sie wtedy od offsetu 8).
+    fun build_obj(self, size: Int, desc: Str, tag: Int, ftypes: List<Str>, firs: List<Str>) -> Str [
+        self.need_ext("hks_alloc", "ip", "p")
+        let id = self.fresh()
+        let stmts = "(let " + id + " p (call hks_alloc (i " + (size as Str) + ") (daddr " + desc + ")))"
+        let base = 0
+        if tag >= 0 [
+            stmts = stmts + " (store i (v " + id + ") 0 (i " + (tag as Str) + "))"
+            base = 8
+        ]
+        let k = 0
+        while k < firs.len() [
+            stmts = stmts + " " + ir_store(ftypes[k].clone(), "(v " + id + ")", base + 8 * k, firs[k].clone())
+            k = k + 1
+        ]
+        end "(seq (" + stmts + ") (v " + id + "))"
+    ]
+
+    !!! Maska wskaznikow do gleboko kopiowanych pol (bit i = slowo i).
+    fun ptr_mask(self, ftypes: List<Str>, first_word: Int) -> Int [
+        let mask = 0
+        let weight = 1
+        let w = 0
+        while w < first_word [
+            weight = weight * 2
+            w = w + 1
+        ]
+        let k = 0
+        while k < ftypes.len() [
+            if ty_deep(ftypes[k].clone()) [
+                mask = mask + weight
+            ]
+            weight = weight * 2
+            k = k + 1
+        ]
+        end mask
+    ]
+
+    fun struct_alloc(self, sidx: Int, firs: List<Str>) -> Str [
+        let name = self.st_names[sidx].clone()
+        let ftypes = split_types(self.st_ftypes[sidx].clone())
+        let sym = "hks_d_" + name
+        let nw = ftypes.len()
+        if nw == 0 [
+            nw = 1
+        ]
+        self.need_desc(sym.clone(), nw, self.ptr_mask(ftypes.clone(), 0))
+        end self.build_obj(8 * nw, sym, -1, ftypes, firs)
+    ]
+
+    fun variant_alloc(self, vidx: Int, firs: List<Str>) -> Str [
+        let ename = self.vr_enum[vidx].clone()
+        let vname = self.vr_names[vidx].clone()
+        let ftypes = split_types(self.vr_ftypes[vidx].clone())
+        let sym = "hks_d_" + ename + "_" + vname
+        self.need_desc(sym.clone(), 1 + ftypes.len(), self.ptr_mask(ftypes.clone(), 1))
+        end self.build_obj(8 * (1 + ftypes.len()), sym, self.vr_idx[vidx], ftypes, firs)
+    ]
+
+    !!! Option<T>: tag 0 = None, 1 = Some (payload w slowie 1).
+    fun option_alloc(self, inner: Str, is_some: Bool, val_ir: Str) -> Str [
+        let sym = "hks_d_O_" + ty_mangle(inner.clone())
+        let dtypes: List<Str> = [inner.clone()]
+        self.need_desc(sym.clone(), 2, self.ptr_mask(dtypes, 1))
+        let vals: List<Str> = []
+        let used: List<Str> = []
+        let tag = 0
+        if is_some [
+            vals.push(val_ir)
+            used.push(inner.clone())
+            tag = 1
+        ]
+        end self.build_obj(16, sym, tag, used, vals)
+    ]
+
+    !!! ---------------------------------------------------------------
+    !!! Wyrazenia
+    !!! ---------------------------------------------------------------
+
+    fun lower_expr(self, e: Expr) -> Ex [
+        end self.lower_expr_exp(e, "")
+    ]
+
+    !!! Wyrazenie z oczekiwanym typem (`expected` = "" gdy nieznany): potrzebne
+    !!! dla pustej listy `[]` i `none()`, ktorych typ wynika z kontekstu.
+    fun lower_expr_exp(self, e: Expr, expected: Str) -> Ex [
+        match e [
+            ListLit(items) -> [
+                end self.lower_list_lit(items.clone(), expected.clone())
+            ]
+            Call(callee, args) -> [
+                let nm = callee_ident(callee.clone())
+                if nm == "none" and args.len() == 0 and not self.is_local("none") [
+                    if not ty_is_opt(expected.clone()) [
+                        self.err_h("H0412", "none() wymaga znanego typu Option<T> (np. 'let x: Option<Int> = none()')", "none")
+                        end self.bad()
+                    ]
+                    end Ex(self.option_alloc(ty_inner(expected.clone()), false, ""), expected.clone())
+                ]
+                if nm == "some" and args.len() == 1 and not self.is_local("some") [
+                    let want_inner = ""
+                    if ty_is_opt(expected.clone()) [
+                        want_inner = ty_inner(expected.clone())
+                    ]
+                    let x = self.lower_expr_exp(args[0].clone(), want_inner)
+                    if x.ty == "?" [
+                        end x
+                    ]
+                    if x.ty == "u" or x.ty == "log" [
+                        self.err_h("H0413", "some() nie przyjmuje wartosci Unit", "some")
+                        end self.bad()
+                    ]
+                    end Ex(self.option_alloc(x.ty.clone(), true, x.ir.clone()), "O<" + x.ty + ">")
+                ]
+                end self.lower_core(e.clone())
+            ]
+            _ -> [
+                end self.lower_core(e.clone())
+            ]
+        ]
+    ]
+
+    fun lower_list_lit(self, items: List<Expr>, expected: Str) -> Ex [
+        let elem = ""
+        if ty_is_list(expected.clone()) [
+            elem = ty_inner(expected.clone())
+        ]
+        let irs: List<Str> = []
+        let k = 0
+        let failed = false
+        while k < items.len() [
+            let x = self.lower_expr_exp(items[k].clone(), elem.clone())
+            if x.ty == "?" [
+                failed = true
+            ] else [
+                if elem == "" [
+                    elem = x.ty.clone()
+                ]
+                if x.ty != elem [
+                    self.err("H0430", "elementy listy musza miec ten sam typ: " + tag_name(elem.clone()) + " i " + tag_name(x.ty.clone()))
+                    failed = true
+                ]
+                if x.ty == "u" or x.ty == "log" [
+                    failed = true
+                ]
+            ]
+            irs.push(x.ir.clone())
+            k = k + 1
+        ]
+        if failed [
+            end self.bad()
+        ]
+        if elem == "" [
+            self.err("H0431", "pusta lista wymaga typu (np. 'let xs: List<Int> = []')")
+            end self.bad()
+        ]
+        self.need_ext("hks_list_new", "i", "p")
+        self.need_ext("hks_list_push", "p", "p")
+        let id = self.fresh()
+        let is_ptr = 0
+        if ty_deep(elem.clone()) [
+            is_ptr = 1
+        ]
+        let stmts = "(let " + id + " p (call hks_list_new (i " + (is_ptr as Str) + ")))"
+        let j = 0
+        while j < irs.len() [
+            stmts = stmts + " " + ir_store(elem.clone(), "(call hks_list_push (v " + id + "))", 0, irs[j].clone())
+            j = j + 1
+        ]
+        end Ex("(seq (" + stmts + ") (v " + id + "))", "L<" + elem + ">")
+    ]
+
+    fun lower_core(self, e: Expr) -> Ex [
+        match e [
+            NumberLit(txt) -> [
+                if str_contains(txt.clone(), ".") [
+                    end Ex("(f " + txt + ")", "f")
+                ]
+                match str_to_int(txt.clone()) [
+                    Some(_n) -> [
+                        end Ex("(i " + txt + ")", "i")
+                    ]
+                    None -> [
+                        self.err("H0010", "niepoprawny literal liczbowy '" + txt + "'")
+                        end self.bad()
+                    ]
+                ]
+            ]
+            StringLit(txt, _is_doc) -> [
+                !!! Lexer oddaje tekst JUZ odescapowany - dla parsera IR trzeba
+                !!! znowu zabezpieczyc \ " oraz znaki sterujace.
+                let esc: Str = str_replace(txt.clone(), "\\", "\\\\")
+                esc = str_replace(esc.clone(), "\"", "\\\"")
+                esc = str_replace(esc.clone(), "\n", "\\n")
+                esc = str_replace(esc.clone(), "\t", "\\t")
+                esc = str_replace(esc.clone(), "\r", "\\r")
+                end Ex("(s \"" + esc + "\")", "s")
+            ]
+            BoolLit(v) -> [
+                let bv = v.clone()
+                if bv [
+                    end Ex("(b 1)", "b")
+                ]
+                end Ex("(b 0)", "b")
+            ]
+            IdentExpr(name) -> [
+                let idx = self.lookup(name.clone())
+                if idx >= 0 [
+                    end Ex("(v " + self.vids[idx] + ")", self.vtys[idx].clone())
+                ]
+                let vidx = self.find_variant(name.clone())
+                if vidx >= 0 [
+                    let vf = split_types(self.vr_ftypes[vidx].clone())
+                    if vf.len() != 0 [
+                        self.err_h("H0440", "wariant '" + name + "' wymaga " + (vf.len() as Str) + " argumentow", name.clone())
+                        end self.bad()
+                    ]
+                    let none_irs: List<Str> = []
+                    end Ex(self.variant_alloc(vidx, none_irs), "E:" + self.vr_enum[vidx])
+                ]
+                self.err_h("H0020", "niezdefiniowana zmienna '" + name + "'", name.clone())
+                end self.bad()
+            ]
+            UnaryOp(op, inner) -> [
+                let x = self.lower_expr(inner.clone())
+                if x.ty == "?" [
+                    end x
+                ]
+                if op == "-" [
+                    if x.ty == "i" or x.ty == "f" [
+                        end Ex("(neg " + x.ty + " " + x.ir + ")", x.ty.clone())
+                    ]
+                    self.err("H0030", "operator '-' wymaga Int lub Float, jest " + tag_name(x.ty.clone()))
+                    end self.bad()
+                ]
+                if op == "not" [
+                    if x.ty == "b" [
+                        end Ex("(not " + x.ir + ")", "b")
+                    ]
+                    self.err("H0030", "operator 'not' wymaga Bool, jest " + tag_name(x.ty.clone()))
+                    end self.bad()
+                ]
+                self.err("H0031", "operator jednoargumentowy '" + op + "' nie jest obslugiwany w hack3rc")
+                end self.bad()
+            ]
+            BinOp(op, lhs, rhs) -> [
+                let a = self.lower_expr(lhs.clone())
+                let b = self.lower_expr(rhs.clone())
+                end self.binop_values(op.clone(), a, b)
+            ]
+            Cast(inner, target) -> [
+                end self.lower_cast(inner.clone(), target.clone())
+            ]
+            Call(callee, args) -> [
+                end self.lower_call(callee.clone(), args.clone())
+            ]
+            Attr(obj, field) -> [
+                end self.lower_attr(obj.clone(), field.clone())
+            ]
+            Index(obj, idx) -> [
+                let o = self.lower_expr(obj.clone())
+                let i = self.lower_expr(idx.clone())
+                if o.ty == "?" or i.ty == "?" [
+                    end self.bad()
+                ]
+                if not ty_is_list(o.ty.clone()) [
+                    self.err("H0450", "indeksowac mozna tylko liste, jest " + tag_name(o.ty.clone()))
+                    end self.bad()
+                ]
+                if i.ty != "i" [
+                    self.err("H0451", "indeks listy musi byc typu Int, jest " + tag_name(i.ty.clone()))
+                    end self.bad()
+                ]
+                let elem = ty_inner(o.ty.clone())
+                self.need_ext("hks_list_slot", "pi", "p")
+                end Ex(ir_load(elem.clone(), "(call hks_list_slot " + o.ir + " " + i.ir + ")", 0), elem)
+            ]
+            ListLit(items) -> [
+                end self.lower_list_lit(items.clone(), "")
+            ]
+            NullLit -> [
+                self.err("H0050", "null nie jest obslugiwany w hack3rc")
+                end self.bad()
+            ]
+            TryOp(_a) -> [
+                self.err("H0053", "operator '?' nie jest obslugiwany w hack3rc (brak Result)")
+                end self.bad()
+            ]
+        ]
+    ]
+
+    fun lower_cast(self, inner: Expr, target: TypeRef) -> Ex [
+        let x = self.lower_expr(inner.clone())
+        if x.ty == "?" [
+            end x
+        ]
+        let to = ""
+        if target.name == "Int" [
+            to = "i"
+        ]
+        if target.name == "Float" [
+            to = "f"
+        ]
+        if target.name == "Bool" [
+            to = "b"
+        ]
+        if target.name == "Str" [
+            to = "s"
+        ]
+        if to == "" [
+            self.err("H0040", "rzutowanie na nieobslugiwany typ '" + target.name + "' (dozwolone: Int, Float, Str)")
+            end self.bad()
+        ]
+        if to == x.ty [
+            end x
+        ]
+        if to == "s" [
+            if x.ty == "i" [
+                self.need_ext("hks_str_from_i", "i", "s")
+                end Ex("(call hks_str_from_i " + x.ir + ")", "s")
+            ]
+            if x.ty == "f" [
+                self.need_ext("hks_str_from_f", "f", "s")
+                end Ex("(call hks_str_from_f " + x.ir + ")", "s")
+            ]
+            if x.ty == "b" [
+                self.need_ext("hks_str_from_b", "i", "s")
+                end Ex("(call hks_str_from_b (cast b i " + x.ir + "))", "s")
+            ]
+        ]
+        let ok = false
+        if x.ty == "i" and to == "f" [
+            ok = true
+        ]
+        if x.ty == "f" and to == "i" [
+            ok = true
+        ]
+        if x.ty == "b" and to == "i" [
+            ok = true
+        ]
+        if not ok [
+            self.err("H0041", "niedozwolone rzutowanie " + tag_name(x.ty.clone()) + " as " + target.name)
+            end self.bad()
+        ]
+        end Ex("(cast " + x.ty + " " + to + " " + x.ir + ")", to)
+    ]
+
+    !!! Operator na juz obliczonych wartosciach (uzywane tez przez `+=` itd.).
+    fun binop_values(self, op: Str, a: Ex, b: Ex) -> Ex [
+        if a.ty == "?" or b.ty == "?" [
+            end self.bad()
+        ]
+        if op == "and" or op == "or" [
+            if a.ty != "b" or b.ty != "b" [
+                self.err("H0060", "operator '" + op + "' wymaga dwoch wartosci Bool")
+                end self.bad()
+            ]
+            end Ex("(" + op + " " + a.ir + " " + b.ir + ")", "b")
+        ]
+        if a.ty != b.ty [
+            self.err("H0061", "niezgodne typy argumentow '" + op + "': " + tag_name(a.ty.clone()) + " i " + tag_name(b.ty.clone()) + " (uzyj 'as', brak niejawnych konwersji)")
+            end self.bad()
+        ]
+        let ty = a.ty.clone()
+        if ty == "s" [
+            if op == "+" [
+                self.need_ext("hks_str_concat", "ss", "s")
+                end Ex("(call hks_str_concat " + a.ir + " " + b.ir + ")", "s")
+            ]
+            if op == "==" or op == "!=" [
+                self.need_ext("hks_str_eq", "ss", "i")
+                let cmp_op = "ne"
+                if op == "!=" [
+                    cmp_op = "eq"
+                ]
+                end Ex("(cmp " + cmp_op + " i (call hks_str_eq " + a.ir + " " + b.ir + ") (i 0))", "b")
+            ]
+            self.err("H0063", "dla Str obslugiwane sa tylko +, == i !=")
+            end self.bad()
+        ]
+        let name = ""
+        if op == "+" [
+            name = "add"
+        ]
+        if op == "-" [
+            name = "sub"
+        ]
+        if op == "*" [
+            name = "mul"
+        ]
+        if op == "/" [
+            name = "div"
+        ]
+        if op == "%" [
+            name = "rem"
+        ]
+        if name != "" [
+            if ty != "i" and ty != "f" [
+                self.err("H0062", "operator '" + op + "' wymaga Int lub Float, jest " + tag_name(ty.clone()))
+                end self.bad()
+            ]
+            if name == "rem" and ty == "f" [
+                self.need_ext("fmod", "ff", "f")
+                end Ex("(call fmod " + a.ir + " " + b.ir + ")", "f")
+            ]
+            end Ex("(bin " + name + " " + ty + " " + a.ir + " " + b.ir + ")", ty)
+        ]
+        let cmp = ""
+        if op == "==" [
+            cmp = "eq"
+        ]
+        if op == "!=" [
+            cmp = "ne"
+        ]
+        if op == "<" [
+            cmp = "lt"
+        ]
+        if op == "<=" [
+            cmp = "le"
+        ]
+        if op == ">" [
+            cmp = "gt"
+        ]
+        if op == ">=" [
+            cmp = "ge"
+        ]
+        if cmp != "" [
+            if ty != "i" and ty != "f" and ty != "b" [
+                self.err("H0063", "porownywanie typu " + tag_name(ty.clone()) + " nie jest obslugiwane w hack3rc")
+                end self.bad()
+            ]
+            if ty == "b" and cmp != "eq" and cmp != "ne" [
+                self.err("H0063", "Bool mozna porownywac tylko przez == i !=")
+                end self.bad()
+            ]
+            end Ex("(cmp " + cmp + " " + ty + " " + a.ir + " " + b.ir + ")", "b")
+        ]
+        self.err("H0064", "operator '" + op + "' nie jest obslugiwany w hack3rc")
+        end self.bad()
+    ]
+
+    !!! Odczyt pola `obj.pole`.
+    fun lower_attr(self, obj: Expr, field: Str) -> Ex [
+        let o = self.lower_expr(obj.clone())
+        if o.ty == "?" [
+            end o
+        ]
+        if not ty_is_struct(o.ty.clone()) [
+            self.err_h("H0460", "pole '." + field + "' mozna czytac tylko ze struktury, jest " + tag_name(o.ty.clone()), "." + field)
+            end self.bad()
+        ]
+        let sidx = self.find_struct(tag_name(o.ty.clone()))
+        let fnames = split_types(self.st_fnames[sidx].clone())
+        let ftypes = split_types(self.st_ftypes[sidx].clone())
+        let k = self.find_in(str_split(self.st_fnames[sidx].clone(), ","), field.clone())
+        if k < 0 [
+            self.err_h("H0461", "struktura " + tag_name(o.ty.clone()) + " nie ma pola '" + field + "'", "." + field)
+            end self.bad()
+        ]
+        end Ex(ir_load(ftypes[k].clone(), o.ir.clone(), 8 * k), ftypes[k].clone())
+    ]
+
+    !!! Argumenty wywolania: sprawdza liczbe i typy wg listy `want`.
+    !!! Zwraca "!" przy bledzie albo ciag " ir1 ir2 ..." (z wiodaca spacja).
+    fun lower_args(self, what: Str, args: List<Expr>, want: List<Str>, hint: Str) -> Str [
+        if args.len() != want.len() [
+            self.err_h("H0072", what + " przyjmuje " + (want.len() as Str) + " arg., podano " + (args.len() as Str), hint.clone())
+            end "!"
+        ]
+        let irs = ""
+        let i = 0
+        let failed = false
+        while i < args.len() [
+            let x = self.lower_expr_exp(args[i].clone(), want[i].clone())
+            if x.ty == "?" [
+                failed = true
+            ] else [
+                if x.ty != want[i] [
+                    self.err_h("H0073", "argument " + ((i + 1) as Str) + " (" + what + "): oczekiwano " + tag_name(want[i].clone()) + ", jest " + tag_name(x.ty.clone()), hint.clone())
+                    failed = true
+                ]
+            ]
+            irs = irs + " " + x.ir
+            i = i + 1
+        ]
+        if failed [
+            end "!"
+        ]
+        end irs
+    ]
+
+    !!! Wywolanie: `log`, konstruktor struct/wariantu, wbudowane, metoda albo
+    !!! funkcja uzytkownika.
+    fun lower_call(self, callee: Expr, args: List<Expr>) -> Ex [
+        let name = callee_ident(callee.clone())
+        if name == "" [
+            match callee.clone() [
+                Attr(target, m) -> [
+                    end self.lower_method(target.clone(), m.clone(), args.clone())
+                ]
+                _ -> [
+                    self.err("H0070", "wywolywac mozna tylko funkcje po nazwie albo metody")
+                    end self.bad()
+                ]
+            ]
+        ]
+        if name == "log" [
+            end self.lower_log(args)
+        ]
+        if self.lookup(name.clone()) >= 0 [
+            self.err_h("H0074", "'" + name + "' jest zmienna, nie funkcja", name + "(")
+            end self.bad()
+        ]
+        let sidx = self.find_struct(name.clone())
+        if sidx >= 0 [
+            let ftypes = split_types(self.st_ftypes[sidx].clone())
+            let r: Str = self.lower_args("konstruktor " + name, args.clone(), ftypes.clone(), name + "(")
+            if r == "!" [
+                end self.bad()
+            ]
+            end Ex(self.struct_alloc(sidx, split_ir_args(r)), "S:" + name)
+        ]
+        let vidx = self.find_variant(name.clone())
+        if vidx >= 0 [
+            let vtypes = split_types(self.vr_ftypes[vidx].clone())
+            let r2: Str = self.lower_args("wariant " + name, args.clone(), vtypes.clone(), name + "(")
+            if r2 == "!" [
+                end self.bad()
+            ]
+            end Ex(self.variant_alloc(vidx, split_ir_args(r2)), "E:" + self.vr_enum[vidx])
+        ]
+        let b = builtin_sig(name.clone())
+        let fidx = self.find_fn(name.clone())
+        let sym = ""
+        let params = ""
+        let ret = ""
+        if fidx >= 0 [
+            params = self.fn_params[fidx].clone()
+            ret = self.fn_rets[fidx].clone()
+            sym = "hks_f_" + name
+        ] else [
+            if b == "" [
+                self.err_h("H0071", "wywolanie nieznanej funkcji '" + name + "'", name + "(")
+                end self.bad()
+            ]
+            let parts2 = str_split(b, "|")
+            sym = parts2[0].clone()
+            ret = parts2[2].clone()
+            let ptags: Str = parts2[1].clone()
+            let pl: List<Str> = []
+            let t = 0
+            while t < ptags.len() [
+                pl.push(ptags.slice(t, t + 1))
+                t = t + 1
+            ]
+            params = str_join(pl, ";")
+            self.need_ext(sym.clone(), ptags.clone(), ret.clone())
+        ]
+        let want = split_types(params)
+        let r3: Str = self.lower_args("funkcja '" + name + "'", args.clone(), want.clone(), name + "(")
+        if r3 == "!" [
+            end self.bad()
+        ]
+        end Ex("(call " + sym + r3 + ")", ret)
+    ]
+
+    !!! Metody: listy, napisy, Option i typy uzytkownika (`impl`).
+    fun lower_method(self, target: Expr, m: Str, args: List<Expr>) -> Ex [
+        let o = self.lower_expr(target.clone())
+        if o.ty == "?" [
+            end self.bad()
+        ]
+        let hint = "." + m + "("
+        if m == "clone" and args.len() == 0 [
+            if o.ty == "s" or o.ty == "i" or o.ty == "f" or o.ty == "b" [
+                end o
+            ]
+            if ty_deep(o.ty.clone()) and self.find_in(self.m_keys.clone(), tag_name(o.ty.clone()) + "::clone") < 0 [
+                self.need_ext("hks_clone", "p", "p")
+                end Ex("(call hks_clone " + o.ir + ")", o.ty.clone())
+            ]
+        ]
+        if o.ty == "s" [
+            if m == "len" and args.len() == 0 [
+                self.need_ext("hks_str_len", "s", "i")
+                end Ex("(call hks_str_len " + o.ir + ")", "i")
+            ]
+            self.err_h("H0470", "Str nie ma metody '" + m + "' w hack3rc (dostepne: len, clone)", hint.clone())
+            end self.bad()
+        ]
+        if ty_is_list(o.ty.clone()) [
+            end self.lower_list_method(o, m.clone(), args.clone())
+        ]
+        if ty_is_opt(o.ty.clone()) [
+            if (m == "is_some" or m == "is_none") and args.len() == 0 [
+                let cmp_op = "ne"
+                if m == "is_none" [
+                    cmp_op = "eq"
+                ]
+                end Ex("(cmp " + cmp_op + " i " + ir_load("i", o.ir.clone(), 0) + " (i 0))", "b")
+            ]
+            self.err_h("H0471", "Option nie ma metody '" + m + "' (dostepne: is_some, is_none, clone; uzyj match)", hint.clone())
+            end self.bad()
+        ]
+        if ty_is_struct(o.ty.clone()) or ty_is_enum(o.ty.clone()) [
+            let tn = tag_name(o.ty.clone())
+            let key = tn + "::" + m
+            let midx = self.find_in(self.m_keys.clone(), key.clone())
+            if midx < 0 [
+                self.err_h("H0472", "typ " + tn + " nie ma metody '" + m + "'", hint.clone())
+                end self.bad()
+            ]
+            let want = split_types(self.m_params[midx].clone())
+            let r: Str = self.lower_args("metoda " + key, args.clone(), want.clone(), hint.clone())
+            if r == "!" [
+                end self.bad()
+            ]
+            end Ex("(call hks_m_" + tn + "_" + m + " " + o.ir + r + ")", self.m_rets[midx].clone())
+        ]
+        self.err_h("H0473", "typ " + tag_name(o.ty.clone()) + " nie ma metod", hint.clone())
+        end self.bad()
+    ]
+
+    fun lower_list_method(self, o: Ex, m: Str, args: List<Expr>) -> Ex [
+        let elem = ty_inner(o.ty.clone())
+        let hint = "." + m + "("
+        if m == "len" and args.len() == 0 [
+            self.need_ext("hks_list_len", "p", "i")
+            end Ex("(call hks_list_len " + o.ir + ")", "i")
+        ]
+        if m == "clear" and args.len() == 0 [
+            self.need_ext("hks_list_clear", "p", "u")
+            end Ex("(call hks_list_clear " + o.ir + ")", "u")
+        ]
+        if m == "push" [
+            let want: List<Str> = [elem.clone()]
+            let r: Str = self.lower_args("List::push", args.clone(), want, hint.clone())
+            if r == "!" [
+                end self.bad()
+            ]
+            self.need_ext("hks_list_push", "p", "p")
+            let val: Str = r.slice(1, r.len())
+            end Ex(ir_store(elem.clone(), "(call hks_list_push " + o.ir + ")", 0, val), "u")
+        ]
+        if m == "pop" and args.len() == 0 [
+            self.need_ext("hks_list_pop", "p", "p")
+            let sid = self.fresh()
+            let rid = self.fresh()
+            let sym = "hks_d_O_" + ty_mangle(elem.clone())
+            let dtypes: List<Str> = [elem.clone()]
+            self.need_desc(sym.clone(), 2, self.ptr_mask(dtypes, 1))
+            self.need_ext("hks_alloc", "ip", "p")
+            let some_store = ir_store(elem.clone(), "(v " + rid + ")", 8, ir_load(elem.clone(), "(v " + sid + ")", 0))
+            let ir = "(seq ((let " + sid + " p (call hks_list_pop " + o.ir + ")) (let " + rid + " p (call hks_alloc (i 16) (daddr " + sym + "))) (if (cmp ne i (v " + sid + ") (i 0)) ((store i (v " + rid + ") 0 (i 1)) " + some_store + ") ())) (v " + rid + "))"
+            end Ex(ir, "O<" + elem + ">")
+        ]
+        self.err_h("H0474", "List nie ma metody '" + m + "' (dostepne: len, push, pop, clear, clone)", hint.clone())
+        end self.bad()
+    ]
+
+    !!! `log(a, b, ...)` - wypisuje argumenty oddzielone spacja + newline.
+    !!! Wynik: ciag instrukcji `(expr ...)` jako Ex typu "log" (statement).
+    fun lower_log(self, args: List<Expr>) -> Ex [
+        let out = ""
+        let i = 0
+        let failed = false
+        while i < args.len() [
+            let x = self.lower_expr(args[i].clone())
+            if x.ty == "?" [
+                failed = true
+            ] else [
+                if i > 0 [
+                    self.need_ext("hks_print_sp", "", "u")
+                    out = out + " (expr (call hks_print_sp))"
+                ]
+                if x.ty == "i" [
+                    self.need_ext("hks_print_i", "i", "u")
+                    out = out + " (expr (call hks_print_i " + x.ir + "))"
+                ]
+                if x.ty == "f" [
+                    self.need_ext("hks_print_f", "f", "u")
+                    out = out + " (expr (call hks_print_f " + x.ir + "))"
+                ]
+                if x.ty == "b" [
+                    self.need_ext("hks_print_b", "i", "u")
+                    out = out + " (expr (call hks_print_b (cast b i " + x.ir + ")))"
+                ]
+                if x.ty == "s" [
+                    self.need_ext("hks_print_s", "s", "u")
+                    out = out + " (expr (call hks_print_s " + x.ir + "))"
+                ]
+                if x.ty != "i" and x.ty != "f" and x.ty != "b" and x.ty != "s" [
+                    self.err_h("H0080", "log() wypisuje tylko Int, Float, Bool i Str, jest " + tag_name(x.ty.clone()), "log(")
+                    failed = true
+                ]
+            ]
+            i = i + 1
+        ]
+        self.need_ext("hks_print_nl", "", "u")
+        out = out + " (expr (call hks_print_nl))"
+        if failed [
+            end self.bad()
+        ]
+        end Ex(out, "log")
+    ]
+
+    !!! ---------------------------------------------------------------
+    !!! Instrukcje
+    !!! ---------------------------------------------------------------
+
+    !!! Instrukcje -> tekst IR (spacja-oddzielone). Nowy zakres zmiennych
+    !!! dla kazdego bloku.
+    fun lower_block(self, body: List<Stmt>) -> Str [
+        self.push_scope()
+        let out = ""
+        let i = 0
+        while i < body.len() [
+            out = out + " " + self.lower_stmt(body[i].clone())
+            i = i + 1
+        ]
+        self.pop_scope()
+        end out
+    ]
+
+    fun want_bool(self, e: Expr, what: Str) -> Str [
+        let c = self.lower_expr(e)
+        if c.ty == "?" [
+            end "(b 0)"
+        ]
+        if c.ty != "b" [
+            self.err("H0090", "warunek '" + what + "' musi byc typu Bool, jest " + tag_name(c.ty.clone()))
+            end "(b 0)"
+        ]
+        end c.ir
+    ]
+
+    fun lower_stmt(self, s: Stmt) -> Str [
+        match s [
+            LetStmt(name, type_opt, value_opt, _is_const) -> [
+                let want = ""
+                match type_opt [
+                    Some(tr) -> [
+                        want = self.type_of_ref(tr.clone())
+                        if want == "?" [
+                            self.declare(name.clone(), "?")
+                            end ""
+                        ]
+                    ]
+                    None -> [
+                        let unused = 0
+                    ]
+                ]
+                match value_opt [
+                    Some(value) -> [
+                        let x = self.lower_expr_exp(value.clone(), want.clone())
+                        if x.ty == "?" [
+                            self.declare(name.clone(), "?")
+                            end ""
+                        ]
+                        if x.ty == "log" or x.ty == "u" [
+                            self.err_h("H0101", "nie mozna przypisac wyniku funkcji bez wartosci do '" + name + "'", "let " + name)
+                            self.declare(name.clone(), "?")
+                            end ""
+                        ]
+                        if want != "" and want != x.ty [
+                            self.err_h("H0102", "zmienna '" + name + "' ma typ " + tag_name(want.clone()) + ", a wartosc jest typu " + tag_name(x.ty.clone()), "let " + name)
+                            self.declare(name.clone(), "?")
+                            end ""
+                        ]
+                        let id = self.declare(name.clone(), x.ty.clone())
+                        end "(let " + id + " " + ty_mach(x.ty.clone()) + " " + x.ir + ")"
+                    ]
+                    None -> [
+                        if want == "" [
+                            self.err("H0103", "zmienna '" + name + "' wymaga typu albo wartosci poczatkowej")
+                            end ""
+                        ]
+                        let zero = ""
+                        if want == "i" [
+                            zero = "(i 0)"
+                        ]
+                        if want == "f" [
+                            zero = "(f 0.0)"
+                        ]
+                        if want == "b" [
+                            zero = "(b 0)"
+                        ]
+                        if want == "s" [
+                            zero = "(s \"\")"
+                        ]
+                        if zero == "" [
+                            self.err_h("H0104", "zmienna '" + name + "' typu " + tag_name(want.clone()) + " wymaga wartosci poczatkowej", "let " + name)
+                            self.declare(name.clone(), "?")
+                            end ""
+                        ]
+                        let id2 = self.declare(name.clone(), want.clone())
+                        end "(let " + id2 + " " + ty_mach(want.clone()) + " " + zero + ")"
+                    ]
+                ]
+            ]
+            AssignStmt(target, op, value) -> [
+                end self.lower_assign(target.clone(), op.clone(), value.clone())
+            ]
+            IfStmt(cond, then_body, elifs, else_opt) -> [
+                let c = self.want_bool(cond.clone(), "if")
+                let then_ir = self.lower_block(then_body.clone())
+                !!! elif'y budujemy od konca jako zagniezdzone if w else.
+                let else_ir = ""
+                match else_opt [
+                    Some(else_body) -> [
+                        else_ir = self.lower_block(else_body.clone())
+                    ]
+                    None -> [
+                        else_ir = ""
+                    ]
+                ]
+                let k = elifs.len() - 1
+                while k >= 0 [
+                    let arm = elifs[k].clone()
+                    let ac = self.want_bool(arm.cond.clone(), "elif")
+                    let abody = self.lower_block(arm.body.clone())
+                    else_ir = " (if " + ac + " (" + abody + ") (" + else_ir + "))"
+                    k = k - 1
+                ]
+                end "(if " + c + " (" + then_ir + ") (" + else_ir + "))"
+            ]
+            WhileStmt(cond, body) -> [
+                let c = self.want_bool(cond.clone(), "while")
+                self.loop_depth = self.loop_depth + 1
+                let b = self.lower_block(body.clone())
+                self.loop_depth = self.loop_depth - 1
+                end "(while " + c + " (" + b + ") ())"
+            ]
+            ForStmt(var, iter, body) -> [
+                end self.lower_for(var.clone(), iter.clone(), body.clone())
+            ]
+            MatchStmt(subject, arms) -> [
+                end self.lower_match(subject.clone(), arms.clone())
+            ]
+            ReturnStmt(value_opt) -> [
+                match value_opt [
+                    Some(value) -> [
+                        let x = self.lower_expr_exp(value.clone(), self.cur_ret.clone())
+                        if x.ty == "?" [
+                            end ""
+                        ]
+                        if self.cur_ret == "u" [
+                            self.err_h("H0120", "funkcja bez typu zwracanego nie moze zwracac wartosci ('end <wartosc>')", "end ")
+                            end ""
+                        ]
+                        if x.ty != self.cur_ret [
+                            self.err_h("H0121", "funkcja zwraca " + tag_name(self.cur_ret.clone()) + ", a 'end' zwraca " + tag_name(x.ty.clone()), "end ")
+                            end ""
+                        ]
+                        end "(ret " + x.ir + ")"
+                    ]
+                    None -> [
+                        if self.cur_ret != "u" [
+                            self.err("H0122", "pusty 'end' w funkcji zwracajacej " + tag_name(self.cur_ret.clone()))
+                            end ""
+                        ]
+                        end "(retv)"
+                    ]
+                ]
+            ]
+            BreakStmt -> [
+                if self.loop_depth == 0 [
+                    self.err("H0130", "'break' poza petla")
+                    end ""
+                ]
+                end "(break)"
+            ]
+            ContinueStmt -> [
+                if self.loop_depth == 0 [
+                    self.err("H0130", "'continue' poza petla")
+                    end ""
+                ]
+                end "(continue)"
+            ]
+            ExprStmt(e) -> [
+                !!! Napis jako instrukcja to docstring - ignorujemy.
+                match e.clone() [
+                    StringLit(_dv, dflag) -> [
+                        if dflag [
+                            end ""
+                        ]
+                    ]
+                    _ -> [
+                        let unused3 = 0
+                    ]
+                ]
+                let x = self.lower_expr(e.clone())
+                if x.ty == "?" [
+                    end ""
+                ]
+                if x.ty == "log" [
+                    end x.ir
+                ]
+                end "(expr " + x.ir + ")"
+            ]
+            UsingStmt(_a) -> [
+                end ""
+            ]
+            UseStmt(_a, _b) -> [
+                end ""
+            ]
+            _ -> [
+                self.err_h("H0140", "'" + stmt_kind(s.clone()) + "' nie jest obslugiwane w tym miejscu w hack3rc", stmt_kind(s.clone()))
+                end ""
+            ]
+        ]
+    ]
+
+    !!! Przypisanie do zmiennej, pola (`p.x = ...`) albo elementu listy.
+    fun lower_assign(self, target: Expr, op: Str, value: Expr) -> Str [
+        let bop = ""
+        if op != "=" [
+            if op == "+=" [
+                bop = "+"
+            ]
+            if op == "-=" [
+                bop = "-"
+            ]
+            if op == "*=" [
+                bop = "*"
+            ]
+            if op == "/=" [
+                bop = "/"
+            ]
+            if op == "%=" [
+                bop = "%"
+            ]
+            if bop == "" [
+                self.err("H0112", "operator przypisania '" + op + "' nie jest obslugiwany")
+                end ""
+            ]
+        ]
+        match target [
+            IdentExpr(tname) -> [
+                let idx = self.lookup(tname.clone())
+                if idx < 0 [
+                    self.err_h("H0020", "niezdefiniowana zmienna '" + tname + "'", tname.clone())
+                    end ""
+                ]
+                if self.vparam[idx] [
+                    self.err_h("H0113", "parametr '" + tname + "' jest niemutowalny (jak w hackerc) - skopiuj go do 'let'", tname.clone())
+                    end ""
+                ]
+                let vty = self.vtys[idx].clone()
+                let vid = self.vids[idx].clone()
+                let x = self.lower_expr_exp(value.clone(), vty.clone())
+                if x.ty == "?" or vty == "?" [
+                    end ""
+                ]
+                let rhs = x
+                if bop != "" [
+                    rhs = self.binop_values(bop.clone(), Ex("(v " + vid + ")", vty.clone()), x)
+                    if rhs.ty == "?" [
+                        end ""
+                    ]
+                ]
+                if rhs.ty != vty [
+                    self.err_h("H0111", "przypisanie do '" + tname + "': oczekiwano " + tag_name(vty.clone()) + ", jest " + tag_name(rhs.ty.clone()), tname.clone())
+                    end ""
+                ]
+                end "(set " + vid + " " + rhs.ir + ")"
+            ]
+            Attr(obj, field) -> [
+                let o = self.lower_expr(obj.clone())
+                if o.ty == "?" [
+                    end ""
+                ]
+                if not ty_is_struct(o.ty.clone()) [
+                    self.err_h("H0462", "przypisac do pola mozna tylko w strukturze, jest " + tag_name(o.ty.clone()), "." + field)
+                    end ""
+                ]
+                let sidx = self.find_struct(tag_name(o.ty.clone()))
+                let ftypes = split_types(self.st_ftypes[sidx].clone())
+                let k = self.find_in(str_split(self.st_fnames[sidx].clone(), ","), field.clone())
+                if k < 0 [
+                    self.err_h("H0461", "struktura " + tag_name(o.ty.clone()) + " nie ma pola '" + field + "'", "." + field)
+                    end ""
+                ]
+                let fty = ftypes[k].clone()
+                let x2 = self.lower_expr_exp(value.clone(), fty.clone())
+                if x2.ty == "?" [
+                    end ""
+                ]
+                let tid = self.fresh()
+                let pre = "(let " + tid + " p " + o.ir + ")"
+                let rhs2 = x2
+                if bop != "" [
+                    rhs2 = self.binop_values(bop.clone(), Ex(ir_load(fty.clone(), "(v " + tid + ")", 8 * k), fty.clone()), x2)
+                    if rhs2.ty == "?" [
+                        end ""
+                    ]
+                ]
+                if rhs2.ty != fty [
+                    self.err_h("H0111", "przypisanie do pola '" + field + "': oczekiwano " + tag_name(fty.clone()) + ", jest " + tag_name(rhs2.ty.clone()), "." + field)
+                    end ""
+                ]
+                end pre + " " + ir_store(fty.clone(), "(v " + tid + ")", 8 * k, rhs2.ir.clone())
+            ]
+            Index(obj2, idx2) -> [
+                let lo = self.lower_expr(obj2.clone())
+                let li = self.lower_expr(idx2.clone())
+                if lo.ty == "?" or li.ty == "?" [
+                    end ""
+                ]
+                if not ty_is_list(lo.ty.clone()) [
+                    self.err("H0450", "indeksowac mozna tylko liste, jest " + tag_name(lo.ty.clone()))
+                    end ""
+                ]
+                if li.ty != "i" [
+                    self.err("H0451", "indeks listy musi byc typu Int, jest " + tag_name(li.ty.clone()))
+                    end ""
+                ]
+                let ety = ty_inner(lo.ty.clone())
+                let x3 = self.lower_expr_exp(value.clone(), ety.clone())
+                if x3.ty == "?" [
+                    end ""
+                ]
+                self.need_ext("hks_list_slot", "pi", "p")
+                if bop == "" [
+                    if x3.ty != ety [
+                        self.err("H0111", "przypisanie do elementu listy: oczekiwano " + tag_name(ety.clone()) + ", jest " + tag_name(x3.ty.clone()))
+                        end ""
+                    ]
+                    end ir_store(ety.clone(), "(call hks_list_slot " + lo.ir + " " + li.ir + ")", 0, x3.ir.clone())
+                ]
+                !!! Zlozone przypisanie: wartosc PRZED wskaznikiem na element.
+                let rid = self.fresh()
+                let sid = self.fresh()
+                let pre2 = "(let " + rid + " " + ty_mach(x3.ty.clone()) + " " + x3.ir + ") (let " + sid + " p (call hks_list_slot " + lo.ir + " " + li.ir + "))"
+                let rhs3 = self.binop_values(bop.clone(), Ex(ir_load(ety.clone(), "(v " + sid + ")", 0), ety.clone()), Ex("(v " + rid + ")", x3.ty.clone()))
+                if rhs3.ty == "?" [
+                    end ""
+                ]
+                if rhs3.ty != ety [
+                    self.err("H0111", "przypisanie do elementu listy: oczekiwano " + tag_name(ety.clone()) + ", jest " + tag_name(rhs3.ty.clone()))
+                    end ""
+                ]
+                end pre2 + " " + ir_store(ety.clone(), "(v " + sid + ")", 0, rhs3.ir.clone())
+            ]
+            _ -> [
+                self.err("H0110", "przypisac mozna tylko do zmiennej, pola albo elementu listy")
+                end ""
+            ]
+        ]
+    ]
+
+    !!! `for x in lista` -> petla while po indeksie (lista liczona raz).
+    fun lower_for(self, var: Str, iter: Expr, body: List<Stmt>) -> Str [
+        let l = self.lower_expr(iter.clone())
+        if l.ty == "?" [
+            end ""
+        ]
+        if not ty_is_list(l.ty.clone()) [
+            self.err_h("H0150", "'for' iteruje po listach (List<T>), jest " + tag_name(l.ty.clone()), "for ")
+            end ""
+        ]
+        let elem = ty_inner(l.ty.clone())
+        self.need_ext("hks_list_len", "p", "i")
+        self.need_ext("hks_list_slot", "pi", "p")
+        let lid = self.fresh()
+        let cid = self.fresh()
+        self.loop_depth = self.loop_depth + 1
+        self.push_scope()
+        let vid = self.declare(var.clone(), elem.clone())
+        let inner = ""
+        let i = 0
+        while i < body.len() [
+            inner = inner + " " + self.lower_stmt(body[i].clone())
+            i = i + 1
+        ]
+        self.pop_scope()
+        self.loop_depth = self.loop_depth - 1
+        let head = "(let " + lid + " p " + l.ir + ") (let " + cid + " i (i 0))"
+        let cond = "(cmp lt i (v " + cid + ") (call hks_list_len (v " + lid + ")))"
+        let bind = "(let " + vid + " " + ty_mach(elem.clone()) + " " + ir_load(elem.clone(), "(call hks_list_slot (v " + lid + ") (v " + cid + "))", 0) + ")"
+        let step = "(set " + cid + " (bin add i (v " + cid + ") (i 1)))"
+        end head + " (while " + cond + " (" + bind + inner + ") (" + step + "))"
+    ]
+
+    !!! `match` na enumie albo Option: lancuch if po tagu, wiazanie pol w armach.
+    fun lower_match(self, subject: Expr, arms: List<MatchArm>) -> Str [
+        let sub = self.lower_expr(subject.clone())
+        if sub.ty == "?" [
+            end ""
+        ]
+        let is_opt = ty_is_opt(sub.ty.clone())
+        if not is_opt and not ty_is_enum(sub.ty.clone()) [
+            self.err_h("H0420", "'match' obsluguje enum i Option, jest " + tag_name(sub.ty.clone()), "match ")
+            end ""
+        ]
+        let ename = ""
+        let total = 2
+        if not is_opt [
+            ename = tag_name(sub.ty.clone())
+            total = 0
+            let c = 0
+            while c < self.vr_names.len() [
+                if self.vr_enum[c] == ename [
+                    total = total + 1
+                ]
+                c = c + 1
+            ]
+        ]
+        let tid = self.fresh()
+        let seen: List<Str> = []
+        let has_wild = false
+        !!! Kazdy arm -> (warunek, tresc). Skladamy lancuch od konca.
+        let conds: List<Str> = []
+        let bodies: List<Str> = []
+        let a = 0
+        while a < arms.len() [
+            let arm = arms[a].clone()
+            if arm.variant == "_" [
+                has_wild = true
+                conds.push("")
+                bodies.push(self.lower_block(arm.body.clone()))
+            ] else [
+                let tag = -1
+                let ftypes: List<Str> = []
+                if is_opt [
+                    if arm.variant == "None" [
+                        tag = 0
+                    ]
+                    if arm.variant == "Some" [
+                        tag = 1
+                        ftypes.push(ty_inner(sub.ty.clone()))
+                    ]
+                ] else [
+                    let vi = self.find_variant(arm.variant.clone())
+                    if vi >= 0 and self.vr_enum[vi] == ename [
+                        tag = self.vr_idx[vi]
+                        ftypes = split_types(self.vr_ftypes[vi].clone())
+                    ]
+                ]
+                if tag < 0 [
+                    self.err_h("H0421", "'" + arm.variant + "' nie jest wariantem typu " + tag_name(sub.ty.clone()), arm.variant.clone())
+                    conds.push("")
+                    bodies.push("")
+                ] else [
+                    if self.find_in(seen.clone(), arm.variant.clone()) >= 0 [
+                        self.err_h("H0422", "wariant '" + arm.variant + "' wystepuje w match wiecej niz raz", arm.variant.clone())
+                    ]
+                    seen.push(arm.variant.clone())
+                    if arm.binds.len() != ftypes.len() [
+                        self.err_h("H0423", "wariant '" + arm.variant + "' ma " + (ftypes.len() as Str) + " pol, wiazan: " + (arm.binds.len() as Str), arm.variant.clone())
+                    ]
+                    self.push_scope()
+                    let pre = ""
+                    let b = 0
+                    while b < arm.binds.len() and b < ftypes.len() [
+                        if arm.binds[b] != "_" [
+                            let bid = self.declare(arm.binds[b].clone(), ftypes[b].clone())
+                            pre = pre + " (let " + bid + " " + ty_mach(ftypes[b].clone()) + " " + ir_load(ftypes[b].clone(), "(v " + tid + ")", 8 + 8 * b) + ")"
+                        ]
+                        b = b + 1
+                    ]
+                    let inner = ""
+                    let k = 0
+                    while k < arm.body.len() [
+                        inner = inner + " " + self.lower_stmt(arm.body[k].clone())
+                        k = k + 1
+                    ]
+                    self.pop_scope()
+                    conds.push("(cmp eq i " + ir_load("i", "(v " + tid + ")", 0) + " (i " + (tag as Str) + "))")
+                    bodies.push(pre + inner)
+                ]
+            ]
+            a = a + 1
+        ]
+        if not has_wild and seen.len() < total [
+            self.err_h("H0424", "match niewyczerpujacy: pokryto " + (seen.len() as Str) + " z " + (total as Str) + " wariantow (dodaj brakujace albo '_')", "match ")
+        ]
+        let chain = ""
+        let n = conds.len() - 1
+        let first = true
+        while n >= 0 [
+            if conds[n] == "" [
+                chain = bodies[n].clone()
+            ] else [
+                if first and not has_wild and seen.len() == total [
+                    chain = bodies[n].clone()
+                ] else [
+                    chain = "(if " + conds[n] + " (" + bodies[n] + ") (" + chain + "))"
+                ]
+            ]
+            first = false
+            n = n - 1
+        ]
+        end "(let " + tid + " p " + sub.ir + ") " + chain
+    ]
+
+    !!! ---------------------------------------------------------------
+    !!! Funkcje i metody
+    !!! ---------------------------------------------------------------
+
+    !!! Cialo funkcji/metody `sym` o parametrach `pnames`/`ptypes` (self pierwszy).
+    fun lower_fn_body(self, sym: Str, ret: Str, pnames: List<Str>, ptypes: List<Str>, body: List<Stmt>, display: Str) -> Str [
+        self.cur_fn = display.clone()
+        self.cur_ret = ret.clone()
+        self.loop_depth = 0
+        self.push_scope()
+        let plist = ""
+        let i = 0
+        while i < pnames.len() [
+            let id = self.declare_p(pnames[i].clone(), ptypes[i].clone(), true)
+            plist = plist + " (" + id + " " + ty_mach(ptypes[i].clone()) + ")"
+            i = i + 1
+        ]
+        let inner = ""
+        let k = 0
+        while k < body.len() [
+            inner = inner + " " + self.lower_stmt(body[k].clone())
+            k = k + 1
+        ]
+        self.pop_scope()
+        if ret != "u" and not always_returns(body.clone()) [
+            self.err_h("H0160", "funkcja '" + display + "' zwraca " + tag_name(ret.clone()) + ", ale nie na kazdej sciezce jest 'end <wartosc>'", "fun " + display + "(")
+        ]
+        let out = "(fn " + sym + " " + ty_mach(ret.clone()) + " (" + plist + ")" + inner + ")"
+        self.cur_fn = ""
+        end out
+    ]
+]
+
+!!! Punkt wejscia frontendu: zbiera typy i sygnatury, sprawdza i generuje IR.
+fun lower_program(prog: Program, lines: List<Str>, filename: Str) -> LowerResult [
+    let lw = Lw([], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], lines, filename, "", "u", 0, 0)
+    let body = prog.body
+    let i = 0
+    !!! Przebieg 1: nazwy typow (struct/enum), zeby pola mogly sie do siebie odwolywac.
+    while i < body.len() [
+        let s = body[i].clone()
+        match s [
+            StructDecl(sname, _sf, _sa) -> [
+                if lw.is_type_name(sname.clone()) [
+                    lw.err_h("H0310", "typ '" + sname + "' zdefiniowany wiecej niz raz", sname.clone())
+                ]
+                lw.st_names.push(sname.clone())
+            ]
+            EnumDecl(ename, _ev, _ea) -> [
+                if lw.is_type_name(ename.clone()) [
+                    lw.err_h("H0310", "typ '" + ename + "' zdefiniowany wiecej niz raz", ename.clone())
+                ]
+                lw.en_names.push(ename.clone())
+            ]
+            _ -> [
+                let unused = 0
+            ]
+        ]
+        i = i + 1
+    ]
+    !!! Przebieg 2: pola struktur i warianty enumow (typy juz znane).
+    let j = 0
+    while j < body.len() [
+        let s2 = body[j].clone()
+        match s2 [
+            StructDecl(sname2, sfields, _sa2) -> [
+                let fnames: List<Str> = []
+                let ftys: List<Str> = []
+                let k = 0
+                while k < sfields.len() [
+                    let f = sfields[k].clone()
+                    let fty = "?"
+                    match f.type_ref [
+                        Some(tr) -> [
+                            fty = lw.type_of_ref(tr.clone())
+                        ]
+                        None -> [
+                            lw.err_h("H0302", "pole '" + f.name + "' wymaga typu", f.name.clone())
+                        ]
+                    ]
+                    fnames.push(f.name.clone())
+                    ftys.push(fty)
+                    k = k + 1
+                ]
+                if fnames.len() > 60 [
+                    lw.err_h("H0311", "struktura '" + sname2 + "' ma zbyt wiele pol (max 60)", sname2.clone())
+                ]
+                lw.st_fnames.push(str_join(fnames, ","))
+                lw.st_ftypes.push(str_join(ftys, ";"))
+            ]
+            EnumDecl(ename2, evariants, _ea2) -> [
+                let vi = 0
+                while vi < evariants.len() [
+                    let ev = evariants[vi].clone()
+                    let vtys: List<Str> = []
+                    let q = 0
+                    while q < ev.fields.len() [
+                        vtys.push(lw.type_of_ref(ev.fields[q].clone()))
+                        q = q + 1
+                    ]
+                    if lw.find_variant(ev.name.clone()) >= 0 or lw.is_type_name(ev.name.clone()) [
+                        lw.err_h("H0312", "wariant '" + ev.name + "' koliduje z inna nazwa (warianty musza byc unikalne, jak w hackerc)", ev.name.clone())
+                    ]
+                    lw.vr_names.push(ev.name.clone())
+                    lw.vr_enum.push(ename2.clone())
+                    lw.vr_idx.push(vi)
+                    lw.vr_ftypes.push(str_join(vtys, ";"))
+                    vi = vi + 1
+                ]
+            ]
+            _ -> [
+                let unused2 = 0
+            ]
+        ]
+        j = j + 1
+    ]
+    !!! Przebieg 3: sygnatury funkcji i metod.
+    let m = 0
+    while m < body.len() [
+        let s3 = body[m].clone()
+        match s3 [
+            FunDecl(name, params, ret_opt, _fbody, _pub, _attrs, _async) -> [
+                lw.cur_fn = name.clone()
+                let ptags: List<Str> = []
+                let k = 0
+                while k < params.len() [
+                    let p = params[k].clone()
+                    let tag = "?"
+                    match p.type_ref [
+                        Some(tr) -> [
+                            tag = lw.type_of_ref(tr.clone())
+                        ]
+                        None -> [
+                            lw.err_h("H0200", "parametr '" + p.name + "' wymaga typu", p.name.clone())
+                        ]
+                    ]
+                    match p.default_expr [
+                        Some(_d) -> [
+                            lw.err("H0201", "wartosci domyslne parametrow nie sa obslugiwane w hack3rc")
+                        ]
+                        None -> [
+                            let unused3 = 0
+                        ]
+                    ]
+                    ptags.push(tag)
+                    k = k + 1
+                ]
+                let rtag = "u"
+                match ret_opt [
+                    Some(rt) -> [
+                        rtag = lw.type_of_ref(rt.clone())
+                    ]
+                    None -> [
+                        rtag = "u"
+                    ]
+                ]
+                if lw.find_fn(name.clone()) >= 0 [
+                    lw.err("H0203", "funkcja '" + name + "' zdefiniowana wiecej niz raz")
+                ]
+                if builtin_sig(name.clone()) != "" or name == "log" or name == "some" or name == "none" or lw.is_type_name(name.clone()) or lw.find_variant(name.clone()) >= 0 [
+                    lw.err("H0204", "nazwa '" + name + "' jest zarezerwowana (wbudowana funkcja, typ albo wariant)")
+                ]
+                lw.fn_names.push(name.clone())
+                lw.fn_params.push(str_join(ptags, ";"))
+                lw.fn_rets.push(rtag)
+                lw.cur_fn = ""
+            ]
+            ImplDecl(tname, methods, _ia) -> [
+                if not lw.is_type_name(tname.clone()) [
+                    lw.err_h("H0320", "impl dla nieznanego typu '" + tname + "'", "impl " + tname)
+                ]
+                let mi = 0
+                while mi < methods.len() [
+                    match methods[mi].clone() [
+                        FunDecl(mname, mparams, mret, _mb, _mp, _ma, _mas) -> [
+                            lw.cur_fn = mname.clone()
+                            let key = tname + "::" + mname
+                            if lw.find_in(lw.m_keys.clone(), key.clone()) >= 0 [
+                                lw.err("H0321", "metoda '" + key + "' zdefiniowana wiecej niz raz")
+                            ]
+                            if mparams.len() == 0 or mparams[0].name != "self" [
+                                lw.err_h("H0322", "metoda '" + mname + "' musi miec 'self' jako pierwszy parametr (funkcje asocjacyjne nie sa obslugiwane)", "fun " + mname + "(")
+                            ]
+                            let mtags: List<Str> = []
+                            let mk = 1
+                            while mk < mparams.len() [
+                                let mp = mparams[mk].clone()
+                                let mtag = "?"
+                                match mp.type_ref [
+                                    Some(mtr) -> [
+                                        mtag = lw.type_of_ref(mtr.clone())
+                                    ]
+                                    None -> [
+                                        lw.err_h("H0200", "parametr '" + mp.name + "' wymaga typu", mp.name.clone())
+                                    ]
+                                ]
+                                mtags.push(mtag)
+                                mk = mk + 1
+                            ]
+                            let mrtag = "u"
+                            match mret [
+                                Some(mrt) -> [
+                                    mrtag = lw.type_of_ref(mrt.clone())
+                                ]
+                                None -> [
+                                    mrtag = "u"
+                                ]
+                            ]
+                            lw.m_keys.push(key)
+                            lw.m_params.push(str_join(mtags, ";"))
+                            lw.m_rets.push(mrtag)
+                            lw.cur_fn = ""
+                        ]
+                        _ -> [
+                            lw.err("H0323", "w bloku impl dozwolone sa tylko metody (fun)")
+                        ]
+                    ]
+                    mi = mi + 1
+                ]
+            ]
+            StructDecl(_a1, _a2, _a3) -> [
+                let unused4 = 0
+            ]
+            EnumDecl(_b1, _b2, _b3) -> [
+                let unused5 = 0
+            ]
+            UsingStmt(_a) -> [
+                let unused6 = 0
+            ]
+            UseStmt(_a, _b) -> [
+                let unused7 = 0
+            ]
+            ExprStmt(doc_e) -> [
+                !!! Komentarz dokumentacyjny `!!!` na poziomie modulu = docstring.
+                let is_doc = false
+                match doc_e.clone() [
+                    StringLit(_dv, dflag) -> [
+                        is_doc = dflag
+                    ]
+                    _ -> [
+                        let unused10 = 0
+                    ]
+                ]
+                if not is_doc [
+                    lw.err_h("H0210", "na poziomie modulu hack3rc obsluguje tylko definicje fun/struct/enum/impl, jest: wyrazenie", "")
+                ]
+            ]
+            _ -> [
+                lw.err_h("H0210", "na poziomie modulu hack3rc obsluguje tylko definicje fun/struct/enum/impl, jest: " + stmt_kind(s3.clone()), stmt_kind(s3.clone()))
+            ]
+        ]
+        m = m + 1
+    ]
+    let mi2 = lw.find_fn("main")
+    if mi2 < 0 [
+        lw.err("H0220", "brak funkcji 'main'")
+    ] else [
+        if lw.fn_params[mi2].len() != 0 [
+            lw.err_h("H0221", "'main' nie moze miec parametrow w hack3rc", "fun main(")
+        ]
+        if lw.fn_rets[mi2] != "u" [
+            lw.err_h("H0222", "'main' nie zwraca wartosci (jak w hackerc) - kod wyjscia ustaw przez exit(kod)", "fun main(")
+        ]
+    ]
+    !!! Przebieg 4: ciala funkcji i metod.
+    let fns = ""
+    let n = 0
+    while n < body.len() [
+        let s4 = body[n].clone()
+        match s4 [
+            FunDecl(name4, params4, _ret4, fbody4, _p4, _a4, _as4) -> [
+                let fidx = lw.find_fn(name4.clone())
+                if fidx >= 0 [
+                    let pn: List<Str> = []
+                    let k4 = 0
+                    while k4 < params4.len() [
+                        pn.push(params4[k4].name.clone())
+                        k4 = k4 + 1
+                    ]
+                    fns = fns + "\n" + lw.lower_fn_body("hks_f_" + name4, lw.fn_rets[fidx].clone(), pn, split_types(lw.fn_params[fidx].clone()), fbody4.clone(), name4.clone())
+                ]
+            ]
+            ImplDecl(tname5, methods5, _ia5) -> [
+                let selfty5 = "S:" + tname5
+                if lw.find_in(lw.en_names.clone(), tname5.clone()) >= 0 [
+                    selfty5 = "E:" + tname5
+                ]
+                let mj = 0
+                while mj < methods5.len() [
+                    match methods5[mj].clone() [
+                        FunDecl(mname5, mparams5, _mret5, mbody5, _mp5, _ma5, _mas5) -> [
+                            let key5 = tname5 + "::" + mname5
+                            let midx5 = lw.find_in(lw.m_keys.clone(), key5.clone())
+                            if midx5 >= 0 and mparams5.len() > 0 and mparams5[0].name == "self" [
+                                let pn5: List<Str> = []
+                                let pt5: List<Str> = []
+                                pn5.push("self")
+                                pt5.push(selfty5.clone())
+                                let rest = split_types(lw.m_params[midx5].clone())
+                                let r5 = 1
+                                while r5 < mparams5.len() [
+                                    pn5.push(mparams5[r5].name.clone())
+                                    pt5.push(rest[r5 - 1].clone())
+                                    r5 = r5 + 1
+                                ]
+                                fns = fns + "\n" + lw.lower_fn_body("hks_m_" + tname5 + "_" + mname5, lw.m_rets[midx5].clone(), pn5, pt5, mbody5.clone(), tname5 + "." + mname5)
+                            ]
+                        ]
+                        _ -> [
+                            let unused8 = 0
+                        ]
+                    ]
+                    mj = mj + 1
+                ]
+            ]
+            _ -> [
+                let unused9 = 0
+            ]
+        ]
+        n = n + 1
+    ]
+    !!! Funkcja wejsciowa: wola main, kod wyjscia 0 (inny przez exit(kod)).
+    let entry = "(fn hks_entry i () (ret (i 0)))"
+    if mi2 >= 0 [
+        entry = "(fn hks_entry i () (expr (call hks_f_main)) (ret (i 0)))"
+    ]
+    let ir = str_join(lw.data_decls.clone(), "\n") + "\n" + str_join(lw.ext_decls.clone(), "\n") + fns + "\n" + entry + "\n"
+    end LowerResult(ir, lw.diags.clone())
+]
