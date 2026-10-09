@@ -1,385 +1,401 @@
 include <work:hackerc::lexer>
 include <work:hackerc::ast_nodes>
 include <work:hackerc::parser>
+include <work:hackerc::diagnostics>
+include <work:hack3rc::lower>
+include <work:hack3rc::backend>
+include <work:hack3rc::runtime>
 get <std:io> import <file_readable>
-get <std:fs> import <create_dir_ok>
-get <std:string> import <str_join::str_to_int::str_replace>
+get <std:fs> import <create_dir_ok::remove_dir_all_ok::copy_file_ok>
+get <std:string> import <str_join::str_split::str_contains::str_to_int::str_ends_with::str_starts_with::str_trim>
 
-!!! Lowering `Expr` (waski podzbior) do listy instrukcji STOSOWYCH,
-!!! zapisanych JUZ jako gotowe fragmenty Rusta (`Instr::Const(5)` itp.) -
-!!! kazdy fragment to jeden wariant `enum Instr` z FIXED, raz
-!!! zweryfikowanego szablonu (patrz `HACK3RC_RUNTIME_TEMPLATE` nizej) -
-!!! interpretowanego w wygenerowanym programie, ktory Z TEJ listy buduje
-!!! prawdziwe IR Cranelift (stosowo: `Const`/`LoadVar` odkladaja wartosc,
-!!! `Add`/`Sub`/`Mul`/`Div` zdejmuja 2 i odkladaja wynik, `StoreVar`
-!!! zdejmuje 1). Zwraca `false` (zamiast crashowac) na KAZDYM konstrukcie
-!!! spoza Zakresu 0.0.1 - wywolujacy zglasza wtedy czytelny blad.
-!!! NAPRAWA (Tura 10) - zwraca `Option<List<Str>>` zamiast przyjmowac
-!!! akumulator `out: List<Str>` PRZEZ REFERENCJE i dopisywac do niego
-!!! rekurencyjnie - ten drugi wzorzec dawal w wygenerowanym Rust
-!!! `error[E0596]: cannot borrow out as mutable` (parametr juz jest
-!!! `&mut Vec<String>`, ponowne `&mut out` przy przekazaniu dalej do
-!!! wywolania rekurencyjnego sie nie kompiluje - kodegen HackerScript
-!!! nie robi "reborrow" automatycznie dla parametrow List<T>). Zwracanie
-!!! nowej listy z kazdego wywolania jest proste i bezpieczne.
-fun lower_expr(e: Expr) -> Option<List<Str>> [
-    match e [
-        NumberLit(txt) -> [
-            match str_to_int(txt) [
-                Some(n) -> [
-                    end some(["Instr::Const(" + (n as Str) + ")"])
-                ]
-                None -> [
-                    end none()
-                ]
-            ]
-        ]
-        IdentExpr(name) -> [
-            end some(["Instr::LoadVar(\"" + name + "\".to_string())"])
-        ]
-        BinOp(op, lhs, rhs) -> [
-            match lower_expr(lhs.clone()) [
-                Some(left_instrs) -> [
-                    match lower_expr(rhs.clone()) [
-                        Some(right_instrs) -> [
-                            let opcode = ""
-                            if op == "+" [
-                                opcode = "Instr::Add"
-                            ]
-                            if op == "-" [
-                                opcode = "Instr::Sub"
-                            ]
-                            if op == "*" [
-                                opcode = "Instr::Mul"
-                            ]
-                            if op == "/" [
-                                opcode = "Instr::Div"
-                            ]
-                            if opcode == "" [
-                                end none()
-                            ]
-                            let combined: List<Str> = []
-                            let li = 0
-                            while li < left_instrs.len() [
-                                combined.push(left_instrs[li].clone())
-                                li = li + 1
-                            ]
-                            let ri = 0
-                            while ri < right_instrs.len() [
-                                combined.push(right_instrs[ri].clone())
-                                ri = ri + 1
-                            ]
-                            combined.push(opcode)
-                            end some(combined)
-                        ]
-                        None -> [
-                            end none()
-                        ]
-                    ]
-                ]
-                None -> [
-                    end none()
-                ]
-            ]
-        ]
-        _ -> [
-            end none()
-        ]
-    ]
+!!! hack3rc 0.1 - kompilator AOT podzbioru HackerScript do natywnych
+!!! plikow wykonywalnych (Cranelift). Caly kod zrodlowy to HackerScript:
+!!!   lower.hcs   - analiza typow + lowering AST -> IR
+!!!   backend.hcs - Cranelift (blok `native {Rust}` w pliku .hcs)
+!!!   runtime.hcs - minimalny runtime (log/read_int/exit/panic)
+!!!   main.hcs    - CLI i driver (ten plik)
+!!! Dokumentacja: docs/HACK3RC.md
+
+struct Opts [
+    input: Str,
+    out: Str,
+    emit: Str,
+    run: Bool,
+    opt: Str,
+    cc: Str,
+    target: Str,
+    runner: Str,
+    keep: Bool,
+    check: Bool,
+    dump_clif: Bool
 ]
 
-!!! Lowering `Stmt` (waski podzbior: `let`/`end`). Zwraca `false` na
-!!! nieobslugiwanym konstrukcie (if/while/struct/...).
-!!! NAPRAWA (Tura 10) - jak `lower_expr` wyzej, `Option<List<Str>>`
-!!! zamiast akumulatora przez referencje.
-fun lower_stmt(s: Stmt) -> Option<List<Str>> [
-    match s [
-        LetStmt(name, _type_ref, value_opt, _is_mut) -> [
-            match value_opt [
-                Some(value) -> [
-                    match lower_expr(value) [
-                        Some(instrs) -> [
-                            let out_instrs = instrs
-                            out_instrs.push("Instr::StoreVar(\"" + name + "\".to_string())")
-                            end some(out_instrs)
-                        ]
-                        None -> [
-                            end none()
-                        ]
-                    ]
-                ]
-                None -> [
-                    end none()
-                ]
-            ]
-        ]
-        ReturnStmt(value_opt) -> [
-            match value_opt [
-                Some(value) -> [
-                    match lower_expr(value) [
-                        Some(instrs) -> [
-                            let out_instrs = instrs
-                            out_instrs.push("Instr::Ret")
-                            end some(out_instrs)
-                        ]
-                        None -> [
-                            end none()
-                        ]
-                    ]
-                ]
-                None -> [
-                    end none()
-                ]
-            ]
-        ]
-        _ -> [
-            end none()
-        ]
-    ]
+fun usage() -> Str [
+    let l: List<Str> = []
+    l.push("hack3rc 0.2.0 - kompilator AOT HackerScript (Cranelift)")
+    l.push("")
+    l.push("uzycie: hack3rc <plik.hcs> [opcje]")
+    l.push("")
+    l.push("  -o <plik>         plik wynikowy (domyslnie: nazwa zrodla bez .hcs)")
+    l.push("  --run             zbuduj i od razu uruchom (kod wyjscia = kod programu)")
+    l.push("  --check           tylko analiza (bez generowania kodu)")
+    l.push("  --emit <co>       exe (domyslnie) | obj | ir")
+    l.push("  -O0 | -O1 | -O2   poziom optymalizacji Cranelift (domyslnie -O1)")
+    l.push("  --target <cel>    architektura docelowa: aarch64 | riscv64 | s390x | x86_64")
+    l.push("                    albo pelny triple (domyslnie: host); cross-kompilacja")
+    l.push("  --cc <polecenie>  linker/kompilator C dla celu, np. \"clang\" albo \"zig cc -target aarch64-linux\"")
+    l.push("                    (domyslnie: cc, a dla innego celu <arch>-linux-gnu-gcc)")
+    l.push("  --runner <pol.>   uruchamiacz dla --run z innym celem (domyslnie: qemu-<arch> -L /usr/<arch>-linux-gnu)")
+    l.push("  --keep-temps      nie usuwaj katalogu tymczasowego (<wynik>.hks-tmp)")
+    l.push("  --dump-clif       wypisz Cranelift IR na stderr")
+    l.push("  --version, -h     wersja / pomoc")
+    end str_join(l, "\n")
 ]
 
-!!! Znajduje `fun main() -> Int [ ... ]` NAJWYZSZEGO POZIOMU w
-!!! sparsowanym programie.
-fun find_main_fun(prog: Program) -> Option<Stmt> [
+!!! Przetwarza argv -> Opts. Blad zwracany jest w polu `emit` jako
+!!! tekst zaczynajacy sie od '!'.
+fun parse_args(argv: List<Str>) -> Opts [
+    let o = Opts("", "", "exe", false, "speed", "", "", "", false, false, false)
     let i = 0
-    while i < prog.body.len() [
-        match prog.body[i].clone() [
-            FunDecl(name, _params, _ret, _body, _is_pub, _tparams, _is_async) -> [
-                if name == "main" [
-                    end some(prog.body[i].clone())
-                ]
+    while i < argv.len() [
+        let a = argv[i].clone()
+        if a == "-o" [
+            if i + 1 >= argv.len() [
+                o.emit = "!opcja -o wymaga argumentu"
+                end o
             ]
-            _ -> [
+            o.out = argv[i + 1].clone()
+            i = i + 1
+        ] elif a == "--emit" [
+            if i + 1 >= argv.len() [
+                o.emit = "!opcja --emit wymaga argumentu (exe|obj|ir)"
+                end o
             ]
+            o.emit = argv[i + 1].clone()
+            i = i + 1
+        ] elif a == "--cc" [
+            if i + 1 >= argv.len() [
+                o.emit = "!opcja --cc wymaga argumentu"
+                end o
+            ]
+            o.cc = argv[i + 1].clone()
+            i = i + 1
+        ] elif a == "--target" [
+            if i + 1 >= argv.len() [
+                o.emit = "!opcja --target wymaga argumentu"
+                end o
+            ]
+            o.target = argv[i + 1].clone()
+            i = i + 1
+        ] elif a == "--runner" [
+            if i + 1 >= argv.len() [
+                o.emit = "!opcja --runner wymaga argumentu"
+                end o
+            ]
+            o.runner = argv[i + 1].clone()
+            i = i + 1
+        ] elif a == "--run" [
+            o.run = true
+        ] elif a == "--check" [
+            o.check = true
+        ] elif a == "--keep-temps" [
+            o.keep = true
+        ] elif a == "--dump-clif" [
+            o.dump_clif = true
+        ] elif a == "-O0" [
+            o.opt = "none"
+        ] elif a == "-O1" [
+            o.opt = "speed"
+        ] elif a == "-O2" [
+            o.opt = "speed_and_size"
+        ] elif str_starts_with(a.clone(), "-") [
+            o.emit = "!nieznana opcja '" + a + "'"
+            end o
+        ] else [
+            if o.input != "" [
+                o.emit = "!podano wiecej niz jeden plik wejsciowy"
+                end o
+            ]
+            o.input = a
         ]
         i = i + 1
     ]
-    end none()
+    end o
 ]
 
-!!! Szablon RUNTIME (Cranelift <-> `enum Instr`) - RAZ RECZNIE
-!!! NAPISANY I ZWERYFIKOWANY (skompilowany + URUCHOMIONY, wynik
-!!! poprawny dla `let x = 5  let y = x * 2 + 1  end y - 3` -> `8`) w
-!!! tej sesji, patrz SESSION_LOG.md Tura 10. `hack3rc` NIGDY nie zmienia
-!!! tego tekstu - dokleja WYLACZNIE literal `vec![...]` z
-!!! `lower_stmt`/`lower_expr` (patrz `hack3rc_main_rs` nizej).
-!!! Szablon RUNTIME (Cranelift <-> `enum Instr`) - RAZ RECZNIE
-!!! NAPISANY I ZWERYFIKOWANY (skompilowany + URUCHOMIONY, wynik
-!!! poprawny dla `let x = 5  let y = x * 2 + 1  end y - 3` -> `8`) w
-!!! tej sesji, patrz SESSION_LOG.md Tura 10. `hack3rc` NIGDY nie zmienia
-!!! tego tekstu - dokleja WYLACZNIE literal `vec![...]` z
-!!! `lower_stmt`/`lower_expr` (patrz `hack3rc_main_rs` nizej). Zapisany
-!!! jako LISTA LINII (nie jeden wieloliniowy string) - lexer
-!!! HackerScript przerywa string literal na PIERWSZYM doslownym
-!!! znaku nowej linii (patrz `hackerc/cmd/lexer.hcs`), wiec jeden
-!!! ogromny string na wielu liniach zrodla by sie NIE sparsowal.
-fun hack3rc_runtime_lines() -> List<Str> [
-    end [
-    "use cranelift_codegen::ir::{types, AbiParam, InstBuilder, Value};",
-    "use cranelift_codegen::settings;",
-    "use cranelift_codegen::settings::Configurable;",
-    "use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};",
-    "use cranelift_jit::{JITBuilder, JITModule};",
-    "use cranelift_module::{Module, Linkage};",
-    "use std::collections::HashMap;",
-    "",
-    "#[derive(Clone, Debug)]",
-    "enum Instr {",
-    "    Const(i64),",
-    "    LoadVar(String),",
-    "    StoreVar(String),",
-    "    Add,",
-    "    Sub,",
-    "    Mul,",
-    "    Div,",
-    "    Ret,",
-    "}",
-    "",
-    "fn build_and_run(program: &[Instr]) -> i64 {",
-    "    let mut flag_builder = settings::builder();",
-    "    flag_builder.set(\"use_colocated_libcalls\", \"false\").unwrap();",
-    "    flag_builder.set(\"is_pic\", \"false\").unwrap();",
-    "    let isa_builder = cranelift_native::builder().unwrap();",
-    "    let isa = isa_builder.finish(settings::Flags::new(flag_builder)).unwrap();",
-    "    let jit_builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());",
-    "    let mut module = JITModule::new(jit_builder);",
-    "",
-    "    let mut ctx = module.make_context();",
-    "    let mut fbctx = FunctionBuilderContext::new();",
-    "    ctx.func.signature.returns.push(AbiParam::new(types::I64));",
-    "",
-    "    {",
-    "        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fbctx);",
-    "        let block = builder.create_block();",
-    "        builder.switch_to_block(block);",
-    "        builder.seal_block(block);",
-    "",
-    "        let mut vars: HashMap<String, Variable> = HashMap::new();",
-    "        let mut next_var: u32 = 0;",
-    "        let mut stack: Vec<Value> = Vec::new();",
-    "",
-    "        for instr in program {",
-    "            match instr {",
-    "                Instr::Const(n) => {",
-    "                    let v = builder.ins().iconst(types::I64, *n);",
-    "                    stack.push(v);",
-    "                }",
-    "                Instr::LoadVar(name) => {",
-    "                    let var = *vars.get(name).expect(\"hack3rc: nieznana zmienna\");",
-    "                    stack.push(builder.use_var(var));",
-    "                }",
-    "                Instr::StoreVar(name) => {",
-    "                    let val = stack.pop().expect(\"hack3rc: pusty stos (StoreVar)\");",
-    "                    let var = if let Some(v) = vars.get(name) {",
-    "                        *v",
-    "                    } else {",
-    "                        let v = Variable::from_u32(next_var);",
-    "                        next_var += 1;",
-    "                        builder.declare_var(v, types::I64);",
-    "                        vars.insert(name.clone(), v);",
-    "                        v",
-    "                    };",
-    "                    builder.def_var(var, val);",
-    "                }",
-    "                Instr::Add => { let b = stack.pop().unwrap(); let a = stack.pop().unwrap(); stack.push(builder.ins().iadd(a, b)); }",
-    "                Instr::Sub => { let b = stack.pop().unwrap(); let a = stack.pop().unwrap(); stack.push(builder.ins().isub(a, b)); }",
-    "                Instr::Mul => { let b = stack.pop().unwrap(); let a = stack.pop().unwrap(); stack.push(builder.ins().imul(a, b)); }",
-    "                Instr::Div => { let b = stack.pop().unwrap(); let a = stack.pop().unwrap(); stack.push(builder.ins().sdiv(a, b)); }",
-    "                Instr::Ret => { let v = stack.pop().expect(\"hack3rc: pusty stos (Ret)\"); builder.ins().return_(&[v]); }",
-    "            }",
-    "        }",
-    "        builder.finalize();",
-    "    }",
-    "",
-    "    let id = module.declare_function(\"hks_main\", Linkage::Export, &ctx.func.signature).unwrap();",
-    "    module.define_function(id, &mut ctx).unwrap();",
-    "    module.clear_context(&mut ctx);",
-    "    module.finalize_definitions().unwrap();",
-    "",
-    "    let code = module.get_finalized_function(id);",
-    "    let f: fn() -> i64 = unsafe { std::mem::transmute(code) };",
-    "    f()",
-    "}",
-    "",
-    "fn main() {",
-    "    let program: Vec<Instr> = vec![",
-    "__HKS_PROGRAM__",
-    "    ];",
-    "    let result = build_and_run(&program);",
-    "    println!(\"{}\", result);",
-    "}",
-    ""
-    ]
-]
+!!! ---------------------------------------------------------------
+!!! Cele (cross-kompilacja)
+!!! ---------------------------------------------------------------
 
-fun hack3rc_runtime_template() -> Str [
-    end str_join(hack3rc_runtime_lines(), "\n")
-]
-
-fun hack3rc_cargo_toml(name: Str) -> Str [
-    end "[package]\nname = \"" + name + "\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\n[dependencies]\ncranelift-codegen = \"0.116\"\ncranelift-frontend = \"0.116\"\ncranelift-jit = \"0.116\"\ncranelift-module = \"0.116\"\ncranelift-native = \"0.116\"\n"
-]
-
-fun cmd_hack3rc_build(src_path: Str, out_dir: Str) -> Int [
-    if not file_readable(src_path.clone()) [
-        elog("hack3rc: nie znaleziono pliku " + src_path)
-        end 1
-    ]
-    match read_file(src_path.clone()) [
-        Ok(source) -> [
-            let prog = parse(source)
-            match find_main_fun(prog) [
-                Some(main_stmt) -> [
-                    match main_stmt [
-                        FunDecl(_name, _params, _ret, body, _is_pub, _tparams, _is_async) -> [
-                            let instrs: List<Str> = []
-                            let ok = true
-                            let bi = 0
-                            while bi < body.len() and ok [
-                                match lower_stmt(body[bi].clone()) [
-                                    Some(stmt_instrs) -> [
-                                        let sii = 0
-                                        while sii < stmt_instrs.len() [
-                                            instrs.push(stmt_instrs[sii].clone())
-                                            sii = sii + 1
-                                        ]
-                                    ]
-                                    None -> [
-                                        ok = false
-                                    ]
-                                ]
-                                bi = bi + 1
-                            ]
-                            if not ok [
-                                elog("hack3rc: nieobslugiwane w Zakresie 0.0.1 (patrz docs/HACK3RC.md) - fun main() moze zawierac WYLACZNIE 'let nazwa = wyrazenie' i 'end wyrazenie', z liczb calkowitych/identyfikatorow/+-*/ ")
-                                end 1
-                            ]
-                            if instrs.len() == 0 [
-                                elog("hack3rc: fun main() jest puste - potrzeba przynajmniej 'end wyrazenie'")
-                                end 1
-                            ]
-                            create_dir_ok(out_dir.clone())
-                            create_dir_ok(out_dir + "/src")
-                            let program_lines = str_join(instrs, ",\n        ") + ","
-                            let main_rs = str_replace(hack3rc_runtime_template(), "__HKS_PROGRAM__", "        " + program_lines)
-                            match write_file(out_dir + "/src/main.rs", main_rs) [
-                                Ok(_v) -> [
-                                ]
-                                Err(e) -> [
-                                    elog("hack3rc: " + out_dir + "/src/main.rs: " + e)
-                                    end 1
-                                ]
-                            ]
-                            match write_file(out_dir + "/Cargo.toml", hack3rc_cargo_toml("hack3rc_out")) [
-                                Ok(_v) -> [
-                                ]
-                                Err(e) -> [
-                                    elog("hack3rc: " + out_dir + "/Cargo.toml: " + e)
-                                    end 1
-                                ]
-                            ]
-                            log("hack3rc: crate gotowy w " + out_dir + " (" + (instrs.len() as Str) + " instrukcji) - uruchom 'cargo run' tam")
-                            end 0
-                        ]
-                        _ -> [
-                            elog("hack3rc: blad wewnetrzny (find_main_fun zwrocilo nie-FunDecl)")
-                            end 1
-                        ]
-                    ]
-                ]
-                None -> [
-                    elog("hack3rc: brak 'fun main() -> Int [ ... ]' w " + src_path)
-                    end 1
-                ]
+fun split_words(s: Str) -> List<Str> [
+    let out: List<Str> = []
+    let cur = ""
+    let i = 0
+    while i < s.len() [
+        let c = s.char_at(i)
+        if c == " " [
+            if cur != "" [
+                out.push(cur)
+                cur = ""
             ]
+        ] else [
+            cur = cur + c
         ]
-        Err(e) -> [
-            elog("hack3rc: " + src_path + ": " + e)
-            end 1
+        i = i + 1
+    ]
+    if cur != "" [
+        out.push(cur)
+    ]
+    end out
+]
+
+!!! Skrot -> pelny triple (Linux GNU); pelny triple zostaje bez zmian.
+fun expand_target(t: Str) -> Str [
+    if t == "x86_64" [
+        end "x86_64-unknown-linux-gnu"
+    ]
+    if t == "aarch64" or t == "arm64" [
+        end "aarch64-unknown-linux-gnu"
+    ]
+    if t == "riscv64" [
+        end "riscv64gc-unknown-linux-gnu"
+    ]
+    if t == "s390x" [
+        end "s390x-unknown-linux-gnu"
+    ]
+    end t
+]
+
+!!! Architektura = pierwszy segment triple'a (riscv64gc -> riscv64).
+fun target_arch(t: Str) -> Str [
+    let arch = ""
+    let i = 0
+    while i < t.len() [
+        let c = t.char_at(i)
+        if c == "-" [
+            i = t.len()
+        ] else [
+            arch = arch + c
+        ]
+        i = i + 1
+    ]
+    if str_starts_with(arch.clone(), "riscv64") [
+        end "riscv64"
+    ]
+    end arch
+]
+
+fun host_arch() -> Str [
+    let uname_args: List<Str> = ["-m"]
+    match run_command("uname", uname_args) [
+        Ok(out) -> [
+            let a = str_trim(out)
+            if a == "arm64" [
+                end "aarch64"
+            ]
+            end a
+        ]
+        Err(_e) -> [
+            end "x86_64"
         ]
     ]
 ]
 
-!!! NAPRAWA (Tura 10) - `args()` (patrz codegen.hcs) juz POMIJA nazwe
-!!! programu (`std::env::args().skip(1)`) - `argv[0]` to od razu
-!!! PIERWSZY prawdziwy argument (ten sam wzorzec co `first =
-!!! argv[0].clone()` w `hackerc/cmd/main.hcs`), NIE `argv[1]`.
+!!! Domyslny kompilator C dla celu: "cc" dla hosta, inaczej
+!!! <arch>-linux-gnu-gcc (pakiety gcc-<arch>-linux-gnu); "" gdy nieznany.
+fun default_cc(arch: Str, host: Str) -> Str [
+    if arch == host [
+        end "cc"
+    ]
+    if arch == "aarch64" or arch == "riscv64" or arch == "s390x" or arch == "x86_64" [
+        end arch + "-linux-gnu-gcc"
+    ]
+    end ""
+]
+
+fun default_runner(arch: Str, host: Str) -> Str [
+    if arch == host [
+        end ""
+    ]
+    if arch == "aarch64" or arch == "riscv64" or arch == "s390x" or arch == "x86_64" [
+        end "qemu-" + arch + " -L /usr/" + arch + "-linux-gnu"
+    ]
+    end ""
+]
+
+fun fail(msg: Str) -> Int [
+    elog("hack3rc: blad: " + msg)
+    end 1
+]
+
+!!! Glowny przebieg: parsowanie -> analiza/lowering -> Cranelift ->
+!!! linkowanie -> (opcjonalnie) uruchomienie. Zwraca kod wyjscia.
+fun compile(o: Opts) -> Int [
+    if not file_readable(o.input.clone()) [
+        end fail("nie znaleziono pliku " + o.input)
+    ]
+    match read_file(o.input.clone()) [
+        Err(e) -> [
+            end fail("nie mozna odczytac " + o.input + ": " + e)
+        ]
+        Ok(source) -> [
+            let parsed = parse_checked(source.clone())
+            if parsed.errors.len() > 0 [
+                log(render_many(source.clone(), o.input.clone(), parsed.errors.clone()))
+                end 1
+            ]
+            let lowered = lower_program(parsed.program, split_lines(source.clone()), o.input.clone())
+            if lowered.diags.len() > 0 [
+                log(render_many(source.clone(), o.input.clone(), lowered.diags.clone()))
+                elog("hack3rc: przerwano - bledow: " + (lowered.diags.len() as Str))
+                end 1
+            ]
+            if o.check [
+                log("hack3rc: " + o.input + " OK")
+                end 0
+            ]
+            if o.emit == "ir" [
+                log(lowered.ir)
+                end 0
+            ]
+            end build_native(o, lowered.ir)
+        ]
+    ]
+]
+
+fun build_native(o: Opts, ir: Str) -> Int [
+    let out: Str = o.out.clone()
+    if out == "" [
+        out = o.input.clone()
+        if str_ends_with(out.clone(), ".hcs") [
+            out = out.slice(0, out.len() - 4)
+        ] else [
+            out = out + ".out"
+        ]
+    ]
+    let tmp = out + ".hks-tmp"
+    if not create_dir_ok(tmp.clone()) [
+        end fail("nie mozna utworzyc katalogu " + tmp)
+    ]
+    let obj = tmp + "/prog.o"
+    let target = expand_target(o.target.clone())
+    let host = host_arch()
+    let arch = host.clone()
+    if target != "" [
+        arch = target_arch(target.clone())
+    ]
+    let err = cl_emit(ir, obj.clone(), o.opt.clone(), o.dump_clif, target.clone())
+    if err != "" [
+        if not o.keep [
+            remove_dir_all_ok(tmp.clone())
+        ]
+        end fail("backend Cranelift: " + err)
+    ]
+    if o.emit == "obj" [
+        let obj_out = out + ".o"
+        copy_file_ok(obj.clone(), obj_out.clone())
+        if not o.keep [
+            remove_dir_all_ok(tmp.clone())
+        ]
+        log("hack3rc: " + obj_out)
+        end 0
+    ]
+    if o.emit != "exe" [
+        remove_dir_all_ok(tmp.clone())
+        end fail("nieznana wartosc --emit '" + o.emit + "' (exe|obj|ir)")
+    ]
+    let rt = tmp + "/rt.c"
+    write_file(rt.clone(), runtime_c_source())
+    let exe = out.clone()
+    if o.run and o.out == "" [
+        exe = tmp + "/prog"
+    ]
+    let cc_cmd = o.cc.clone()
+    if cc_cmd == "" and (target == "" or str_contains(target.clone(), "linux")) [
+        cc_cmd = default_cc(arch.clone(), host.clone())
+    ]
+    if cc_cmd == "" [
+        if not o.keep [
+            remove_dir_all_ok(tmp.clone())
+        ]
+        end fail("brak domyslnego kompilatora C dla celu '" + target + "' - podaj --cc (np. --cc \"zig cc -target ...\")")
+    ]
+    let cc_words = split_words(cc_cmd.clone())
+    let cc_args: List<Str> = []
+    let w = 1
+    while w < cc_words.len() [
+        cc_args.push(cc_words[w].clone())
+        w = w + 1
+    ]
+    cc_args.push("-O2")
+    cc_args.push("-o")
+    cc_args.push(exe.clone())
+    cc_args.push(obj.clone())
+    cc_args.push(rt.clone())
+    cc_args.push("-lm")
+    match run_command(cc_words[0].clone(), cc_args) [
+        Err(msg) -> [
+            if not o.keep [
+                remove_dir_all_ok(tmp.clone())
+            ]
+            end fail("linkowanie przez '" + cc_cmd + "' nie powiodlo sie:\n" + msg)
+        ]
+        Ok(_out) -> [
+            let unused = 0
+        ]
+    ]
+    let code = 0
+    if o.run [
+        let runner_cmd = o.runner.clone()
+        if runner_cmd == "" [
+            runner_cmd = default_runner(arch.clone(), host.clone())
+        ]
+        if runner_cmd == "" [
+            let no_args: List<Str> = []
+            code = run_command_inherit(exe.clone(), no_args)
+        ] else [
+            let rw = split_words(runner_cmd.clone())
+            let run_args: List<Str> = []
+            let r = 1
+            while r < rw.len() [
+                run_args.push(rw[r].clone())
+                r = r + 1
+            ]
+            run_args.push(exe.clone())
+            code = run_command_inherit(rw[0].clone(), run_args)
+        ]
+    ] else [
+        log("hack3rc: " + exe)
+    ]
+    if not o.keep [
+        remove_dir_all_ok(tmp.clone())
+    ]
+    end code
+]
+
 fun main() [
     let argv = args()
-    if argv.len() < 1 [
-        log("usage: hack3rc <plik.hcs> [-o <katalog_wyjsciowy>]")
-        log("  Zakres 0.0.1 (patrz docs/HACK3RC.md) - tylko 'fun main() -> Int [ ... ]',")
-        log("  cialo z 'let'/'end' + Int/identyfikatory/+-*/")
+    if argv.len() == 0 [
+        log(usage())
         exit(1)
     ]
-    let src = argv[0].clone()
-    let out_dir = "hack3rc_out"
-    let oi = 0
-    while oi < argv.len() [
-        if (argv[oi].clone() == "-o") and oi + 1 < argv.len() [
-            out_dir = argv[oi + 1].clone()
-        ]
-        oi = oi + 1
+    if argv[0] == "--version" [
+        log("hack3rc 0.2.0")
+        exit(0)
     ]
-    exit(cmd_hack3rc_build(src, out_dir))
+    if argv[0] == "-h" or argv[0] == "--help" [
+        log(usage())
+        exit(0)
+    ]
+    let o = parse_args(argv)
+    if str_starts_with(o.emit.clone(), "!") [
+        let emsg: Str = o.emit.clone()
+        exit(fail(emsg.slice(1, emsg.len())))
+    ]
+    if o.input == "" [
+        log(usage())
+        exit(1)
+    ]
+    exit(compile(o))
 ]
