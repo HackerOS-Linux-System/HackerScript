@@ -461,3 +461,45 @@ Nieruszone pozostaje: statyczne linkowanie dla `fast direct`, mosty
 Rust-native dla backendow bez CPythona, prawdziwe (nie przyblizone)
 numery linii w AST, pelny zakres jezyka w `hack3rc` (dzis: tylko
 arytmetyka calkowita).
+
+## Tura 11 — `hack3rc` 0.2 (kompilator AOT) i backend JavaScript
+
+* **`hack3rc` — prawdziwy kompilator AOT** (docs/HACK3RC.md): natywny plik
+  wykonywalny w kilkadziesiąt ms zamiast crate'a z JIT-em (≈ 2,5 min cargo
+  na program). 0.1: `Int/Float/Bool`, funkcje, pętle, `log`. **0.2:**
+  `struct`, `enum` z polami + `match`, `impl` (metody), `List<T>`,
+  `Option<T>`, napisy (`+`, `==`, `as Str`), głębokie `.clone()`.
+  Całość w HackerScript; API Cranelifta w jednym bloku `native {Rust}` w
+  `backend.hcs`.
+* **Model pamięci**: konserwatywny odśmiecacz mark-sweep w runtime
+  (skanowanie stosu i rejestrów, wskaźniki wewnętrzne, deskryptory typów
+  do `clone`). Testy w trybie „GC przy każdej alokacji”; pamięć stała
+  (≈ 14 MB) przy ≈ 900 MB zaalokowanych w sumie.
+* **Cross-kompilacja i wiele architektur**: `--target` (aarch64, riscv64,
+  s390x, x86_64 + pełne triple), `--cc` z argumentami, `--runner`. Cały
+  zestaw (31 testów) przechodzi na x86_64, aarch64, riscv64 i s390x
+  (big-endian) pod QEMU. Obiekty Mach-O i COFF emitowane (bez linkowania).
+* **`get <crates:nazwa::wersja+feature>`** (hackerc/cmd/project.hcs):
+  features Cargo w składni `get` — odblokowało `all-arch` dla Cranelifta.
+  Bootstrap: `hack3rc` buduje się teraz hackerc z tego repozytorium.
+* **Weryfikacja różnicowa z `hackerc`**: 14 programów daje bajt w bajt to
+  samo wyjście pod `hack3rc` i `hackerc`; plus testy matematyki, kodów
+  wyjścia, paniki, stdin i błędów kompilacji — `hack3rc/tests/`.
+* **Naprawiony błąd parsera `hackerc`**: pętle `while not
+  self.check(Close, ...)` nie sprawdzały końca pliku, więc niedomknięty
+  nawias na końcu pliku zapętlał parser w nieskończoność (OOM-kill).
+* **Znaleziony, NIEnaprawiony błąd generatora Rust w `hackerc`**:
+  `lista[i].pole += x` i `lista[i][j] += x` generują `lista[i].clone()...` i
+  po cichu gubią zapis (modyfikują kopię). `hack3rc` ma poprawną semantykę
+  (test `inplace`); do naprawy w `hackerc/cmd/codegen.hcs`.
+* **`use <lang:javascript>`** (docs/JAVASCRIPT.md): backend
+  `hackerc/cmd/javascript_backend.hcs` + runtime `js_runtime.hcs`;
+  struct/enum/impl/match/Option/Result/`?`/async/await/spawn/kanały/Dict/
+  listy; podkomenda `hackerc js`; testy `hackerc/tests/javascript/`.
+* **`use <mode:website>`** (docs/WEBSITE.md): `hackerc build`/`hackerc
+  website` generuje `index.html` + `app.js` z mostkiem DOM (zdarzenia,
+  `http_get`, `localStorage`…); zweryfikowane w jsdom.
+* **Następne kroki**: `Dict`/`Result`/`?` i metody `Str` w `hack3rc`,
+  inline'owanie dostępu do list i szybsza ścieżka alokacji, `native
+  {JavaScript}` w backendzie JS, `Int` jako BigInt (opcjonalnie), prawdziwe
+  pozycje w AST dla diagnostyk, test strony w prawdziwej przeglądarce.
