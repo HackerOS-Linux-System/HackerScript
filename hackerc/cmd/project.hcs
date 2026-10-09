@@ -1227,6 +1227,30 @@ fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_roo
     end ProjectSignatures(sigs, disc.warnings)
 ]
 
+!!! NOWOSC (hack3rc 0.2) - features crate'ow w `get <crates:...>`.
+!!! Skladnia: `get <crates:nazwa::wersja+feature1+feature2>` - czesc po
+!!! pierwszym `+` to lista features Cargo, np.
+!!! `get <crates:cranelift-codegen::0.116+all-arch>` daje
+!!! `cranelift-codegen = { version = "0.116", features = ["all-arch"] }`.
+!!! Bez `+` zostaje zwykle `nazwa = "wersja"` (zachowanie bez zmian).
+fun crate_dep_line(name: Str, version: Str) -> Str [
+    if not str_contains(version.clone(), "+") [
+        end name + " = \"" + version + "\"\n"
+    ]
+    let parts = str_split(version, "+")
+    let feats = ""
+    let k = 1
+    while k < parts.len() [
+        if k > 1 [
+            feats = feats + ", "
+        ]
+        feats = feats + "\"" + parts[k].clone() + "\""
+        k = k + 1
+    ]
+    end name + " = { version = \"" + parts[0].clone() + "\", features = [" + feats + "] }\n"
+]
+
+
 fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, needs_sandbox: Bool, needs_hot_reload: Bool, needs_native_cpp: Bool, needs_wasm_bindgen: Bool, force_library: Bool, deps_names: List<Str>, deps_versions: List<Str>, needs_native_java: Bool, needs_sha256: Bool) -> Str [
     let deps_lines = ""
     if needs_pyo3 [
@@ -1308,7 +1332,7 @@ fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, ne
         ] elif deps_names[i] == "ed25519-dalek" [
             deps_lines = deps_lines + deps_names[i] + " = { version = \"" + deps_versions[i] + "\", features = [\"rand_core\"] }\n"
         ] else [
-            deps_lines = deps_lines + deps_names[i] + " = \"" + deps_versions[i] + "\"\n"
+            deps_lines = deps_lines + crate_dep_line(deps_names[i].clone(), deps_versions[i].clone())
         ]
         i = i + 1
     ]
@@ -1809,7 +1833,13 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
                         None -> [
                         ]
                     ]
-                    if use_k == "lang" or use_k == "crosscompile" or use_k == "arc" [
+                    if use_k == "lang" and use_val != "kotlin" and use_val != "javascript" and use_val != "js" [
+                        warnings.push(df.path.clone() + ": nieznana wartosc `use <lang:" + use_val + ">` - znane: kotlin, javascript")
+                    ]
+                    if use_k == "mode" and use_val != "website" [
+                        warnings.push(df.path.clone() + ": nieznana wartosc `use <mode:" + use_val + ">` - znane: website")
+                    ]
+                    if use_k == "lang" or use_k == "crosscompile" or use_k == "arc" or use_k == "mode" [
                         let use_line = use_k.clone() + "\t" + use_val
                         let use_dup = false
                         let udi = 0
@@ -1823,7 +1853,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
                             use_lines.push(use_line)
                         ]
                     ] else [
-                        warnings.push(df.path.clone() + ": nieznana dyrektywa `use <" + use_k + ">` - znane: lang:kotlin, crosscompile, arc:<architektura>")
+                        warnings.push(df.path.clone() + ": nieznana dyrektywa `use <" + use_k + ">` - znane: lang:kotlin|javascript, mode:website, crosscompile, arc:<architektura>")
                     ]
                 ]
                 _ -> [
