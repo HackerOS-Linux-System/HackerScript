@@ -1,0 +1,685 @@
+get <crates:cranelift-codegen::0.116+all-arch>
+get <crates:cranelift-frontend::0.116>
+get <crates:cranelift-module::0.116>
+get <crates:cranelift-object::0.116>
+
+fun cl_emit(ir: Str, out_obj: Str, opt: Str, dump_clif: Bool, target: Str) -> Str [
+    let result = ""
+    native {Rust} [
+        use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+        use cranelift_codegen::ir::{types, AbiParam, Block, InstBuilder, Signature, TrapCode, Value};
+        use cranelift_codegen::isa::CallConv;
+        use cranelift_codegen::settings::{self, Configurable};
+        use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
+        use cranelift_codegen::ir::MemFlags;
+        use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
+        use cranelift_object::{ObjectBuilder, ObjectModule};
+        use std::collections::HashMap;
+
+        #[derive(Debug, Clone)]
+        enum Node {
+            Atom(String),
+            Text(String),
+            List(Vec<Node>),
+        }
+
+        fn skip_ws(c: &Vec<char>, pos: &mut usize) {
+            while *pos < c.len() && c.get(*pos).map(|x| x.is_whitespace()).unwrap_or(false) {
+                *pos += 1;
+            }
+        }
+
+        fn parse_node(c: &Vec<char>, pos: &mut usize) -> Result<Node, String> {
+            skip_ws(c, pos);
+            if *pos >= c.len() {
+                return Err("IR: nieoczekiwany koniec wejscia".to_string());
+            }
+            let ch = c[*pos];
+            if ch == '(' {
+                *pos += 1;
+                let mut items: Vec<Node> = Vec::new();
+                loop {
+                    skip_ws(c, pos);
+                    if *pos >= c.len() {
+                        return Err("IR: brak zamykajacego nawiasu".to_string());
+                    }
+                    if c[*pos] == ')' {
+                        *pos += 1;
+                        break;
+                    }
+                    items.push(parse_node(c, pos)?);
+                }
+                return Ok(Node::List(items));
+            }
+            if ch == '"' {
+                *pos += 1;
+                let mut s = String::new();
+                loop {
+                    if *pos >= c.len() {
+                        return Err("IR: niezamkniety literal napisu".to_string());
+                    }
+                    let x = c[*pos];
+                    *pos += 1;
+                    if x == '"' {
+                        break;
+                    }
+                    if x == '\\' && *pos < c.len() {
+                        let e = c[*pos];
+                        *pos += 1;
+                        match e {
+                            'n' => s.push('\n'),
+                            't' => s.push('\t'),
+                            'r' => s.push('\r'),
+                            '0' => s.push('\0'),
+                            other => s.push(other),
+                        }
+                    } else {
+                        s.push(x);
+                    }
+                }
+                return Ok(Node::Text(s));
+            }
+            let mut a = String::new();
+            while *pos < c.len() && !c[*pos].is_whitespace() && c[*pos] != '(' && c[*pos] != ')' {
+                a.push(c[*pos]);
+                *pos += 1;
+            }
+            Ok(Node::Atom(a))
+        }
+
+        fn parse_all(src: &str) -> Result<Vec<Node>, String> {
+            let c: Vec<char> = src.chars().collect();
+            let mut pos = 0usize;
+            let mut out: Vec<Node> = Vec::new();
+            loop {
+                skip_ws(&c, &mut pos);
+                if pos >= c.len() {
+                    break;
+                }
+                out.push(parse_node(&c, &mut pos)?);
+            }
+            Ok(out)
+        }
+
+        fn as_list(n: &Node) -> Result<&Vec<Node>, String> {
+            match n {
+                Node::List(v) => Ok(v),
+                other => Err(format!("IR: oczekiwano listy, jest {:?}", other)),
+            }
+        }
+
+        fn as_atom(n: &Node) -> Result<&str, String> {
+            match n {
+                Node::Atom(s) => Ok(s.as_str()),
+                other => Err(format!("IR: oczekiwano atomu, jest {:?}", other)),
+            }
+        }
+
+        fn ty_of(t: &str) -> Result<Option<types::Type>, String> {
+            match t {
+                "i" | "s" | "p" => Ok(Some(types::I64)),
+                "f" => Ok(Some(types::F64)),
+                "b" => Ok(Some(types::I8)),
+                "u" => Ok(None),
+                other => Err(format!("IR: nieznany typ '{}'", other)),
+            }
+        }
+
+        struct FnInfo {
+            id: FuncId,
+            ret: String,
+        }
+
+        fn make_sig(call_conv: CallConv, params: &Vec<String>, ret: &str) -> Result<Signature, String> {
+            let mut sig = Signature::new(call_conv);
+            for p in params {
+                if let Some(t) = ty_of(p)? {
+                    sig.params.push(AbiParam::new(t));
+                }
+            }
+            if let Some(r) = ty_of(ret)? {
+                sig.returns.push(AbiParam::new(r));
+            }
+            Ok(sig)
+        }
+
+        struct Gen<'a, 'b> {
+            b: &'a mut FunctionBuilder<'b>,
+            module: &'a mut ObjectModule,
+            fns: &'a HashMap<String, FnInfo>,
+            datas: &'a HashMap<String, DataId>,
+            vars: HashMap<String, (Variable, String)>,
+            next_var: u32,
+            loops: Vec<(Block, Block)>,
+            terminated: bool,
+            strn: &'a mut usize,
+            ret: String,
+        }
+
+        impl<'a, 'b> Gen<'a, 'b> {
+            fn new_var(&mut self, ty: types::Type) -> Variable {
+                let v = Variable::from_u32(self.next_var);
+                self.next_var += 1;
+                self.b.declare_var(v, ty);
+                v
+            }
+
+            fn expr(&mut self, n: &Node) -> Result<Option<Value>, String> {
+                let items = as_list(n)?;
+                let head = as_atom(items.get(0).ok_or("IR: puste wyrazenie")?)?;
+                match head {
+                    "i" => {
+                        let t = as_atom(&items[1])?;
+                        let v: i64 = t.parse().map_err(|_| format!("IR: zly Int '{}'", t))?;
+                        Ok(Some(self.b.ins().iconst(types::I64, v)))
+                    }
+                    "f" => {
+                        let t = as_atom(&items[1])?;
+                        let v: f64 = t.parse().map_err(|_| format!("IR: zly Float '{}'", t))?;
+                        Ok(Some(self.b.ins().f64const(v)))
+                    }
+                    "b" => {
+                        let t = as_atom(&items[1])?;
+                        Ok(Some(self.b.ins().iconst(types::I8, if t == "1" { 1 } else { 0 })))
+                    }
+                    "s" => {
+                        let text = match &items[1] {
+                            Node::Text(s) => s.clone(),
+                            other => return Err(format!("IR: oczekiwano napisu, jest {:?}", other)),
+                        };
+                        let mut bytes: Vec<u8> = text.into_bytes();
+                        bytes.push(0);
+                        *self.strn += 1;
+                        let name = format!("hks_str_{}", *self.strn);
+                        let id = self
+                            .module
+                            .declare_data(&name, Linkage::Local, false, false)
+                            .map_err(|e| e.to_string())?;
+                        let mut dd = DataDescription::new();
+                        dd.define(bytes.into_boxed_slice());
+                        self.module.define_data(id, &dd).map_err(|e| e.to_string())?;
+                        let gv = self.module.declare_data_in_func(id, self.b.func);
+                        Ok(Some(self.b.ins().global_value(types::I64, gv)))
+                    }
+                    "v" => {
+                        let name = as_atom(&items[1])?;
+                        let (var, _) = self.vars.get(name).ok_or(format!("IR: nieznana zmienna '{}'", name))?;
+                        let var = *var;
+                        Ok(Some(self.b.use_var(var)))
+                    }
+                    "load" => {
+                        let tag = as_atom(&items[1])?.to_string();
+                        let ty = ty_of(&tag)?.ok_or("IR: load typu Unit")?;
+                        let addr = self.value(&items[2])?;
+                        let off: i32 = as_atom(&items[3])?.parse().map_err(|_| "IR: zly offset".to_string())?;
+                        Ok(Some(self.b.ins().load(ty, MemFlags::new(), addr, off)))
+                    }
+                    "daddr" => {
+                        let name = as_atom(&items[1])?;
+                        let id = *self.datas.get(name).ok_or(format!("IR: nieznane dane '{}'", name))?;
+                        let gv = self.module.declare_data_in_func(id, self.b.func);
+                        Ok(Some(self.b.ins().global_value(types::I64, gv)))
+                    }
+                    "seq" => {
+                        self.stmts(as_list(&items[1])?)?;
+                        self.expr(&items[2])
+                    }
+                    "bin" => {
+                        let op = as_atom(&items[1])?.to_string();
+                        let ty = as_atom(&items[2])?.to_string();
+                        let a = self.value(&items[3])?;
+                        let b = self.value(&items[4])?;
+                        if ty == "f" {
+                            let r = match op.as_str() {
+                                "add" => self.b.ins().fadd(a, b),
+                                "sub" => self.b.ins().fsub(a, b),
+                                "mul" => self.b.ins().fmul(a, b),
+                                "div" => self.b.ins().fdiv(a, b),
+                                other => return Err(format!("IR: Float nie wspiera '{}'", other)),
+                            };
+                            return Ok(Some(r));
+                        }
+                        let r = match op.as_str() {
+                            "add" => self.b.ins().iadd(a, b),
+                            "sub" => self.b.ins().isub(a, b),
+                            "mul" => self.b.ins().imul(a, b),
+                            "div" | "rem" => self.checked_divrem(op == "div", a, b)?,
+                            other => return Err(format!("IR: Int nie wspiera '{}'", other)),
+                        };
+                        Ok(Some(r))
+                    }
+                    "cmp" => {
+                        let op = as_atom(&items[1])?.to_string();
+                        let ty = as_atom(&items[2])?.to_string();
+                        let a = self.value(&items[3])?;
+                        let b = self.value(&items[4])?;
+                        if ty == "f" {
+                            let cc = match op.as_str() {
+                                "eq" => FloatCC::Equal,
+                                "ne" => FloatCC::NotEqual,
+                                "lt" => FloatCC::LessThan,
+                                "le" => FloatCC::LessThanOrEqual,
+                                "gt" => FloatCC::GreaterThan,
+                                "ge" => FloatCC::GreaterThanOrEqual,
+                                other => return Err(format!("IR: zle porownanie '{}'", other)),
+                            };
+                            return Ok(Some(self.b.ins().fcmp(cc, a, b)));
+                        }
+                        let cc = match op.as_str() {
+                            "eq" => IntCC::Equal,
+                            "ne" => IntCC::NotEqual,
+                            "lt" => IntCC::SignedLessThan,
+                            "le" => IntCC::SignedLessThanOrEqual,
+                            "gt" => IntCC::SignedGreaterThan,
+                            "ge" => IntCC::SignedGreaterThanOrEqual,
+                            other => return Err(format!("IR: zle porownanie '{}'", other)),
+                        };
+                        Ok(Some(self.b.ins().icmp(cc, a, b)))
+                    }
+                    "and" | "or" => {
+                        let is_and = head == "and";
+                        let tmp = self.new_var(types::I8);
+                        let a = self.value(&items[1])?;
+                        self.b.def_var(tmp, a);
+                        let rhs_blk = self.b.create_block();
+                        let end_blk = self.b.create_block();
+                        if is_and {
+                            self.b.ins().brif(a, rhs_blk, &[], end_blk, &[]);
+                        } else {
+                            self.b.ins().brif(a, end_blk, &[], rhs_blk, &[]);
+                        }
+                        self.b.switch_to_block(rhs_blk);
+                        let r = self.value(&items[2])?;
+                        self.b.def_var(tmp, r);
+                        self.b.ins().jump(end_blk, &[]);
+                        self.b.switch_to_block(end_blk);
+                        Ok(Some(self.b.use_var(tmp)))
+                    }
+                    "not" => {
+                        let a = self.value(&items[1])?;
+                        Ok(Some(self.b.ins().bxor_imm(a, 1)))
+                    }
+                    "neg" => {
+                        let ty = as_atom(&items[1])?.to_string();
+                        let a = self.value(&items[2])?;
+                        if ty == "f" {
+                            Ok(Some(self.b.ins().fneg(a)))
+                        } else {
+                            Ok(Some(self.b.ins().ineg(a)))
+                        }
+                    }
+                    "cast" => {
+                        let from = as_atom(&items[1])?.to_string();
+                        let to = as_atom(&items[2])?.to_string();
+                        let a = self.value(&items[3])?;
+                        let r = match (from.as_str(), to.as_str()) {
+                            ("i", "f") => self.b.ins().fcvt_from_sint(types::F64, a),
+                            ("f", "i") => self.b.ins().fcvt_to_sint_sat(types::I64, a),
+                            ("b", "i") => self.b.ins().uextend(types::I64, a),
+                            ("i", "b") => self.b.ins().icmp_imm(IntCC::NotEqual, a, 0),
+                            (x, y) => return Err(format!("IR: rzutowanie {} -> {}", x, y)),
+                        };
+                        Ok(Some(r))
+                    }
+                    "call" => {
+                        let name = as_atom(&items[1])?.to_string();
+                        let mut args: Vec<Value> = Vec::new();
+                        for a in &items[2..] {
+                            args.push(self.value(a)?);
+                        }
+                        let info = self.fns.get(&name).ok_or(format!("IR: nieznana funkcja '{}'", name))?;
+                        let id = info.id;
+                        let has_ret = info.ret != "u";
+                        let fref = self.module.declare_func_in_func(id, self.b.func);
+                        let call = self.b.ins().call(fref, &args);
+                        if has_ret {
+                            Ok(Some(self.b.inst_results(call)[0]))
+                        } else {
+                            Ok(None)
+                        }
+                    }
+                    "store" | "set" | "let" => {
+                        self.stmt(n)?;
+                        Ok(None)
+                    }
+                    other => Err(format!("IR: nieznane wyrazenie '{}'", other)),
+                }
+            }
+
+            fn value(&mut self, n: &Node) -> Result<Value, String> {
+                match self.expr(n)? {
+                    Some(v) => Ok(v),
+                    None => Err("IR: wyrazenie bez wartosci uzyte jako wartosc".to_string()),
+                }
+            }
+
+            // Dzielenie/reszta Int z kontrola: dzielnik 0 -> panic (kod 101),
+            // dzielnik -1 -> wynik bez przepelnienia (INT_MIN / -1 nie trapuje).
+            fn checked_divrem(&mut self, is_div: bool, a: Value, b: Value) -> Result<Value, String> {
+                let is_zero = self.b.ins().icmp_imm(IntCC::Equal, b, 0);
+                let panic_blk = self.b.create_block();
+                let ok_blk = self.b.create_block();
+                self.b.ins().brif(is_zero, panic_blk, &[], ok_blk, &[]);
+                self.b.switch_to_block(panic_blk);
+                let pinfo = self.fns.get("hks_panic_div0").ok_or("IR: brak hks_panic_div0")?;
+                let pid = pinfo.id;
+                let pref = self.module.declare_func_in_func(pid, self.b.func);
+                self.b.ins().call(pref, &[]);
+                self.b.ins().trap(TrapCode::INTEGER_DIVISION_BY_ZERO);
+                self.b.switch_to_block(ok_blk);
+                let is_m1 = self.b.ins().icmp_imm(IntCC::Equal, b, -1);
+                let one = self.b.ins().iconst(types::I64, 1);
+                let safe = self.b.ins().select(is_m1, one, b);
+                if is_div {
+                    let q = self.b.ins().sdiv(a, safe);
+                    let nq = self.b.ins().ineg(a);
+                    Ok(self.b.ins().select(is_m1, nq, q))
+                } else {
+                    let r = self.b.ins().srem(a, safe);
+                    let z = self.b.ins().iconst(types::I64, 0);
+                    Ok(self.b.ins().select(is_m1, z, r))
+                }
+            }
+
+            fn stmts(&mut self, list: &[Node]) -> Result<(), String> {
+                for s in list {
+                    if self.terminated {
+                        break;
+                    }
+                    self.stmt(s)?;
+                }
+                Ok(())
+            }
+
+            fn stmt(&mut self, n: &Node) -> Result<(), String> {
+                let items = as_list(n)?;
+                let head = as_atom(items.get(0).ok_or("IR: pusta instrukcja")?)?;
+                match head {
+                    "let" => {
+                        let id = as_atom(&items[1])?.to_string();
+                        let tag = as_atom(&items[2])?.to_string();
+                        let ty = ty_of(&tag)?.ok_or("IR: zmienna typu Unit")?;
+                        let v = self.value(&items[3])?;
+                        let var = self.new_var(ty);
+                        self.b.def_var(var, v);
+                        self.vars.insert(id, (var, tag));
+                        Ok(())
+                    }
+                    "set" => {
+                        let id = as_atom(&items[1])?;
+                        let v = self.value(&items[2])?;
+                        let var = self.vars.get(id).ok_or(format!("IR: nieznana zmienna '{}'", id))?.0;
+                        self.b.def_var(var, v);
+                        Ok(())
+                    }
+                    "expr" => {
+                        self.expr(&items[1])?;
+                        Ok(())
+                    }
+                    "store" => {
+                        // wartosc liczona PRZED adresem (adres moze sie uniewaznic, np. realloc listy)
+                        let _tag = as_atom(&items[1])?;
+                        let v = self.value(&items[4])?;
+                        let addr = self.value(&items[2])?;
+                        let off: i32 = as_atom(&items[3])?.parse().map_err(|_| "IR: zly offset".to_string())?;
+                        self.b.ins().store(MemFlags::new(), v, addr, off);
+                        Ok(())
+                    }
+                    "ret" => {
+                        let v = self.value(&items[1])?;
+                        self.b.ins().return_(&[v]);
+                        self.terminated = true;
+                        Ok(())
+                    }
+                    "retv" => {
+                        self.b.ins().return_(&[]);
+                        self.terminated = true;
+                        Ok(())
+                    }
+                    "if" => {
+                        let c = self.value(&items[1])?;
+                        let then_blk = self.b.create_block();
+                        let else_blk = self.b.create_block();
+                        let merge = self.b.create_block();
+                        self.b.ins().brif(c, then_blk, &[], else_blk, &[]);
+                        let mut merge_reached = false;
+                        self.b.switch_to_block(then_blk);
+                        self.terminated = false;
+                        self.stmts(as_list(&items[2])?)?;
+                        if !self.terminated {
+                            self.b.ins().jump(merge, &[]);
+                            merge_reached = true;
+                        }
+                        self.b.switch_to_block(else_blk);
+                        self.terminated = false;
+                        self.stmts(as_list(&items[3])?)?;
+                        if !self.terminated {
+                            self.b.ins().jump(merge, &[]);
+                            merge_reached = true;
+                        }
+                        self.b.switch_to_block(merge);
+                        if merge_reached {
+                            self.terminated = false;
+                        } else {
+                            self.b.ins().trap(TrapCode::unwrap_user(1));
+                            self.terminated = true;
+                        }
+                        Ok(())
+                    }
+                    "while" => {
+                        let header = self.b.create_block();
+                        let body = self.b.create_block();
+                        let step = self.b.create_block();
+                        let exit = self.b.create_block();
+                        self.b.ins().jump(header, &[]);
+                        self.b.switch_to_block(header);
+                        let c = self.value(&items[1])?;
+                        self.b.ins().brif(c, body, &[], exit, &[]);
+                        self.b.switch_to_block(body);
+                        self.terminated = false;
+                        self.loops.push((step, exit));
+                        self.stmts(as_list(&items[2])?)?;
+                        self.loops.pop();
+                        if !self.terminated {
+                            self.b.ins().jump(step, &[]);
+                        }
+                        self.b.switch_to_block(step);
+                        self.terminated = false;
+                        self.stmts(as_list(&items[3])?)?;
+                        if !self.terminated {
+                            self.b.ins().jump(header, &[]);
+                        }
+                        self.b.switch_to_block(exit);
+                        self.terminated = false;
+                        Ok(())
+                    }
+                    "break" => {
+                        let target = self.loops.last().ok_or("IR: break poza petla")?.1;
+                        self.b.ins().jump(target, &[]);
+                        self.terminated = true;
+                        Ok(())
+                    }
+                    "continue" => {
+                        let target = self.loops.last().ok_or("IR: continue poza petla")?.0;
+                        self.b.ins().jump(target, &[]);
+                        self.terminated = true;
+                        Ok(())
+                    }
+                    other => Err(format!("IR: nieznana instrukcja '{}'", other)),
+                }
+            }
+        }
+
+        // Triple hosta (cel domyslny); `hack3rc --target` nadpisuje.
+        fn host_triple() -> String {
+            let arch = if cfg!(target_arch = "aarch64") {
+                "aarch64"
+            } else if cfg!(target_arch = "riscv64") {
+                "riscv64gc"
+            } else if cfg!(target_arch = "s390x") {
+                "s390x"
+            } else {
+                "x86_64"
+            };
+            let rest = if cfg!(target_os = "macos") { "apple-darwin" } else { "unknown-linux-gnu" };
+            format!("{}-{}", arch, rest)
+        }
+
+        fn build(ir: &str, out_obj: &str, opt: &str, dump: bool, target: &str) -> Result<(), String> {
+            let nodes = parse_all(ir)?;
+
+            let mut sb = settings::builder();
+            sb.set("opt_level", opt).map_err(|e| e.to_string())?;
+            let _ = sb.set("is_pic", "true");
+            sb.set("enable_verifier", "true").map_err(|e| e.to_string())?;
+            let flags = settings::Flags::new(sb);
+            let triple = if target.is_empty() {
+                host_triple()
+            } else {
+                target.to_string()
+            };
+            // lookup_by_name potrafi spanikowac na niepoprawnym triple - lapiemy to
+            let prev_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {}));
+            let looked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cranelift_codegen::isa::lookup_by_name(&triple)));
+            std::panic::set_hook(prev_hook);
+            let isa_builder = match looked {
+                Ok(Ok(b)) => b,
+                Ok(Err(e)) => return Err(format!("nieobslugiwany target '{}': {}", triple, e)),
+                Err(_) => return Err(format!("nieznany target '{}' (przyklady: aarch64, riscv64, s390x, x86_64, x86_64-apple-darwin)", triple)),
+            };
+            let isa = isa_builder.finish(flags).map_err(|e| e.to_string())?;
+            if isa.pointer_bits() != 64 {
+                return Err(format!("cel '{}' ma wskazniki {}-bitowe; hack3rc obsluguje tylko cele 64-bitowe", triple, isa.pointer_bits()));
+            }
+            let big_endian = matches!(isa.endianness(), cranelift_codegen::ir::Endianness::Big);
+            let call_conv = isa.default_call_conv();
+            let obj_builder = ObjectBuilder::new(isa, "hack3rc", cranelift_module::default_libcall_names())
+                .map_err(|e| e.to_string())?;
+            let mut module = ObjectModule::new(obj_builder);
+
+            let mut fns: HashMap<String, FnInfo> = HashMap::new();
+            let mut datas: HashMap<String, DataId> = HashMap::new();
+            // runtime: panic przy dzieleniu przez zero (zawsze dostepny)
+            let psig = make_sig(call_conv, &Vec::new(), "u")?;
+            let pid = module
+                .declare_function("hks_panic_div0", Linkage::Import, &psig)
+                .map_err(|e| e.to_string())?;
+            fns.insert("hks_panic_div0".to_string(), FnInfo { id: pid, ret: "u".to_string() });
+
+            // przebieg 1: deklaracje
+            let mut bodies: Vec<(String, Vec<String>, Vec<String>, &Vec<Node>)> = Vec::new();
+            for n in &nodes {
+                let it = as_list(n)?;
+                let kind = as_atom(it.get(0).ok_or("IR: pusty element modulu")?)?;
+                if kind == "data" {
+                    // (data NAZWA w1 w2 ...) - slowa i64 w kolejnosci bajtow celu
+                    let name = as_atom(&it[1])?.to_string();
+                    let mut bytes: Vec<u8> = Vec::new();
+                    for w in &it[2..] {
+                        let v: i64 = as_atom(w)?.parse().map_err(|_| format!("IR: zle slowo danych '{:?}'", w))?;
+                        let b8 = if big_endian { v.to_be_bytes() } else { v.to_le_bytes() };
+                        bytes.extend_from_slice(&b8);
+                    }
+                    let id = module.declare_data(&name, Linkage::Local, false, false).map_err(|e| e.to_string())?;
+                    let mut dd = DataDescription::new();
+                    dd.define(bytes.into_boxed_slice());
+                    dd.set_align(8);
+                    module.define_data(id, &dd).map_err(|e| e.to_string())?;
+                    datas.insert(name, id);
+                } else if kind == "extern" {
+                    let name = as_atom(&it[1])?.to_string();
+                    let ret = as_atom(&it[2])?.to_string();
+                    let ptags: Vec<String> = as_list(&it[3])?
+                        .iter()
+                        .map(|x| as_atom(x).map(|s| s.to_string()))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let sig = make_sig(call_conv, &ptags, &ret)?;
+                    let id = module.declare_function(&name, Linkage::Import, &sig).map_err(|e| e.to_string())?;
+                    fns.insert(name, FnInfo { id, ret });
+                } else if kind == "fn" {
+                    let name = as_atom(&it[1])?.to_string();
+                    let ret = as_atom(&it[2])?.to_string();
+                    let mut ptags: Vec<String> = Vec::new();
+                    let mut pids: Vec<String> = Vec::new();
+                    for p in as_list(&it[3])? {
+                        let pl = as_list(p)?;
+                        pids.push(as_atom(&pl[0])?.to_string());
+                        ptags.push(as_atom(&pl[1])?.to_string());
+                    }
+                    let sig = make_sig(call_conv, &ptags, &ret)?;
+                    let linkage = if name == "hks_entry" { Linkage::Export } else { Linkage::Local };
+                    let id = module.declare_function(&name, linkage, &sig).map_err(|e| e.to_string())?;
+                    fns.insert(name.clone(), FnInfo { id, ret: ret.clone() });
+                    let mut meta: Vec<String> = Vec::new();
+                    meta.push(ret);
+                    bodies.push((name, pids, ptags, it));
+                    let _ = meta;
+                } else {
+                    return Err(format!("IR: nieznany element modulu '{}'", kind));
+                }
+            }
+
+            // przebieg 2: ciala funkcji
+            let mut ctx = module.make_context();
+            let mut fbc = FunctionBuilderContext::new();
+            let mut strn: usize = 0;
+            for (name, pids, ptags, it) in &bodies {
+                let info = fns.get(name).ok_or("IR: brak funkcji")?;
+                let fid = info.id;
+                let ret = info.ret.clone();
+                ctx.func.signature = make_sig(call_conv, ptags, &ret)?;
+                {
+                    let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+                    let entry = builder.create_block();
+                    builder.append_block_params_for_function_params(entry);
+                    builder.switch_to_block(entry);
+                    let params: Vec<Value> = builder.block_params(entry).to_vec();
+                    let mut g = Gen {
+                        b: &mut builder,
+                        module: &mut module,
+                        fns: &fns,
+                        datas: &datas,
+                        vars: HashMap::new(),
+                        next_var: 0,
+                        loops: Vec::new(),
+                        terminated: false,
+                        strn: &mut strn,
+                        ret: ret.clone(),
+                    };
+                    for (k, pid) in pids.iter().enumerate() {
+                        let ty = ty_of(&ptags[k])?.ok_or("IR: parametr typu Unit")?;
+                        let var = g.new_var(ty);
+                        g.b.def_var(var, params[k]);
+                        g.vars.insert(pid.clone(), (var, ptags[k].clone()));
+                    }
+                    g.stmts(&it[4..])?;
+                    if !g.terminated {
+                        if g.ret == "u" {
+                            g.b.ins().return_(&[]);
+                        } else {
+                            g.b.ins().trap(TrapCode::unwrap_user(2));
+                        }
+                    }
+                    builder.seal_all_blocks();
+                    builder.finalize();
+                }
+                if dump {
+                    eprintln!("; --- {} ---\n{}", name, ctx.func.display());
+                }
+                module.define_function(fid, &mut ctx).map_err(|e| format!("kompilacja '{}': {}", name, e))?;
+                module.clear_context(&mut ctx);
+            }
+
+            let product = module.finish();
+            let bytes = product.emit().map_err(|e| e.to_string())?;
+            std::fs::write(out_obj, bytes).map_err(|e| format!("zapis {}: {}", out_obj, e))?;
+            Ok(())
+        }
+
+        if let Err(e) = build(&ir, &out_obj, &opt, dump_clif, &target) {
+            result = e;
+        }
+    ]
+    end result
+]
