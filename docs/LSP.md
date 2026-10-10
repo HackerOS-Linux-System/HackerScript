@@ -3,25 +3,25 @@
 Status: **projekt (Faza 1 — specyfikacja)**, jeszcze nie
 zaimplementowane w kodzie. Ten dokument opisuje kształt, w jakim
 `lsp` zostanie dodane jako podkomenda zarówno `hackerc lsp`, jak i
-`virus lsp` w kolejnej rundzie pracy (Faza 2, patrz
+`bit lsp` w kolejnej rundzie pracy (Faza 2, patrz
 `docs/ROADMAP.md`).
 
 ## Dlaczego w dwóch miejscach
 
 * `hackerc lsp` — serwer LSP dla pojedynczego pliku/bez kontekstu
   projektu (identyczny model jak `hackerc check <plik>` dziś: działa
-  nawet poza katalogiem z `Virus.hk`).
-* `virus lsp` — cienka nakładka, która woła dokładnie ten sam serwer
+  nawet poza katalogiem z `Bit.hk`).
+* `bit lsp` — cienka nakładka, która woła dokładnie ten sam serwer
   co `hackerc lsp` (współdzielony kod przez
   `include <work:hackerc::lsp>`, ten sam wzorzec co już istniejące
-  `virus/cmd/hackerc_bridge.hcs`), ale z pełnym kontekstem workspace
-  (`Virus.hk`, `cache/`, zależności `get <work:...>`) — analogicznie
+  `bit`), ale z pełnym kontekstem workspace
+  (`Bit.hk`, `cache/`, zależności `get <work:...>`) — analogicznie
   do tego, jak edytory zwykle uruchamiają `rust-analyzer` per-projekt,
   nie per-plik.
 
 Konfiguracja edytora (VS Code / Neovim / dowolny klient LSP): domyślnie
-`virus lsp` w katalogu projektu; `hackerc lsp <plik>` jako fallback
-dla plików `.hcs` otwartych poza jakimkolwiek `Virus.hk`.
+`bit lsp` w katalogu projektu; `hackerc lsp <plik>` jako fallback
+dla plików `.hcs` otwartych poza jakimkolwiek `Bit.hk`.
 
 ## Transport i protokół
 
@@ -61,9 +61,9 @@ LSP 3.17.
 * `textDocument/references`
 * `textDocument/rename`
 * `textDocument/formatting` — cienka nakładka na już istniejący
-  `hackerc/cmd/formatter.hcs` (parytet z `virus fmt`)
+  `hackerc/cmd/formatter.hcs` (parytet z `bit fmt`)
 * `textDocument/codeAction` — "quick fix" korzystający wprost z bazy
-  `virus repair` (`docs/VIRUS.md`, "Plan: baza diagnostyk") — sugestia
+  `bit repair` (`docs/BIT.md`, "Plan: baza diagnostyk") — sugestia
   z `RepairDiagnostic.suggestion` jako codeAction tam, gdzie to
   możliwe zamienić automatycznie
 
@@ -76,14 +76,9 @@ LSP 3.17.
   przeszkadza, bo dostęp jest zawsze po znanym kluczu-ścieżce).
 * `hackerc/cmd/main.hcs` — nowa gałąź `cmd == "lsp"` obok istniejących
   (`build`/`check`/`fmt`/...), wołająca `lsp_run()` z `lsp.hcs`.
-* `virus/cmd/lsp.hcs` — nowy plik, analogiczny do
-  `hackerc_bridge.hcs`: ustala `root` przez `require_project_root()`
-  (już istniejące), potem woła `hackerc`owe `lsp_run()` z tym
-  kontekstem przez `include <work:hackerc::lsp>` (ten sam mechanizm co
-  `playground/`, patrz `docs/SYNTAX.md`, sekcja "`include
-  <work:...>`" — realne statyczne linkowanie, nie duplikacja pliku).
-* `virus/cmd/main.hcs` — nowa gałąź `cmd == "lsp"`, wpis w
-  `cmd_usage()`.
+* `bit lsp` (menedżer pakietów `bit`, osobny projekt) wywołuje `hackerc lsp`
+  w korzeniu projektu — serwer żyje w `hackerc/cmd/lsp.hcs`, a `bit`
+  tylko ustala korzeń projektu i przekazuje stdio.
 
 ## Czego ten dokument świadomie NIE rozstrzyga jeszcze
 
@@ -91,7 +86,7 @@ LSP 3.17.
   każdym znaku, czy z debounce/inkrementalnego cache — decyzja
   wydajnościowa do zmierzenia dopiero na działającym Etapie 2a.
 * Publikacja jako osobny plik binarny vs. podkomenda — na razie
-  podkomenda (`hackerc lsp`/`virus lsp`), zgodnie z tym, jak działają
+  podkomenda (`hackerc lsp`/`bit lsp`), zgodnie z tym, jak działają
   `rust-analyzer` (osobny) vs. `gopls` (osobny) vs. `cargo`
   wbudowane narzędzia — HackerScript idzie tu bliżej modelu
   "podkomenda", żeby nie mnożyć artefaktów do zainstalowania.
