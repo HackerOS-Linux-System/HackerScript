@@ -1,7 +1,9 @@
 [package]
-name = "hackerscript-libs"
-version = "0.4"
-description = "Workspace bibliotek HackerScript: core/ i std/ (100% kod w .hcs)."
+-> name        => hackerscript-libs
+-> version     => 0.4
+-> description => Workspace bibliotek HackerScript, core i std, 100% kod w .hcs.
+-> license     => MIT
+-> lang        => HackerScript
 
 [workspace]
-members = ["core", "std"]
+-> members => [core, std]
