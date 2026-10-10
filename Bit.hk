@@ -1,14 +1,17 @@
 [package]
 -> name        => HackerScript
 -> version     => 0.4
+-> description => Workspace jezyka HackerScript: transpilator hackerc, kompilator AOT hack3rc oraz biblioteki core i std, 100% w HackerScript.
+-> authors     => ["HackerOS Team"]
+-> license     => MIT
+-> lang        => HackerScript
 -> using       => 0.4
--> authors     => ["HackerOS-Linux-System <hackeros068@gmail.com>"]
--> description => virus + hackerc, jedna binarka - menedzer pakietow/projektow i transpilator HackerScript -> Rust, statycznie linkujace libs/core i libs/std.
 
 [workspace]
--> members => ["hackerc", "virus", "libs/core", "libs/std", "hack3rc"]
+-> members => [hackerc, hack3rc, libs/core, libs/std]
 
-[dependencies]
--> std
---> io => "*"
---> fs => "*"
+[build]
+-> link => static
+
+[default-build]
+-> profile => release
