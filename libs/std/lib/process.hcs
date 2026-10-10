@@ -39,18 +39,18 @@ fun run_command_simple(program: Str) -> Result<Str, Str> [
 
 !! `run_command_combined()` (builtin) z komunikatem OKALAJACYM
 !! (`"$ program args\n" + wyjscie`) - wygodne do logowania/pokazania
-!! uzytkownikowi PELNEGO przebiegu polecenia (np. `virus lint`, gdzie
+!! uzytkownikowi PELNEGO przebiegu polecenia (np. `bit lint`, gdzie
 !! interesuje nas i stdout, i stderr, bez wzgledu na kod wyjscia -
 !! patrz uwaga przy `run_command_combined`).
 fun run_command_combined_labeled(program: Str, args: List<Str>) -> Str [
     end "$ " + program.clone() + " " + str_join(args.clone(), " ") + "\n" + run_command_combined(program, args)
 ]
 
-!! ROZBUDOWA (ta runda, patrz docs/VIRUS.md - "virus lsp") - jak
+!! ROZBUDOWA (ta runda, patrz docs/BIT.md - "bit lsp") - jak
 !! `run_command_inherit()` (builtin), ale zwraca `Bool` (kod wyjscia
 !! 0 = sukces) zamiast surowego kodu - wygodne dla wywolujacych, ktorych
 !! interesuje tylko "czy sie udalo", np. `exit(if ok { 0 } else { 1 })`
-!! po stronie `virus`.
+!! po stronie `bit`.
 fun run_command_inherit_ok(program: Str, args: List<Str>) -> Bool [
     end run_command_inherit(program, args) == 0
 ]
