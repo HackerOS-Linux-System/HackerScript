@@ -3,7 +3,5 @@
 !!   get <core:memory::stack_allocator>  - alokator stosowy (LIFO)
 !!   get <core:memory::pool_allocator>   - alokator pulowy z free-list
 
-fun core_placeholder() [
-    log("core: patrz core/lib/memory/ dla alokatorow (arena, chained_arena, stack_allocator, pool_allocator)")
-    end
-]
+!! Wersja biblioteki core (zgodna z wersja kompilatora).
+const CORE_VERSION: Str = "0.4"
