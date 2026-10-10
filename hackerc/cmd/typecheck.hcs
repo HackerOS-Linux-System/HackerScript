@@ -8,18 +8,13 @@ get <std:string> import <str_contains::str_trim::str_starts_with>
 !!! przeoczenie sprzed 0.3 - "npm"/"jsr" byly juz obslugiwane przez
 !!! `gen_get_import` (codegen.hcs), ale nie byly tu wypisane, co dawalo
 !!! falszywy blad E0003 dla poprawnego kodu.
-!!! ZMIANA 0.4: dodano "bytes" (rejestr H#/Bytes-Repository) i "bit"
-!!! (rejestr Hacker Lang/bit-io) - parytet z "vira": sam `get <bytes:
-!!! nazwa>`/`get <bit:nazwa>` w kodzie HackerScript TYLKO deklaruje
-!!! zaleznosc (patrz komentarz w `gen_get_import`), rzeczywiste
-!!! pobieranie/budowanie robi `virus install bytes|bit ...` (patrz
-!!! `virus/cmd/bytes_repo.hcs`/`virus/cmd/bit_repo.hcs`), a podpiecie
-!!! do linkera `virus build` (patrz `build_wire_extern_dependencies`
-!!! w `virus/cmd/build.hcs`).
+!!! `bit` - `get <bit:nazwa[::plik]>` importuje modul .hcs biblioteki
+!!! zainstalowanej przez menedzer pakietow bit (`bit install ...`); samo
+!!! pobieranie/budowanie robi `bit`, a podpiecie do linkera `bit build`.
 !!! ZMIANA 0.4 (2): dodano "work" - `get <work:member[::plik]>`,
 !!! ogolny import DOWOLNEGO czlonka workspace z wlasnym lib/mod.hcs
 !!! (patrz `find_workspace_root` w project.hcs i docs/SYNTAX.md) -
-!!! zachowuje sie w typecheck jak "vira"/"core"/"std" (prawdziwy modul
+!!! zachowuje sie w typecheck jak "bit"/"core"/"std" (prawdziwy modul
 !!! .hcs, nie sama deklaracja linkowania jak "extern"/"c"/"cpp").
 !!! Przy okazji dopisano tez "hlib" - PRZEOCZENIE sprzed 0.4: `get
 !!! <hlib:...>` byl juz w pelni obslugiwany przez `gen_get_import`/
@@ -28,7 +23,7 @@ get <std:string> import <str_contains::str_trim::str_starts_with>
 !!! blad E0003 (ten sam typ pomylki, ktory ZMIANA 0.3 wyzej naprawila
 !!! juz raz dla "npm"/"jsr").
 fun is_known_get_source(s: Str) -> Bool [
-    end s == "pypi" or s == "crates" or s == "std" or s == "core" or s == "selfhost" or s == "virus" or s == "npm" or s == "jsr" or s == "extern" or s == "c" or s == "cpp" or s == "java" or s == "kotlin" or s == "go" or s == "bit" or s == "hlib" or s == "work"
+    end s == "pypi" or s == "crates" or s == "std" or s == "core" or s == "selfhost" or s == "bit" or s == "npm" or s == "jsr" or s == "extern" or s == "c" or s == "cpp" or s == "java" or s == "kotlin" or s == "go" or s == "bit" or s == "hlib" or s == "work"
 ]
 
 fun is_builtin_func(name: Str) -> Bool [
@@ -425,7 +420,7 @@ impl FnChecker [
 !!! diagnostyka od nowa dzielila caly plik na linie) - przy pliku z
 !!! wieloma diagnostykami (np. `hackerc/cmd/main.hcs` samo w sobie, ~70
 !!! `W0002` z limitacji cross-file typechecka bootstrapu - PRE-ISTNIEJACY,
-!!! udokumentowany fakt, NIE nowy w tej turze) `virus build` /
+!!! udokumentowany fakt, NIE nowy w tej turze) `bit build` /
 !!! `hackerc build` na SOBIE SAMYM zaczal trwac >60s (wczesniej: kilka
 !!! do kilkunastu sekund) - zmierzone i naprawione w tej sesji. Teraz
 !!! bierze JUZ POCIETE linie (`Checker.lines`/`FnChecker.lines`, dzielone
@@ -475,11 +470,11 @@ impl Checker [
     !!! E0003 - parytet z `_check_get`. ZMIANA 0.4 - komunikat
     !!! zaktualizowany, zeby wymienial WSZYSTKIE zrodla faktycznie
     !!! rozpoznawane przez `is_known_get_source` (byl juz niepelny od
-    !!! chwili dodania "bytes"/"bit"/"hlib" w 0.4 - brakowalo ich tutaj,
+    !!! chwili dodania "bit"/"hlib" w 0.4 - brakowalo ich tutaj,
     !!! mimo ze funkcja juz je akceptowala; teraz + "work").
     fun check_get(self, source: Str, name: Str) [
         if not is_known_get_source(source) [
-            self.diags.push(Diagnostic("error", "E0003", "nieznane zrodlo '" + source + "' w 'get <" + source + ":" + name + ">' (dozwolone: bit, c, core, cpp, crates, extern, go, hlib, java, jsr, kotlin, npm, pypi, selfhost, std, virus, work)", find_line_of(self.lines.clone(), "get <" + source.clone() + ":"), 0, 1, ""))
+            self.diags.push(Diagnostic("error", "E0003", "nieznane zrodlo '" + source + "' w 'get <" + source + ":" + name + ">' (dozwolone: bit, c, core, cpp, crates, extern, go, hlib, java, jsr, kotlin, npm, pypi, selfhost, std, work)", find_line_of(self.lines.clone(), "get <" + source.clone() + ":"), 0, 1, ""))
         ]
     ]
 
