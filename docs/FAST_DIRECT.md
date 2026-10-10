@@ -112,7 +112,7 @@ finalnej binarki.
 `get <pypi:...>` wewnątrz `fast direct {backend}[...]` działa tak jak
 dziś w `direct[...]`, z jednym dodatkiem: zależność jest rozwiązywana
 i **zapisywana do cache builda jako źródło do statycznego
-zlinkowania** (`virus build`), a nie tylko jako pakiet instalowany w
+zlinkowania** (`bit build`), a nie tylko jako pakiet instalowany w
 środowisku uruchomieniowym.
 
 ## Architektura w repo (planowana)
@@ -137,7 +137,7 @@ zlinkowania** (`virus build`), a nie tylko jako pakiet instalowany w
   wbudowanym / most Rust-native dla `polars`/`granian`/`duckdb`) —
   jedna funkcja `gen_fast_direct(backend, body)` z dispatchem po
   backendzie, każdy backend to osobna, mała gałąź kodogenu.
-* `virus/cmd/build.hcs` — `build_wire_fast_direct_dependencies`,
+* `bit` — `build_wire_fast_direct_dependencies`,
   analogiczne do już istniejącego `build_wire_extern_dependencies`:
   dla wybranych backendów pobiera/buduje statyczny artefakt
   interpretera (PyPy) i dopisuje go do `build.rs`/`Cargo.toml` tego
@@ -191,7 +191,7 @@ zainstalowany): `numba`, `polars`, `scipy`, `jax`, `duckdb`, `cupy`,
 
 Nie zrobione względem specyfikacji wyżej: statyczne linkowanie,
 mosty Rust-native dla `polars`/`granian`/`duckdb` bez CPythona,
-`build_wire_fast_direct_dependencies` w `virus`. Uwaga środowiskowa:
+`build_wire_fast_direct_dependencies` w `bit`. Uwaga środowiskowa:
 Pythran wymaga zgodności wersji numpy z jego nagłówkami (na maszynie
 testowej pip-owy numpy 2.x kolidował z apt-owym Pythranem — trzeba
 `PYTHONPATH=/usr/lib/python3/dist-packages`).
