@@ -10,7 +10,7 @@ Status: **zaimplementowane, zweryfikowane end-to-end dla stdlib Go**
   `<crate>/go/hks_go.go` (+ `go.mod`), zapisywanego przez `hackerc build`.
   Jeden plik, bo Go nie pozwala zlinkować dwóch archiwów `c-archive` z
   osobnymi runtime'ami.
-* `virus build` woła `go build -buildmode=c-archive -o libhksgo.a .`,
+* `bit build` woła `go build -buildmode=c-archive -o libhksgo.a .`,
   a `build.rs` linkuje je **statycznie** (`link-lib=static=hksgo` +
   `pthread`). Runtime Go jest w binarce — Go NIE jest potrzebny w
   runtime, tylko przy budowaniu.
