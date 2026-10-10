@@ -408,7 +408,7 @@ fun infer_ident_call_type(name: Str, env: TypeEnv) -> Option<TypeRef> [
     ]
     !! ROZBUDOWA (ta runda, patrz docs/LSP.md) - `read_stdin_line()`/
     !! `read_stdin_exact(n)`, potrzebne do czytania ramek JSON-RPC
-    !! (naglowki `Content-Length` + tresc) w `hackerc lsp`/`virus lsp` -
+    !! (naglowki `Content-Length` + tresc) w `hackerc lsp`/`bit lsp` -
     !! pierwsze funkcje wbudowane czytajace ZE STDIN w calym bootstrapie
     !! (patrz codegen.hcs::gen_call dla implementacji Rust).
     if name == "read_stdin_line" [
@@ -417,12 +417,12 @@ fun infer_ident_call_type(name: Str, env: TypeEnv) -> Option<TypeRef> [
     if name == "read_stdin_exact" [
         end some(make_type1("Option", make_type0("Str")))
     ]
-    !! ROZBUDOWA (ta runda, patrz docs/VIRUS.md - "virus lsp") -
+    !! ROZBUDOWA (ta runda, patrz docs/BIT.md - "bit lsp") -
     !! `run_command_inherit(program, argumenty) -> Int` - jak
     !! `run_command`, ale z ODZIEDZICZONYM (nie przechwyconym) stdin/
-    !! stdout/stderr dziecka - jedyny sposob, zeby `virus lsp` mogl
+    !! stdout/stderr dziecka - jedyny sposob, zeby `bit lsp` mogl
     !! byc CIENKIM POSREDNIKIEM do `hackerc lsp` (patrz
-    !! `virus/cmd/lsp.hcs`): protokol LSP MUSI plynac bezposrednio
+    !! `bit`): protokol LSP MUSI plynac bezposrednio
     !! miedzy edytorem a `hackerc`, `run_command`/`run_command_combined`
     !! (ktore CZEKAJA na zakonczenie procesu i dopiero wtedy oddaja
     !! zebrany tekst) sie do tego kompletnie nie nadaja. Zwraca kod
