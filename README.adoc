@@ -13,13 +13,15 @@ niewielkiego fragmentu kodu, ktory nigdy nie bedzie wymagal wydajnosci.
 [cols="1,3"]
 |===
 | Status | *Bootstrap osiagniety + FFI 0.3 + workspace 0.4* - `hackerc`
-(transpilator) i `virus` (menedzer pakietow/narzedzie budowania) sa
-dzis w calosci napisane w samym HackerScript (`.hcs`), nie w
-Pythonie/Rust jak w wersji `0.0.1`. Od `0.3` dochodzi przeprojektowane
+(transpilator) i `hack3rc` (kompilator AOT) sa dzis w calosci
+napisane w samym HackerScript (`.hcs`), nie w Pythonie/Rust jak w
+wersji `0.0.1`. Menedzerem pakietow i narzedziem budowania jest
+`bit` - osobny projekt (napisany w H#, repozytorium bit-io/bit),
+ktory czyta `Bit.hk`, instaluje zaleznosci i wola `hackerc`. Od `0.3` dochodzi przeprojektowane
 FFI: `get <extern:...> use <static\|dynamic>` + `region [ ... ]`, `get
 <c:...>`/`get <cpp:...>` oraz `native {C++} [ ... ]`. Od `0.4`:
 `get <work:czlonek[::plik]>` (import DOWOLNEGO czlonka workspace,
-nie tylko `core`/`std`), sekcja `[build]` w `Virus.hk` **usunieta**
+nie tylko `core`/`std`), sekcja `[build]` w `Bit.hk` **usunieta**
 (plik wejsciowy jest teraz zawsze `cmd/main.hcs`, bez konfiguracji),
 oraz naprawiony blad z duplikujacym sie `cache/` w workspace (patrz
 <<historia-wersji>>).
@@ -80,14 +82,8 @@ HackerScript/
     diagnostics.hcs          renderowanie bledow w stylu rustc (podkreslona linia)
     main.hcs                 CLI: build/check/lint/fmt (kolorowe, z paskiem postepu) - do 0.3: cli.hcs
     playground.hcs           demo/checker uzywany przez playground WASM
-  virus/cmd/             menedzer pakietow i build tool, W CALOSCI w HackerScript
-    main.hcs                 CLI: init/build/check/lint/fmt/install/remove/repair/clean
-    manifest.hcs              parser formatu .hk (Virus.hk - NIE TOML) - [build] usuniete w 0.4
-    install.hcs               pobieranie zaleznosci z PyPI/crates.io/npm/JSR
-    hackerc_bridge.hcs         resolve+download hackerc wg `using <wersja>`
-    build.hcs / check.hcs / lint.hcs / fmt.hcs / cache.hcs / cache_cmd.hcs
-    progress.hcs               kolorowy CLI (std:term) - naglowki/pasek postepu
-    remove.hcs / repair.hcs / clean.hcs / init.hcs
+  hack3rc/cmd/         kompilator AOT (Cranelift), W CALOSCI w HackerScript
+  Bit.hk                  workspace (czlonkowie: hackerc, hack3rc, libs/core, libs/std)
   libs/
     core/lib/memory/        4 alokatory: arena, chained_arena, stack_allocator, pool_allocator
     std/lib/                fs, io, string, math, path, json, toml, hk, env,
@@ -96,7 +92,7 @@ HackerScript/
   playground/             checker HackerScript skompilowany do WASM (przegladarka, 0.4)
     cmd/main.hcs            statycznie linkuje hackerc przez get<work:...>, @wasm_export check_source
     web/                    index.html + main.js - dzialajaca strona w stylu Rust Playground
-    web/README.md           dokladne kroki budowania (virus build --wasm + wasm-bindgen-cli)
+    web/README.md           dokladne kroki budowania (bit build --wasm + wasm-bindgen-cli)
   docs/
     hello-world/            minimalny dzialajacy przyklad (.hk + .hcs)
     module-demo/            przyklad systemu modulow (get <core:...>)
@@ -108,10 +104,10 @@ HackerScript/
   .github/workflows/      CI (buduje I URUCHAMIA wygenerowany crate) + Release
 ----
 
-TIP: Wczesniejsza architektura (`hackerc/` w Pythonie, `virus/cli` +
-`virus/hk-parser` w Rust z `clap`/`reqwest`) zostala calkowicie
+TIP: Wczesniejsza architektura (`hackerc/` w Pythonie) zostala calkowicie
 zastapiona kodem HackerScript powyzej - patrz <<historia-wersji>>
-jesli szukasz kontekstu tej zmiany.
+jesli szukasz kontekstu tej zmiany. Wspolpraca z menedzerem pakietow
+`bit` jest opisana w `docs/BIT.md`.
 
 == Jak to dziala
 
@@ -127,23 +123,20 @@ Rust jest hostem.
 dwufazowo zbiera sygnatury z calego projektu, zeby wywolania
 cross-plikowe tez dostaly poprawne `&`/`&mut`).
 . `get <crates:nazwa>` -> prawdziwa zaleznosc Cargo. `get
-<pypi/npm/jsr:...>` -> pobierane przez `virus install` (bezposrednio
+<pypi/npm/jsr:...>` -> pobierane przez `bit install` (bezposrednio
 z PyPI/crates.io/npm/JSR API, BEZ `pip`/`cargo add`/`npm install`).
-. `virus install vira <nazwa>` -> szuka biblioteki w oficjalnym
-rejestrze https://vira.io (JSON publikowany pod
-`github.com/vira-io/repository`) i pobiera ja wg zadeklarowanego typu.
-Dla typu `git` kod trafia do `cache/libs/vira/<nazwa>/` i jest
-importowalny wprost przez `get <vira:nazwa[::plik]>` (jak `get
-<std:...>`/`get <core:...>` - biblioteka MUSI miec `mod.hcs` w
-korzeniu, jesli ma byc importowana bez `::`). Dla
-`static-lib`/`shared-lib`/`rust-lib` linkowanie do wygenerowanego
-crate'a dzieje sie *automatycznie* przy `virus build` (wygenerowany
-`build.rs`/`.cargo/config.toml`), a uzycie w kodzie to `extern
-"nazwa" fun ...` (`.hlib` zaplanowane na przyszlosc) - patrz
-`docs/ROADMAP.md`, sekcja "Ekosystem bibliotek Vira".
+. `bit install` -> instaluje zaleznosci z `Bit.hk` (`[dependencies]`):
+biblioteki z indeksu bit.io, repozytoria git (`-> x => git <url> v1`),
+sciezki lokalne oraz pakiety PyPI/crates.io/npm/JSR. Biblioteki
+HackerScript trafiaja do `cache/libs/<nazwa>/` (tryb projektowy) albo
+`~/.hackeros/libs/<nazwa>/current/` (tryb wspolny) i sa importowalne
+wprost przez `get <bit:nazwa[::plik]>` (zrodla w `lib/`: `lib/mod.hcs`
+= caly pakiet, `lib/<plik>.hcs` = `::plik`). `bit` ustawia `BIT_LIBS`
+dla `hackerc`; reszte (linkowanie `get <c:...>`/`get <cpp:...>` do
+wygenerowanego crate'a) robi `bit build`. Szczegoly: `docs/BIT.md`.
 . `using <wersja>` na poczatku pliku (albo `[package] using` w
-`Virus.hk`) -> deklaruje wymagana wersje `hackerc`. Jesli nie jest
-zainstalowana, `virus` pobiera ja *automatycznie* z GitHub Releases:
+`Bit.hk`) -> deklaruje wymagana wersje `hackerc`. Jesli nie jest
+zainstalowana, `bit` pobiera ja *automatycznie* z GitHub Releases:
 +
 [source]
 ----
@@ -151,11 +144,11 @@ https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v<wersja
 ----
 +
 (przez `curl`, z natywnym paskiem postepu, cache'owana w
-`cache/env/hackerc-<wersja>/`) - patrz `virus/cmd/hackerc_bridge.hcs`.
-. `virus build` -> `hackerc build` (generuje cargo crate) -> `cargo
-build` (jedyne miejsce, gdzie `virus` uzywa cargo - jako kompilator,
+`cache/env/hackerc-<wersja>/`) - patrz `bit`.
+. `bit build` -> `hackerc build` (generuje cargo crate) -> `cargo
+build` (jedyne miejsce, gdzie `bit` uzywa cargo - jako kompilator,
 nie menedzer pakietow). Uruchomiony na korzeniu z `[workspace]` w
-`Virus.hk` (patrz glowny `/Virus.hk` tego repo) buduje KAZDEGO
+`Bit.hk` (patrz glowny `/Bit.hk` tego repo) buduje KAZDEGO
 czlonka majacego wlasny, uruchamialny plik wejsciowy - analogicznie
 do `cargo build` w workspace Cargo.
 . **(0.4)** Plik wejsciowy KAZDEGO budowalnego czlonka/projektu jest
@@ -163,7 +156,7 @@ teraz ZAWSZE `cmd/main.hcs` - sekcja `[build] -> entry => <sciezka>`,
 pozwalajaca to kiedys nadpisac, zostala **calkowicie usunieta** z
 formatu `.hk` (dokladny analog tego, jak Cargo samo znajduje
 `src/main.rs`, bez zadnego pola w `Cargo.toml`) - patrz
-`find_cmd_entry()` w `virus/cmd/manifest.hcs`.
+`find_cmd_entry()` w `bit`.
 . **(0.4)** `get <work:czlonek[::plik]>` -> importuje `lib/mod.hcs`
 (albo `lib/<plik>.hcs`) DOWOLNEGO czlonka `[workspace] -> members`,
 nie tylko uprzywilejowanych `core`/`std` (ktore maja wlasne, krotsze
@@ -171,39 +164,39 @@ aliasy `get <core:...>`/`get <std:...>`, dzialajace identycznie) -
 analog Rustowego `use nazwa_membera::modul::*;` w workspace Cargo.
 Patrz `docs/SYNTAX.md`.
 . **(0.4)** `cache/` jest teraz NAPRAWDE wspolny dla calego workspace,
-niezaleznie z ktorego czlonka odpalisz `virus` (`hackerc/`, `virus/`,
+niezaleznie z ktorego czlonka odpalisz `bit` (`hackerc/`, `bit/`,
 `libs/core/`, `libs/std/` czy korzenia) - wczesniej kazdy z nich (majac
-WLASNY, poprawny `Virus.hk`) dostawal WLASNY, osobny `cache/` zamiast
+WLASNY, poprawny `Bit.hk`) dostawal WLASNY, osobny `cache/` zamiast
 dzielic jeden z korzeniem, dokladnie tak jak `cargo` w workspace zawsze
-dzieli jeden `target/`. Patrz `virus/cmd/cache.hcs`.
+dzieli jeden `target/`. Patrz `bit`.
 
 == Szybki start
 
 [source,bash]
 ----
-# hackerc i virus sa binarkami natywnymi (self-hosted) - najprosciej
+# hackerc i bit sa binarkami natywnymi (self-hosted) - najprosciej
 # pobrac gotowe wydanie:
 curl -L --fail -o hackerc \
   https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v0.4/hackerc
 chmod +x hackerc
 
-./hackerc check docs/hello-world/Virus.hk
+./hackerc check docs/hello-world/Bit.hk
 ./hackerc build docs/hello-world/cmd/main.hcs -o /tmp/out
 cd /tmp/out && cargo run   # wymaga zainstalowanego Rust
 ----
 
-Albo, w projekcie zarzadzanym przez `virus` (patrz `Virus.hk`):
+Albo, w projekcie zarzadzanym przez `bit` (patrz `Bit.hk`):
 
 [source,bash]
 ----
-virus init --name moj-projekt
+bit init --name moj-projekt
 cd moj-projekt
-virus build --release   # pobierze wlasciwy hackerc automatycznie (using <wersja>)
+bit build --release   # pobierze wlasciwy hackerc automatycznie (using <wersja>)
 ----
 
 == Kolorowe CLI i pasek postepu
 
-`hackerc build`/`virus build`/`check`/`lint`/`fmt` maja teraz
+`hackerc build`/`bit build`/`check`/`lint`/`fmt` maja teraz
 kolorowe wyjscie (zielony = sukces, czerwony = blad, cyan =
 nazwy/etykiety) i *realny*, procentowy pasek postepu renderowany w
 miejscu (nie osobna linia per krok) - patrz nowy modul
@@ -213,9 +206,9 @@ miejscu (nie osobna linia per krok) - patrz nowy modul
   srodowiskowa `NO_COLOR` (https://no-color.org).
 * Pasek dla `hackerc build`: 4 kroki (parsowanie -> sygnatury projektu
   -> sprawdzanie typow -> generowanie crate'a Rust).
-* Pobieranie binarek (`virus install`, auto-pobieranie `hackerc` wg
+* Pobieranie binarek (`bit install`, auto-pobieranie `hackerc` wg
   `using <wersja>`) uzywa *natywnego* paska `curl --progress-bar`
-  zamiast wlasnego renderowania - `virus` nie ma dostepu do bajtow
+  zamiast wlasnego renderowania - `bit` nie ma dostepu do bajtow
   strumienia w trakcie trwania procesu pobierania (patrz
   `docs/ROADMAP.md`, sekcja "CLI - kolory i pasek postepu", po
   wyjasnienie dlaczego).
@@ -226,12 +219,12 @@ miejscu (nie osobna linia per krok) - patrz nowy modul
 [cols="1,4"]
 |===
 | `0.0.1`
-| *Zamrozona.* Wersja startowa: `hackerc` w Pythonie, `virus`
+| *Zamrozona.* Wersja startowa: `hackerc` w Pythonie, `bit`
 (`cli`/`hk-parser`) w Rust z `clap`/`reqwest`. Nie jest juz
 rozwijana - punkt odniesienia "skad zaczelismy".
 
 | `0.1`
-| *Bootstrap.* `hackerc` i `virus` przepisane w calosci na sam
+| *Bootstrap.* `hackerc` i `bit` przepisane w calosci na sam
 HackerScript (`.hcs`), kompilowane przez wlasny transpilator do
 Rusta. Pierwsze wydanie publikowane binarnie na GitHub Releases pod
 `v0.1`.
@@ -239,7 +232,7 @@ Rusta. Pierwsze wydanie publikowane binarnie na GitHub Releases pod
 | `0.2`
 | *Wewnetrzna.* Kolorowe CLI i realny pasek postepu
 (`libs/std/lib/term.hcs`, `get <std:term>`) dla
-`hackerc build`/`check`/`lint`/`fmt` i `virus` odpowiednikow - patrz
+`hackerc build`/`check`/`lint`/`fmt` i `bit` odpowiednikow - patrz
 "Kolorowe CLI i pasek postepu" wyzej.
 
 | `0.3`
@@ -259,17 +252,17 @@ extern/region/c/cpp".
 `get <work:czlonek[::plik]>` i `include <work:czlonek[::plik]>` -
 ogolny import/statyczne linkowanie DOWOLNEGO czlonka
 `[workspace] -> members` (nie tylko `core`/`std`), analog Rustowego
-`use nazwa_membera::...;`; sekcja `[build]` w `Virus.hk` **calkowicie
+`use nazwa_membera::...;`; sekcja `[build]` w `Bit.hk` **calkowicie
 usunieta** - plik wejsciowy jest teraz zawsze `cmd/main.hcs`, bez
 zadnej konfiguracji (przy okazji naprawiono realny blad: `[build]
--> entry => cli.hcs` w `hackerc/Virus.hk` nigdy nie wskazywalo na
-istniejacy plik, wiec `hackerc` byl po cichu pomijany przy `virus
+-> entry => cli.hcs` w `hackerc/Bit.hk` nigdy nie wskazywalo na
+istniejacy plik, wiec `hackerc` byl po cichu pomijany przy `bit
 build` na calym workspace - plik przemianowany na `cmd/main.hcs`);
 naprawiony `cache/` - wczesniej kazdy czlonek workspace majacy
-WLASNY `Virus.hk` (`hackerc/`, `virus/`, `libs/core/`, `libs/std/`)
+WLASNY `Bit.hk` (`hackerc/`, `bit/`, `libs/core/`, `libs/std/`)
 dostawal WLASNY, osobny katalog `cache/` zamiast dzielic jeden
 wspolny z korzeniem, jak `cargo` dzieli jeden `target/` w calym
-workspace; oraz `@wasm_export` + `virus build --wasm` - pierwszy
+workspace; oraz `@wasm_export` + `bit build --wasm` - pierwszy
 dzialajacy pipeline do WASM, uzyty w nowym `playground/`
 (`playground/cmd/main.hcs` linkuje statycznie caly checker `hackerc`a
 przez `include <work:hackerc::...>`, `playground/web/` to gotowa
@@ -281,7 +274,7 @@ teraz `v0.4`. Pelny opis: `docs/SYNTAX.md` (sekcje "`get <work:...>`",
 
 == Status projektu
 
-*Caly kompilator (`hackerc/cmd/`) i menedzer pakietow (`virus/cmd/`)
+*Caly kompilator (`hackerc/cmd/`) i kompilator AOT (`hack3rc/cmd/`)
 sa dzis napisane w HackerScript* i weryfikowane strukturalnie przez
 `hackerc check` + inspekcje, a *koncowo* przez CI
 (`.github/workflows/ci.yml`), ktore kompiluje i uruchamia
