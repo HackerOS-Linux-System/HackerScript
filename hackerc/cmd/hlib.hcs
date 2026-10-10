@@ -19,7 +19,7 @@ struct HlibBuildResult [
 !!!   - `source_hcs_path`  - oryginalny plik `.hcs` (jego PELNY tekst
 !!!     trafia do artefaktu `ast/<nazwa>.hcs`, patrz komentarz na gorze)
 !!!   - `so_path`          - juz skompilowany `.so` (cdylib) dla tej
-!!!     biblioteki (budowany wczesniej przez zwykla sciezke `virus
+!!!     biblioteki (budowany wczesniej przez zwykla sciezke `bit
 !!!     build --lib`/`hackerc build --emit cdylib` - ten plik TYLKO
 !!!     pakuje, nie kompiluje) - pusty Str `""` jesli biblioteka nie ma
 !!!     natywnego `.so` (czysto-zrodlowa biblioteka `.hcs`)
@@ -70,7 +70,7 @@ fun hlib_build(source_hcs_path: Str, so_path: Str, out_hlib_path: Str, lib_name:
         // ── native/<target>/<name>.so — opcjonalny skompilowany cdylib ──
         let host_target = std::env::var("HOST").unwrap_or_else(|_| {
             // rustc nie zawsze eksportuje $HOST do build scriptow-nie-buildscriptow;
-            // dla `hackerc`/`virus` (zwykly binarny proces, nie build.rs) uzywamy
+            // dla `hackerc`/`bit` (zwykly binarny proces, nie build.rs) uzywamy
             // prostego, praktycznego defaultu — patrz HLIB_FORMAT.md, sekcja
             // "ABI stability", po pelny opis dlaczego to jest OK dla v1.
             "x86_64-unknown-linux-gnu".to_string()
@@ -368,7 +368,7 @@ fun hlib_extract_for_import(hlib_path: Str, lib_name: Str, into_dir: Str) -> Str
                     }
                 } else {
                     // ROZBUDOWA (ta runda, patrz docs/ROADMAP.md sekcja
-                    // 3 - "integracja .hlib z virus install") - brak
+                    // 3 - "integracja .hlib z bit install") - brak
                     // artefaktu `ast` (zrodla), ale jest `.so` dla tego
                     // hosta: syntetyzujemy PRAWDZIWE sygnatury
                     // `region [ ... ]` z `manifest.json` -> `exports`
