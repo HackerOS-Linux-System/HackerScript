@@ -10,12 +10,12 @@ dla różnych plików tego samego builda.
 
 1. Każdy plik `.hcs` MOŻE zaczynać się od `using <wersja>` (np. `using <0.5>`).
    Brak tej deklaracji = plik używa domyślnej wersji projektu
-   (`Virus.hk` -> `[package] -> using => "0.4"`, domyślnie `0.4` jeśli pole
+   (`Bit.hk` -> `[package] -> using => "0.4"`, domyślnie `0.4` jeśli pole
    nieobecne).
-2. `virus build`:
-   - skanuje CAŁY projekt (`virus/cmd/multiversion.hcs::scan_project_versions`)
+2. `bit build`:
+   - skanuje CAŁY projekt (`bit`)
      w poszukiwaniu wszystkich zadeklarowanych wersji,
-   - łączy to z `Virus.hk -> [package] -> all-versions => [...]` (opcjonalne,
+   - łączy to z `Bit.hk -> [package] -> all-versions => [...]` (opcjonalne,
      jawne wyliczenie — przede wszystkim optymalizacja/dokumentacja, skan i tak
      wykrywa wszystko sam),
    - dla każdej znalezionej wersji woła `hackerc_ensure` (pobiera/buduje binarkę
@@ -65,12 +65,12 @@ jedyna część języka, która nigdy się nie zmienia między wersjami. Odczyt 
   delegacja w `parse_and_add`, gałąź w pętli `build_project`.
 - `hackerc/cmd/main.hcs`: `cmd_emit_module`, subkomenda `emit-module`, flaga
   `--version-map` dla `build`.
-- `virus/cmd/multiversion.hcs` (NOWY): `scan_project_versions`,
+- `bit` (NOWY): `scan_project_versions`,
   `ensure_all_versions`, `build_version_map_flag_value`,
-  `peek_file_using_version_virus`, `find_hcs_files`.
-- `virus/cmd/build.hcs`: `cmd_build_run` woła skan/ensure i przekazuje
+  `peek_file_using_version`, `find_hcs_files`.
+- `bit`: `cmd_build_run` woła skan/ensure i przekazuje
   `version_map_str` do `hackerc_build_crate*`.
-- `virus/cmd/hackerc_bridge.hcs`: `hackerc_build_crate*` przyjmują nowy
+- `bit`: `hackerc_build_crate*` przyjmują nowy
   parametr `version_map: Str`.
-- `virus/cmd/manifest.hcs`: `PackageSection.all_versions`, parsowanie
+- `bit`: `PackageSection.all_versions`, parsowanie
   `-> all-versions => [...]`.
