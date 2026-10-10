@@ -14,11 +14,11 @@ JVM co Java. Roznice:
    najwyzszego poziomu** `fun run() { ... }` (nie metoda klasy - w
    Kotlinie funkcje nie musza byc w klasie). `kotlinc` kompiluje taki
    plik do klasy `HksNativeKotlinNKt` (konwencja "nazwa pliku + Kt").
-2. `virus build` kompiluje `.kt` pliki `kotlinc`iem do TEGO SAMEGO
+2. `bit build` kompiluje `.kt` pliki `kotlinc`iem do TEGO SAMEGO
    `java_classes/` co `.java` (Kotlin i Java moga wolac nawzajem swoje
    klasy z jednego wspolnego classpath).
 3. Bajtkod Kotlina wymaga `kotlin-stdlib.jar` na classpath W RUNTIME
-   (nie tylko przy kompilacji) - `virus build` znajduje ja wzgledem
+   (nie tylko przy kompilacji) - `bit build` znajduje ja wzgledem
    polozenia samego `kotlinc` (`<KOTLIN_HOME>/lib/kotlin-stdlib.jar` -
    stala konwencja dystrybucji Kotlina, dziala niezaleznie od tego czy
    `kotlinc` pochodzi z apt, SDKMAN czy oficjalnego archiwum), kopiuje
@@ -34,7 +34,7 @@ i przy `javac -cp`, i przy `kotlinc -cp`.
 
 Program testowy z `native {kotlin} [ println(...); listOf(1,2,3,4,5).sum() ]`:
 - `hackerc build` -> poprawny `.kt` + wywolanie JNI w Ruscie
-- `virus build` -> `kotlinc` znaleziony i wywolany, `kotlin-stdlib.jar`
+- `bit build` -> `kotlinc` znaleziony i wywolany, `kotlin-stdlib.jar`
   znaleziony i skopiowany, `cargo build` -> dzialajaca binarka
 - **Uruchomienie binarki dalo POPRAWNY wynik**: `Czesc z Kotlina! 2 + 2
   = 4`, `suma listy: 15` - kod Kotlina faktycznie sie wykonal, ze
