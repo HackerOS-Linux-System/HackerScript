@@ -510,14 +510,14 @@ fun cmd_emit_module(src_path: Str, out_path: Str, module_name: Str) -> Int [
 !!! `out_dir`/`crate_name` juz rozpakowane (patrz uwaga na gorze pliku
 !!! o braku argv) - `out_dir`/`out_dir + "/src"` MUSZA JUZ ISTNIEC,
 !!! patrz to samo ograniczenie udokumentowane przy `build_project` w
-!!! project.hcs. `vira_root` DODANE w tej rundzie (patrz
+!!! project.hcs. `bit_root` DODANE w tej rundzie (patrz
 !!! `project.hcs::find_bit_cache_root`) - `none()` = auto-wykrywanie.
 !!! ROZBUDOWA (ta runda, patrz docs/MULTI_VERSION.md) - `version_binaries`
 !!! na koncu (domyslnie `dict()` u wywolania bez `--version-map` -
 !!! pelna zgodnosc wsteczna). Przekazywane do `collect_project_signatures`/
 !!! `build_project` (patrz tam) - pozwala plikom `using <inna-wersja>`
 !!! delegowac swoja transpilacje do wlasciwej binarki.
-fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, vira_root: Option<Str>, force_library: Bool, bin_name: Option<Str>, version_binaries: Dict<Str, Str>) -> Int [
+fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, bit_root: Option<Str>, force_library: Bool, bin_name: Option<Str>, version_binaries: Dict<Str, Str>) -> Int [
     if not file_readable(src_path.clone()) [
         elog(c_red("hackerc:") + " nie znaleziono pliku " + src_path)
         end 1
@@ -540,7 +540,7 @@ fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<St
             !!! `check_program` widzi domyslnie tylko JEDEN plik -
             !!! parytet z komentarzem w cmd_build (Python).
             print_progress_line("Kompilacja " + src_path, 2, BUILD_STEP_COUNT, "zbieranie sygnatur projektu", false)
-            let ps = collect_project_signatures(src_path.clone(), libs_root.clone(), bootstrap_root.clone(), vira_root.clone(), VERSION.to_string(), version_binaries.clone())
+            let ps = collect_project_signatures(src_path.clone(), libs_root.clone(), bootstrap_root.clone(), bit_root.clone(), VERSION.to_string(), version_binaries.clone())
             let extra_variants: List<Str> = []
             let ei = 0
             let en = ps.sigs.enum_names.len()
@@ -575,7 +575,7 @@ fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<St
             ]
 
             print_progress_line("Kompilacja " + src_path, 4, BUILD_STEP_COUNT, "generowanie crate'a Rust", false)
-            let result = build_project(src_path, out_dir, libs_root, bootstrap_root, vira_root, crate_name, force_library, bin_name, VERSION.to_string(), version_binaries.clone())
+            let result = build_project(src_path, out_dir, libs_root, bootstrap_root, bit_root, crate_name, force_library, bin_name, VERSION.to_string(), version_binaries.clone())
 
             !!! NAPRAWA (ta runda) - ostrzezenia projektu (np. "nie
             !!! znaleziono czlonka workspace...", patrz Discovery.warnings
@@ -618,7 +618,7 @@ fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<St
             ]
             match result.extern_links_path [
                 Some(lp) -> [
-                    log(c_bold_cyan("hackerc build:") + " wykryto get <extern:...>/get <c:...>/get <cpp:...> -> zapisano " + lp + " (przeczyta 'virus build', patrz build_wire_extern_dependencies)")
+                    log(c_bold_cyan("hackerc build:") + " wykryto get <extern:...>/get <c:...>/get <cpp:...> -> zapisano " + lp + " (przeczyta 'bit build', patrz build_wire_extern_dependencies)")
                 ]
                 None -> [
                 ]
@@ -937,7 +937,7 @@ fun print_usage() [
     log("      hlib inspect <plik.hlib>")
     log("      hlib verify <plik.hlib> [--pubkey HEX]")
     log("      hlib keygen [-o klucz.key]")
-    log("    emit-module         transpiluje JEDEN plik do JEDNEGO modulu .rs, bez wiedzy o reszcie projektu - uzywane WEWNETRZNIE przez `virus build` przy `using <inna-wersja>`, patrz docs/MULTI_VERSION.md")
+    log("    emit-module         transpiluje JEDEN plik do JEDNEGO modulu .rs, bez wiedzy o reszcie projektu - uzywane WEWNETRZNIE przez `bit build` przy `using <inna-wersja>`, patrz docs/MULTI_VERSION.md")
     log("      emit-module <plik.hcs> -o <plik.rs> --module-name <nazwa>")
     log("")
     log("options:")
@@ -1193,21 +1193,21 @@ fun main() [
         ]
         !! DODANE w tej rundzie (patrz project.hcs::find_bit_cache_root) -
         !! analogiczne do --libs-root/--bootstrap-root, none() = auto-wykrywanie.
-        let vira_root: Option<Str> = none()
+        let bit_root: Option<Str> = none()
         match find_flag_value(argv, "", "--bit-root") [
             Some(v) -> [
-                vira_root = some(v)
+                bit_root = some(v)
             ]
             None -> [
             ]
         ]
         !! ROZBUDOWA (ta runda) - `hackerc build --library` (przekazywane
-        !! przez `virus build --library`, patrz TargetLibrary w
-        !! `virus/cmd/build.hcs`) - `[lib] crate-type = ["rlib"]` zamiast
+        !! przez `bit build --library`, patrz TargetLibrary w
+        !! `bit`) - `[lib] crate-type = ["rlib"]` zamiast
         !! `[[bin]]`, patrz `project.hcs::cargo_toml_text`.
         let force_library = has_flag(argv, "--library")
         !! ROZBUDOWA (ta runda) - `--bin-name <nazwa>` (przekazywane
-        !! przez `virus build`, patrz `docs/VIRUS.md`, "Plan:
+        !! przez `bit build`, patrz `docs/BIT.md`, "Plan:
         !! multi-binarki na czlonka") - pisze do `src/bin/<nazwa>.rs` i
         !! DOPISUJE `[[bin]]` do juz istniejacego Cargo.toml, zamiast
         !! generowac calosc od nowa (patrz `project.hcs::build_project`).
@@ -1221,7 +1221,7 @@ fun main() [
         ]
         !! DODANE (ta runda, patrz docs/MULTI_VERSION.md) - `--version-map
         !! "0.4=/sciezka1;0.5=/sciezka2"`, wstawiane WYLACZNIE przez
-        !! `virus build` (patrz virus/cmd/multiversion.hcs) - reczne
+        !! `bit build` (patrz bit) - reczne
         !! wywolanie `hackerc build` bez tej flagi dziala DOKLADNIE jak
         !! dotad (`dict()` pusty = brak delegacji miedzywersyjnej).
         let version_binaries: Dict<Str, Str> = dict()
@@ -1232,7 +1232,7 @@ fun main() [
             None -> [
             ]
         ]
-        exit(cmd_build(src, out_dir, crate_name, libs_root, bootstrap_root, vira_root, force_library, bin_name, version_binaries))
+        exit(cmd_build(src, out_dir, crate_name, libs_root, bootstrap_root, bit_root, force_library, bin_name, version_binaries))
     ]
 
     if first == "hlib" [
