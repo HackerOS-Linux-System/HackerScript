@@ -1,6 +1,7 @@
 include <ast_nodes>
 include <typeinfer>
 include <codegen>
+get <std:string> import <str_contains>
 
 struct KtGen [
     lines: List<Str>,
@@ -223,7 +224,7 @@ fun kt_expr(e: Expr) -> Str [
             end "(" + kt_expr(inner) + ").to" + kt + "()"
         ]
         _ -> [
-            end "TODO_unsupported_expr()"
+            end "__HKS_KT_UNSUPPORTED__"
         ]
     ]
 ]
@@ -495,6 +496,11 @@ fun transpile_kotlin(prog: Program) -> Result<Str, Str> [
     while j < g.lines.len() [
         body = body + g.lines[j].clone() + "\n"
         j = j + 1
+    ]
+    !! Wyrazenie bez odpowiednika w backendzie Kotlin = BLAD KOMPILACJI
+    !! (wczesniej do wyniku trafialo `TODO_unsupported_expr()`).
+    if str_contains(body.clone(), "__HKS_KT_UNSUPPORTED__") [
+        end err("backend Kotlin: program zawiera wyrazenie, ktore nie ma jeszcze odpowiednika w Kotlinie (patrz docs/KOTLIN.md)\n")
     ]
     end ok("// Wygenerowane przez hackerc (use <lang:kotlin>, eksperymentalne)\n\n" + kt_prelude(body.clone()) + body)
 ]
