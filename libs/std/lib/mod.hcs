@@ -21,7 +21,7 @@
 !!   get <std:toml>                          - toml_parse (minimalny, praktyczny podzbior TOML -
 !!                                              key = value, [sekcje], tablice, string/liczba/bool)
 !!   get <std:hk>                            - hk_parse/hk_resolve_interpolations/hk_serialize
-!!                                              (format .hk uzywany przez Virus.hk - dowolne
+!!                                              (format .hk uzywany przez Bit.hk - dowolne
 !!                                              zagniezdzenie ->/-->/--->, klucze kropkowe,
 !!                                              interpolacja ${sekcja.klucz}/${env:VAR}); zwraca
 !!                                              JsonValue, zbudowany na std:toml/std:json/std:env
@@ -39,7 +39,5 @@
 !! http + cybersecurity/*). Reszta (wiecej formatow/protokolow) - patrz
 !! docs/ROADMAP.md.
 
-fun std_placeholder() [
-    log("std: patrz std/lib/cybersecurity/, std/lib/io.hcs, std/lib/result.hcs - reszta jeszcze pusta, patrz docs/ROADMAP.md")
-    end
-]
+!! Wersja biblioteki standardowej (zgodna z wersja kompilatora).
+const STD_VERSION: Str = "0.4"
