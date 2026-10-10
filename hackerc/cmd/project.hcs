@@ -6,6 +6,7 @@ include <codegen>
 include <transpiler>
 include <hlib>
 get <std:io> import <file_readable>
+get <std:env> import <env_var_or>
 get <std:string> import <str_join::str_split::str_trim::str_starts_with::str_replace::str_contains>
 
 !!! `using <wersja>` per plik (patrz docs/MULTI_VERSION.md) - odczyt
@@ -49,8 +50,8 @@ fun peek_source_using_version(source: Str) -> Option<Str> [
 
 !!! Parsuje `--version-map` z main.hcs: `"0.4=/sciezka1;0.5=/sciezka2"`
 !!! (`;`-rozdzielone pary `wersja=sciezka`) na `Dict<Str, Str>` - patrz
-!!! `virus/cmd/multiversion.hcs::build_version_map_flag_value`, ktore
-!!! generuje DOKLADNIE ten format po stronie `virus`. Pusty `s` (brak
+!!! `bit`, ktore
+!!! generuje DOKLADNIE ten format po stronie `bit`. Pusty `s` (brak
 !!! flagi) -> pusty `dict()`, parytet ze starym zachowaniem.
 fun parse_version_map(s: Str) -> Dict<Str, Str> [
     let out: Dict<Str, Str> = dict()
@@ -77,8 +78,8 @@ const CARGO_TOML_HEADER: Str = "[package]\nname = \""
 const CARGO_TOML_MID: Str = "\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\n[[bin]]\nname = \""
 const CARGO_TOML_TAIL: Str = "\"\npath = \"src/main.rs\"\n\n[dependencies]\n"
 !! NOWOSC 0.4 - wariant `[lib]` (cdylib+rlib) zamiast `[[bin]]`, dla
-!! `@wasm_export`/`virus build --wasm` (patrz `cargo_toml_text()` nizej
-!! i `virus/cmd/build.hcs`). "rlib" obok "cdylib" pozwala TEZ uzyc
+!! `@wasm_export`/`bit build --wasm` (patrz `cargo_toml_text()` nizej
+!! i `bit`). "rlib" obok "cdylib" pozwala TEZ uzyc
 !! tego samego crate'a jako zwyklej zaleznosci Rust (np. w testach
 !! poza wasm) - "cdylib" samo jest wymagane przez `wasm-bindgen`. Bez
 !! `name = "..."` (w odroznieniu od `[[bin]]` wyzej) - Cargo domyslnie
@@ -87,8 +88,8 @@ const CARGO_TOML_TAIL: Str = "\"\npath = \"src/main.rs\"\n\n[dependencies]\n"
 const CARGO_TOML_WASM_MID: Str = "\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\", \"rlib\"]\npath = \"src/lib.rs\"\n\n[dependencies]\n"
 
 !! ROZBUDOWA (ta runda) - `[lib]` z SAMYM "rlib" (bez "cdylib"), dla
-!! `virus build --library` (`TargetLibrary`, patrz
-!! `virus/cmd/build.hcs`). W odroznieniu od wariantu WASM wyzej, to
+!! `bit build --library` (`TargetLibrary`, patrz
+!! `bit`). W odroznieniu od wariantu WASM wyzej, to
 !! NIE jest przeznaczone do zaladowania jako biblioteka dynamiczna z
 !! innego jezyka - to zwykly crate Rust-owy, docelowo konsumowany przez
 !! inny crate Rust przez `get <work:czlonek>` (patrz docs/SYNTAX.md) -
@@ -187,8 +188,8 @@ fun path_parent(p: Str) -> Str [
 ]
 
 !!! Szuka katalogu `libs/` (z podkatalogiem `core/`) zaczynajac od
-!!! `start` i idac w gore drzewa katalogow - tak jak `virus` szuka
-!!! `Virus.hk`. Uzywa PRAWDZIWEGO sprawdzenia katalogu (`dir_exists`,
+!!! `start` i idac w gore drzewa katalogow - tak jak `bit` szuka
+!!! `Bit.hk`. Uzywa PRAWDZIWEGO sprawdzenia katalogu (`dir_exists`,
 !!! `get <std:fs>` - dodane w tej sesji), NIE JUZ sondowania przez
 !!! plik-znacznik jak wczesniej (patrz historia w bootstrap/README.md).
 !!! Rozwiazuje `d` do sciezki BEZWZGLEDNEJ (parytet z Python `.resolve()`)
@@ -252,60 +253,83 @@ fun find_bootstrap_root(start: Str) -> Option<Str> [
     end none()
 ]
 
-!!! Jak `find_libs_root`, ale szuka `cache/libs/vira/` - katalog
-!!! tworzony przez `virus install vira <nazwa>` (patrz
-!!! `virus/cmd/vira.hcs`/`virus/cmd/cache.hcs::cache_lib_path`).
-!!! DODANE w tej rundzie - odblokowuje `get <vira:nazwa[::plik]>` dla
-!!! bibliotek Vira typu "git" (kod zrodlowy .hcs) - `static-lib`/
-!!! `shared-lib`/`rust-lib` sa uzywane INACZEJ: od 0.3 przez
-!!! `get <extern:nazwa> use <static|dynamic>` + `region [ ... ]`
-!!! (patrz `gen_region`/`RegionBlock` w codegen.hcs/ast_nodes.hcs;
-!!! zastepuje stare, jedno-funkcyjne `extern "nazwa" fun ...`/
-!!! `gen_extern`/`ExternFunDecl` sprzed 0.3) PO automatycznym
-!!! podlinkowaniu przez `virus build` (patrz
-!!! `virus/cmd/build.hcs::build_wire_extern_dependencies` - przemianowane
-!!! z `build_wire_vira_dependencies` w 0.3), NIE przez
-!!! `get <vira:...>` - `git`-type to jedyny typ Vira bedacy prawdziwym
-!!! zrodlem .hcs do wspolnego skompilowania z projektem. Analogicznie,
-!!! `get <c:nazwa>`/`get <cpp:nazwa>` (0.3) deklaruja zaleznosc od
-!!! biblioteki C/C++ budowanej przez `cc`, rowniez wywolywanej przez
-!!! `get <extern:...> use <...>` + `region [ ... ]`, NIGDY jako .hcs
-!!! do sparsowania - stad rowniez pomijane w kolejce ponizej.
+!!! Rozwiazywanie bibliotek menedzera pakietow `bit` dla
+!!! `get <bit:nazwa[::plik]>` (patrz docs/BIT.md). Uklad katalogow jest
+!!! TEN SAM, ktory tworzy `bit` (patrz jego README, sekcja
+!!! `[directories]`):
+!!!
+!!!   1. `$BIT_LIBS` - katalog bibliotek ustawiany przez `bit` dla
+!!!      kompilatora (patrz tez `BIT_LIBS_FLAT`),
+!!!   2. `<projekt>/cache/libs/` - szukany od katalogu wejscia W GORE
+!!!      (tryb projektowy: `bit` linkuje tu zaleznosci projektu),
+!!!   3. `~/.hackeros/libs/` - biblioteki wspolne (tryb domyslny).
+!!!
+!!! W kazdym z nich biblioteka `nazwa` to katalog `<root>/<nazwa>/` ze
+!!! zrodlami wprost ALBO `<root>/<nazwa>/current/` (tryb wspolny, link
+!!! do aktywnej wersji). Jawna flaga `--bit-root <katalog>` omija
+!!! autodetekcje.
 fun find_bit_cache_root(start: Str) -> Option<Str> [
+    let from_env = env_var_or("BIT_LIBS", "")
+    if from_env != "" [
+        if dir_exists(from_env.clone()) [
+            end some(from_env)
+        ]
+    ]
     let d = to_absolute_dir(start)
     let prev_d = "\0no-such-dir"
     while d != prev_d [
-        let candidate = path_join_safe(d.clone(), "cache/libs/bit")
+        let candidate = path_join_safe(d.clone(), "cache/libs")
         if dir_exists(candidate.clone()) [
             end some(candidate)
         ]
         prev_d = d.clone()
         d = path_parent(d)
     ]
+    let home = env_var_or("HOME", "")
+    if home != "" [
+        let shared = home + "/.hackeros/libs"
+        if dir_exists(shared.clone()) [
+            end some(shared)
+        ]
+    ]
     end none()
 ]
 
-!!! `<vira_root>/<name>/<wersja-jako-plik>.hcs`, gdzie `wersja` (z
-!!! `get <vira:nazwa::plik>`) to sciezka DO KONKRETNEGO pliku WEWNATRZ
-!!! sklonowanego repo `<vira_root>/<nazwa>/` - brak `::` (samo `get
-!!! <vira:nazwa>`) domyslnie szuka `<vira_root>/<nazwa>/mod.hcs`,
-!!! DOKLADNIE tak jak `get <std:nazwa>` bez `::` laduje w
-!!! `libs/std/lib/nazwa.hcs`, a `get <std:nazwa>` na CALY PAKIET (bez
-!!! podsciezki) odpowiadaloby `libs/std/lib/mod.hcs` - biblioteki Vira
-!!! typu "git" MUSZA wiec miec `mod.hcs` w korzeniu repo, zeby byly
-!!! importowalne jako `get <vira:nazwa>` bez `::` (udokumentowana
-!!! konwencja, patrz docs/ROADMAP.md i naglowek vira.hcs).
-fun bit_module_file_path(vira_root: Str, name: Str, version: Option<Str>) -> Str [
-    let path = vira_root + "/" + name + "/"
+!!! Katalog zrodel biblioteki `name` wewnatrz `root`: `<root>/<name>/current`
+!!! (tryb wspolny) jesli istnieje, wpp. `<root>/<name>` (tryb plaski).
+fun bit_lib_dir(root: Str, name: Str) -> Str [
+    let shared = root.clone() + "/" + name.clone() + "/current"
+    if dir_exists(shared.clone()) [
+        end shared
+    ]
+    end root + "/" + name
+]
+
+!!! Plik `.hcs` modulu biblioteki `bit`. Konwencja bit dla bibliotek
+!!! HackerScript: zrodla w `lib/` (`lib/mod.hcs` = caly pakiet,
+!!! `lib/<plik>.hcs` = `get <bit:nazwa::plik>`); dla starszych bibliotek
+!!! `mod.hcs`/`<plik>.hcs` w korzeniu repo. Zwraca PIERWSZY istniejacy
+!!! kandydat, a gdy zaden nie istnieje - pierwszego (komunikat o braku
+!!! pliku dostaje wtedy sensowna sciezke).
+fun bit_module_file_path(bit_root: Str, name: Str, version: Option<Str>) -> Str [
+    let dir = bit_lib_dir(bit_root, name)
+    let stem = "mod"
     match version [
         Some(v) -> [
-            path = path + v
+            stem = v
         ]
         None -> [
-            path = path + "mod"
         ]
     ]
-    end path + ".hcs"
+    let primary = dir.clone() + "/lib/" + stem.clone() + ".hcs"
+    if file_readable(primary.clone()) [
+        end primary
+    ]
+    let fallback = dir + "/" + stem + ".hcs"
+    if file_readable(fallback.clone()) [
+        end fallback
+    ]
+    end primary
 ]
 
 !!! NOWOSC 0.4 - szuka korzenia CALEGO workspace dla
@@ -316,13 +340,13 @@ fun bit_module_file_path(vira_root: Str, name: Str, version: Option<Str>) -> Str
 !!! ustalonego katalogu `libs/core`) tu szukana nazwa (`member_name`)
 !!! jest DOWOLNA - wiec sprawdzamy, dla kazdego kandydata na korzen
 !!! `d`, czy `<d>/<member_name>/lib` istnieje jako katalog - TA SAMA
-!!! lekka heurystyka "sondowania katalogu", bez parsowania Virus.hk
-!!! (celowo - `hackerc` moze byc wywolywany samodzielnie, bez `virus`,
+!!! lekka heurystyka "sondowania katalogu", bez parsowania Bit.hk
+!!! (celowo - `hackerc` moze byc wywolywany samodzielnie, bez `bit`,
 !!! wiec nie moze zakladac jego obecnosci ani konkretnego ksztaltu
 !!! manifestu; parsowanie PRAWDZIWEGO `[workspace] -> members` -
 !!! zeby wychwycic pomylki w nazwie czy pozwolic/zabronic importu -
-!!! jest zadaniem `virus`, patrz `virus/cmd/manifest.hcs` i
-!!! `virus/cmd/cache.hcs::workspace_claims_member`).
+!!! jest zadaniem `bit`, patrz `bit` i
+!!! `bit`).
 !!!
 !!! Konwencja: czlonek workspace jest importowalny przez
 !!! `get <work:...>` WTEDY I TYLKO WTEDY, gdy ma `<czlonek>/lib/mod.hcs`
@@ -330,19 +354,19 @@ fun bit_module_file_path(vira_root: Str, name: Str, version: Option<Str>) -> Str
 !!! sa zreszta importowalne TEZ przez `get <work:core>`/
 !!! `get <work:std>`, `find_libs_root` zostaje jako krotszy,
 !!! dedykowany alias dla nich dwoch). Czlonek z samym `cmd/main.hcs`
-!!! (binarka, patrz `find_cmd_entry` w virus/cmd/manifest.hcs) NIE jest
+!!! (binarka, patrz `find_cmd_entry` w bit) NIE jest
 !!! importowalny w ten sposob - to swiadomy podzial (jak w opisie
-!!! [workspace] w Virus.hk): "binarki" sa budowane osobno, "biblioteki"
+!!! [workspace] w Bit.hk): "binarki" sa budowane osobno, "biblioteki"
 !!! sa wspoldzielone przez `get <work:...>`; czlonek MOZE miec oba
 !!! ksztalty naraz (wlasny `cmd/main.hcs` I `lib/mod.hcs`), jesli ma
 !!! byc jednoczesnie samodzielnym narzedziem i biblioteka dla innych.
 !!! NAPRAWA (ta runda) - patrz docs/ROADMAP.md, "include <work:...>
-!!! zwraca puste moduly przy `virus build --wasm`". Przed ta naprawa
+!!! zwraca puste moduly przy `bit build --wasm`". Przed ta naprawa
 !!! sprawdzane bylo WYLACZNIE `<d>/<member>/lib` - poprawne dla
 !!! czlonkow-bibliotek (`libs/core`, `libs/std`), ale FALSZYWE dla
 !!! czlonkow-binarek trzymajacych zrodlo w `cmd/` zamiast `lib/`
-!!! (`hackerc`, `virus`, `playground`, `hack3rc` - patrz
-!!! `find_cmd_entry` w manifest.hcs, konwencja `cmd/main.hcs` od 0.4).
+!!! (`hackerc`, `bit`, `playground`, `hack3rc` - patrz
+!!! konwencja `cmd/main.hcs` od 0.4).
 !!! Dla `include <work:hackerc::ast_nodes>` (patrz
 !!! `playground/cmd/main.hcs`) `find_workspace_root` zawsze zwracalo
 !!! `none()`, bo `<root>/hackerc/lib` nigdy nie istnieje - `hackerc` ma
@@ -383,7 +407,7 @@ fun find_workspace_root(start: Str, member_name: Str) -> Option<Str> [
 !!! w `libs/std/lib/mod.hcs`.
 !!!
 !!! NAPRAWA (ta runda, parytet z `find_workspace_root` wyzej): dla
-!!! czlonkow-binarek (`hackerc`/`virus`/`playground`/`hack3rc`), ktore
+!!! czlonkow-binarek (`hackerc`/`bit`/`playground`/`hack3rc`), ktore
 !!! NIE MAJA `<member>/lib/`, sciezka `lib/...` po prostu nie istnieje
 !!! - wiec probujemy najpierw wariant `lib/` (priorytet, jak dotad, dla
 !!! czlonkow-bibliotek), a gdy plik tam nie istnieje, spadamy na
@@ -412,16 +436,16 @@ fun work_module_file_path(workspace_root: Str, member: Str, version: Option<Str>
 
 !!! Szuka archiwum `.hlib` dla `get <hlib:name[::version]>`, w tej
 !!! kolejnosci:
-!!!   1. `<vira_root>/<name>/<name>.hlib` i `<vira_root>/<name>/dist/<name>.hlib`
-!!!      - paczka Vira MOZE dostarczac prekompilowany `.hlib` obok (albo
-!!!        zamiast) surowego `.hcs` - to jest "liby vira jako hlib"
+!!!   1. `<bit_root>/<name>/<name>.hlib` i `<bit_root>/<name>/dist/<name>.hlib`
+!!!      - biblioteka bit MOZE dostarczac prekompilowany `.hlib` obok (albo
+!!!        zamiast) surowego `.hcs` - to jest "liby bit jako hlib"
 !!!   2. `<base_dir_lub_przodek>/hlibs/<name>.hlib` - wlasne `.hlib`
 !!!      projektu, szukane w gore drzewa katalogow (jak `bytes ->` w H#)
 !!!   3. `<libs_root>/hlib/<name>.hlib` - globalny slot obok `std`/`core`
 !!!   4. `/usr/lib/HackerOS/HackerScript/hlibs/<name>.hlib` - systemowy
 !!! Kazdy krok probuje najpierw `<name>-<version>.hlib` (jesli podano
 !!! wersje), potem `<name>.hlib`.
-fun find_hlib_file_path(name: Str, version: Option<Str>, base_dir: Str, vira_root: Option<Str>, libs_root: Option<Str>) -> Option<Str> [
+fun find_hlib_file_path(name: Str, version: Option<Str>, base_dir: Str, bit_root: Option<Str>, libs_root: Option<Str>) -> Option<Str> [
     let filenames: List<Str> = []
     match version.clone() [
         Some(v) -> [ filenames.push(name + "-" + v + ".hlib") ]
@@ -430,10 +454,10 @@ fun find_hlib_file_path(name: Str, version: Option<Str>, base_dir: Str, vira_roo
     filenames.push(name + ".hlib")
 
     let dirs: List<Str> = []
-    match vira_root.clone() [
+    match bit_root.clone() [
         Some(vr) -> [
-            dirs.push(vr + "/" + name)
-            dirs.push(vr + "/" + name + "/dist")
+            dirs.push(bit_lib_dir(vr.clone(), name.clone()))
+            dirs.push(bit_lib_dir(vr, name.clone()) + "/dist")
         ]
         None -> [ ]
     ]
@@ -507,9 +531,9 @@ fun path_join_safe(base: Str, rest: Str) -> Str [
 !!! Indeks pierwszego wystapienia `needle` w `s`, albo `-1` - reczny
 !!! skan znak po znaku (jezyk nie ma jeszcze wbudowanego
 !!! `str.find()`/`str_index_of` dostepnego bez `get <std:string>`,
-!!! ktorego ten plik (`hackerc`, nie `virus`) celowo nie importuje -
+!!! ktorego ten plik (`hackerc`, nie `bit`) celowo nie importuje -
 !!! patrz uwaga przy `find_libs_root` o "sondowaniu katalogu bez
-!!! zaleznosci od virus"). Uzywana WYLACZNIE przez
+!!! zaleznosci od bit"). Uzywana WYLACZNIE przez
 !!! `resolve_include_path` do rozbicia `"czlonek::plik"` na dwie
 !!! czesci dla `include <work:...>` (NOWOSC 0.4).
 fun find_substr(s: Str, needle: Str) -> Int [
@@ -664,7 +688,7 @@ struct DiscoveredFile [
     !! deklaruje `using <wersja>` INNA niz wersja biezacego `hackerc`
     !! (patrz `Discovery::own_version` nizej) i dostepny jest binarny
     !! `hackerc` tej innej wersji (patrz `Discovery::version_binaries`,
-    !! wypelniane przez `virus build` z `--version-map`), plik NIE
+    !! wypelniane przez `bit build` z `--version-map`), plik NIE
     !! jest parsowany WLASNYM parserem (moglby uzywac skladni, ktorej
     !! biezacy `hackerc` w ogole nie zna) - zamiast tego delegowany do
     !! `<inny-hackerc> emit-module` (patrz `cmd_emit_module` w
@@ -698,8 +722,8 @@ struct ProjectResult [
     needs_native_cpp: Bool,
     extern_links_path: Option<Str>,
     !! NOWOSC 0.4 - parytet z `needs_hot_reload` powyzej, ale dla
-    !! `@wasm_export`/`wasm-bindgen`. `virus/cmd/build.hcs` czyta to
-    !! przy `virus build --wasm`, zeby ostrzec, gdy w calym projekcie
+    !! `@wasm_export`/`wasm-bindgen`. `bit` czyta to
+    !! przy `bit build --wasm`, zeby ostrzec, gdy w calym projekcie
     !! nie ma ani jednej `@wasm_export` funkcji (crate zbudowalby sie,
     !! ale eksportowalby zero funkcji do JS - prawie na pewno pomylka
     !! uzytkownika, nie celowy wybor).
@@ -721,8 +745,8 @@ struct Discovery [
     !! (patrz `parse_and_add` nizej).
     own_version: Str,
     !! Mapa "wersja" -> "sciezka do binarki hackerc tej wersji",
-    !! zbudowana przez `virus build` (skan calego projektu + pobranie
-    !! brakujacych binarek, patrz `virus/cmd/multiversion.hcs`) i
+    !! zbudowana przez `bit build` (skan calego projektu + pobranie
+    !! brakujacych binarek, patrz `bit`) i
     !! przekazana przez `hackerc build --version-map`. Pusty `dict()`
     !! (domyslnie) = brak delegacji, kazdy plik MUSI byc w wersji
     !! `own_version` (stare zachowanie, bez zmian).
@@ -745,7 +769,7 @@ impl Discovery [
     !!! skladni, ktorej TEN (`using <0.4>`) `hackerc` nie zna). Gdy
     !!! wersja inna, ale BRAK wpisu w mapie - normalny `parse()`
     !!! (najlepszy wysilek), plus ostrzezenie - lepsze niz cichy blad
-    !!! przy braku spojnosci `virus`/`hackerc`.
+    !!! przy braku spojnosci `bit`/`hackerc`.
     fun parse_and_add(self, path: Str, flat_name: Str, source_tag: Str, work_member: Option<Str>) -> Bool [
         match read_file(path.clone()) [
             Ok(source) -> [
@@ -769,7 +793,7 @@ impl Discovery [
                                     should_delegate = true
                                 ]
                                 None -> [
-                                    self.warnings.push(path + ": deklaruje \"using <" + dv + ">\", ale hackerc " + self.own_version.clone() + " nie dostal binarki dla wersji " + dv + " (--version-map) - parsuje WLASNYM (byc moze niekompatybilnym) parserem, jak najlepszy wysilek. Uruchom przez `virus build`, ktory dostarcza wszystkie wymagane wersje automatycznie.")
+                                    self.warnings.push(path + ": deklaruje \"using <" + dv + ">\", ale hackerc " + self.own_version.clone() + " nie dostal binarki dla wersji " + dv + " (--version-map) - parsuje WLASNYM (byc moze niekompatybilnym) parserem, jak najlepszy wysilek. Uruchom przez `bit build`, ktory dostarcza wszystkie wymagane wersje automatycznie.")
                                 ]
                             ]
                         ]
@@ -826,16 +850,16 @@ impl Discovery [
     ]
 
     !!! Faza 1 (discovery): parsuje `entry` + rekurencyjnie kazdy
-    !!! zaimportowany modul `std`/`core`/`selfhost`/`vira`/`work` - BFS
+    !!! zaimportowany modul `std`/`core`/`selfhost`/`bit`/`work` - BFS
     !!! po `GetImportStmt`. Parytet z `_resolve_project_files`.
-    !!! `vira_root` DODANE w tej rundzie (patrz `find_bit_cache_root`).
+    !!! `bit_root` DODANE w tej rundzie (patrz `find_bit_cache_root`).
     !!! `work` (NOWOSC 0.4, patrz `find_workspace_root`) NIE dostaje
     !!! wlasnego parametru "root" tutaj - w przeciwienstwie do
-    !!! `vira_root`/`libs_root`/`bootstrap_root` (policzonych RAZ dla
+    !!! `bit_root`/`libs_root`/`bootstrap_root` (policzonych RAZ dla
     !!! calego `entry`), korzen workspace zalezy od NAZWY CZLONKA (innej
     !!! dla kazdego `get <work:...>`), wiec jest liczony na biezaco w
     !!! petli nizej.
-    fun resolve(self, entry: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, vira_root: Option<Str>) [
+    fun resolve(self, entry: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, bit_root: Option<Str>) [
         let added = self.parse_and_add(entry.clone(), "main", "main", none())
         if not added [
             end
@@ -868,17 +892,17 @@ impl Discovery [
                                 ]
                             ]
                         ] elif isource == "bit" [
-                            match vira_root.clone() [
+                            match bit_root.clone() [
                                 Some(vr) -> [
                                     mod_file = bit_module_file_path(vr, iname.clone(), iversion.clone())
                                     have_root = true
                                 ]
                                 None -> [
-                                    self.warnings.push("get <bit:" + iname.clone() + "> - nie znaleziono katalogu cache/libs/bit/ - uruchom `bit install " + iname.clone() + "` albo `virus install bit " + iname.clone() + "` (modul " + flat.clone() + " nie zostanie zbudowany)")
+                                    self.warnings.push("get <bit:" + iname.clone() + "> - nie znaleziono katalogu bibliotek bit (BIT_LIBS, cache/libs/, ~/.hackeros/libs/) - uruchom `bit install " + iname.clone() + "` (modul " + flat.clone() + " nie zostanie zbudowany)")
                                 ]
                             ]
                         ] elif isource == "work" [
-                            !!! NOWOSC 0.4 - w odroznieniu od `vira_root`/
+                            !!! NOWOSC 0.4 - w odroznieniu od `bit_root`/
                             !!! `libs_root` (policzone RAZ, dla calego
                             !!! `entry`, przed petla), korzen workspace
                             !!! zalezy tu od `iname` (nazwy CZLONKA) -
@@ -897,7 +921,7 @@ impl Discovery [
                                 ]
                             ]
                         ] elif isource == "hlib" [
-                            let hlib_path = find_hlib_file_path(iname.clone(), iversion.clone(), base_dir.clone(), vira_root.clone(), libs_root.clone())
+                            let hlib_path = find_hlib_file_path(iname.clone(), iversion.clone(), base_dir.clone(), bit_root.clone(), libs_root.clone())
                             match hlib_path [
                                 Some(hp) -> [
                                     let extract_dir = path_join_safe(path_parent(hp.clone()), ".hlib-extracted/" + iname.clone())
@@ -931,7 +955,7 @@ impl Discovery [
                                 !! `get <work:iname::...>` czyni WSZYSTKIE dalsze GOLE
                                 !! `include <cos>` WEWNATRZ tego pliku czescia TEJ SAMEJ
                                 !! przestrzeni nazw "work:iname" (inne zrodla - std/core/
-                                !! selfhost/vira/hlib - nie maja tego problemu, ich flat-nazwy
+                                !! selfhost/bit/hlib - nie maja tego problemu, ich flat-nazwy
                                 !! sa juz globalnie kanoniczne niezaleznie od tego kto je
                                 !! zaimportowal, wiec `none()`).
                                 let next_wm = none()
@@ -1007,7 +1031,7 @@ impl Discovery [
 ]
 
 !!! Dopisuje do `queue` kazdy `GetImportStmt` (dla `std`/`core`/
-!!! `selfhost`/`virus`/`vira`/`work`/`hlib`) i kazdy `IncludeStmt` na
+!!! `selfhost`/`bit`/`work`/`hlib`) i kazdy `IncludeStmt` na
 !!! najwyzszym poziomie `prog` - parytet z `module_stmts()`
 !!! (project.py). `work` DODANE w 0.4 (patrz `find_workspace_root`
 !!! powyzej) - `get <work:member[::plik]>`, ogolny odpowiednik Rustowego
@@ -1016,15 +1040,12 @@ impl Discovery [
 !!! krotsze aliasy `get <core:...>`/`get <std:...>`).
 !!! `base_dir` (katalog pliku `prog` pochodzi z) jest doczepiany do
 !!! kazdego elementu - potrzebny pozniej WYLACZNIE dla `IncludeStmt`.
-!!! `vira` DODANE w tej rundzie - TYLKO dla bibliotek Vira typu "git"
-!!! (patrz `find_bit_cache_root`) - `static-lib`/`shared-lib`/
-!!! `rust-lib` (ani `get <c:...>`/`get <cpp:...>`, DODANE w 0.3) nie sa
-!!! .hcs zrodlem, wiec nigdy nie trafiaja tutaj (nie ma dla nich
-!!! zadnego pliku do sparsowania - sa uzywane przez
-!!! `get <extern:nazwa> use <tryb>` + `region [ ... ]` po
-!!! podlinkowaniu, patrz komentarz przy `find_bit_cache_root`
-!!! powyzej). `hlib` DODANE w 0.4 (patrz `hlib.hcs` i
-!!! `find_hlib_file_path` powyzej) - w odroznieniu od `vira`/`c`/`cpp`
+!!! `bit` - biblioteki HackerScript instalowane przez menedzer pakietow
+!!! bit (patrz `find_bit_cache_root`); biblioteki natywne (`get <c:...>`/
+!!! `get <cpp:...>`) nie sa .hcs zrodlem, wiec nigdy nie trafiaja tutaj
+!!! - sa uzywane przez `get <extern:nazwa> use <tryb>` + `region [ ... ]`
+!!! po podlinkowaniu przez `bit build`. `hlib` DODANE w 0.4 (patrz `hlib.hcs` i
+!!! `find_hlib_file_path` powyzej) - w odroznieniu od `c`/`cpp`
 !!! ZAWSZE konczy sie plikiem `.hcs` do sparsowania (badz to prawdziwym
 !!! zrodlem z artefaktu `ast`, badz to WYGENEROWANYM przez
 !!! `hlib_extract_for_import` stubem `get <extern:...>`+`region`) -
@@ -1057,7 +1078,7 @@ fun collect_module_imports(prog: Program, base_dir: Str, queue: List<QueueItem>,
         let s = prog.body[i].clone()
         match s.clone() [
             GetImportStmt(source, name, version, details) -> [
-                if source == "std" or source == "core" or source == "selfhost" or source == "virus" or source == "bit" or source == "hlib" or source == "work" [
+                if source == "std" or source == "core" or source == "selfhost" or source == "bit" or source == "hlib" or source == "work" [
                     queue.push(QueueItem(s, base_dir.clone(), work_member.clone()))
                 ]
             ]
@@ -1083,7 +1104,7 @@ struct ProjectSignatures [
 !!! Faza 1 z `build_project` (discovery + globalny rejestr sygnatur),
 !!! wydzielona do samodzielnego uzycia - parytet z
 !!! `collect_project_signatures`. `libs_root`/`bootstrap_root`/
-!!! `vira_root` `none()` -> auto-wykrywanie przez
+!!! `bit_root` `none()` -> auto-wykrywanie przez
 !!! `find_libs_root`/`find_bootstrap_root`/`find_bit_cache_root`
 !!! zaczynajac od `entry`.
 !!!
@@ -1091,7 +1112,7 @@ struct ProjectSignatures [
 !!! `version_binaries` (domyslnie `"0.4"`/`dict()` u obu wywolujacych w
 !!! main.hcs - PEŁNA zgodnosc wsteczna gdy nikt nie uzywa `using
 !!! <inna-wersja>`) przekazywane DALEJ do `Discovery`, patrz tam.
-fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, vira_root: Option<Str>, own_version: Str, version_binaries: Dict<Str, Str>) -> ProjectSignatures [
+fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, bit_root: Option<Str>, own_version: Str, version_binaries: Dict<Str, Str>) -> ProjectSignatures [
     let lr = libs_root
     match lr.clone() [
         Some(_v) -> [
@@ -1108,7 +1129,7 @@ fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_roo
             br = find_bootstrap_root(entry.clone())
         ]
     ]
-    let vr = vira_root
+    let vr = bit_root
     match vr.clone() [
         Some(_v) -> [
         ]
@@ -1266,8 +1287,8 @@ fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, ne
         deps_lines = deps_lines + "libloading = \"0.8\"\n"
     ]
     !! NOWOSC 0.4 - `wasm-bindgen` dla `@wasm_export` (patrz
-    !! `CARGO_TOML_WASM_MID` powyzej i `virus/cmd/build.hcs`, gdzie
-    !! `virus build --wasm` faktycznie kompiluje ten crate na
+    !! `CARGO_TOML_WASM_MID` powyzej i `bit`, gdzie
+    !! `bit build --wasm` faktycznie kompiluje ten crate na
     !! `wasm32-unknown-unknown`).
     if needs_wasm_bindgen [
         deps_lines = deps_lines + "wasm-bindgen = \"0.2\"\n"
@@ -1314,16 +1335,15 @@ fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, ne
         !!! (feature "tls") uzywa `webpki-roots`, czyli migawki
         !!! zaufanych CA WBUDOWANEJ w binarke W CHWILI KOMPILACJI - na
         !!! systemie z inna (np. starsza, przypieta pod stary `rustc`
-        !!! przy budowaniu samego hackerc/virus) wersja `rustls`/
+        !!! przy budowaniu samego hackerc/bit) wersja `rustls`/
         !!! `webpki-roots` niz ta, ktorej Cargo akurat uzyje, zdarza sie
         !!! `invalid peer certificate: UnknownIssuer` mimo poprawnego,
         !!! aktualnego systemowego magazynu CA (zweryfikowane w praktyce
-        !!! przy `virus install bytes/bit` na GitHub - patrz PR o
-        !!! "bytes"/"bit"). Feature "native-certs" przelacza na
+        !!! przy `bit install` na GitHub). Feature "native-certs" przelacza na
         !!! `rustls-native-certs` (systemowy magazyn CA, zawsze
         !!! aktualny wzgledem dystrybucji) - bezpieczniejszy domyslny
         !!! wybor dla WSZYSTKICH uzytkownikow `get <std:http>`
-        !!! (pypi/crates/npm/jsr/vira/bytes/bit), nie tylko obejscie na
+        !!! (pypi/crates/npm/jsr/bit), nie tylko obejscie na
         !!! potrzeby jednego srodowiska.
         if deps_names[i] == "ureq" [
             deps_lines = deps_lines + deps_names[i] + " = { version = \"" + deps_versions[i] + "\", features = [\"native-certs\"] }\n"
@@ -1340,8 +1360,8 @@ fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, ne
     !!! wymaga kompilatora C++ dostepnego przez `cc::Build` w
     !!! `build.rs` - `cc` idzie do `[build-dependencies]` (NIE
     !!! `[dependencies]`, bo dziala TYLKO w trakcie budowy, nie w
-    !!! wygenerowanym binarnym), pisany przez `virus build` po tym
-    !!! pliku (patrz `virus/cmd/build.hcs::build_wire_extern_dependencies`).
+    !!! wygenerowanym binarnym), pisany przez `bit build` po tym
+    !!! pliku (patrz `bit`).
     let build_deps_section = ""
     if needs_native_cpp [
         build_deps_section = "\n[build-dependencies]\ncc = \"1\"\n"
@@ -1350,7 +1370,7 @@ fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, ne
     !! `lto = "fat"` + `codegen-units = 1` (pelna optymalizacja miedzymodulowa,
     !! odpowiednik `-OReleaseFast` Zig), `strip = true` (male binarki),
     !! `opt-level = 3`. `panic` zostaje domyslne (unwind) - `catch_unwind`/
-    !! hot-reload/pyo3 tego wymagaja. Cross-kompilacja: patrz virus/cmd/crossbuild.hcs.
+    !! hot-reload/pyo3 tego wymagaja. Cross-kompilacja: patrz bit.
     build_deps_section = build_deps_section + "\n[profile.release]\nopt-level = 3\nlto = \"fat\"\ncodegen-units = 1\nstrip = true\n"
     !! NOWOSC 0.4 - `[lib]` (cdylib+rlib, `src/lib.rs`) zamiast `[[bin]]`
     !! (`src/main.rs`) gdy ten crate ma co najmniej jedna funkcje
@@ -1493,7 +1513,7 @@ fun trim_str(s: Str) -> Str [
 
 !!! Transpiluje `entry` + rekurencyjnie kazdy modul `std`/`core`/
 !!! `selfhost`, ktory importuje, do PELNEGO crate'a Rust w `out_dir`
-!!! (Cargo.toml + src/). NIE kompiluje (to robi `virus`/`cargo build`).
+!!! (Cargo.toml + src/). NIE kompiluje (to robi `bit`/`cargo build`).
 !!!
 !!! Tworzy `out_dir + "/src"` SAMO (przez `create_dir`, patrz
 !!! `get <std:fs>` - dodane w tej sesji), parytet z `out_dir.mkdir(
@@ -1504,10 +1524,10 @@ fun trim_str(s: Str) -> Str [
 !!! ROZBUDOWA (ta runda) - `bin_name`: `none()` = zachowanie
 !!! dotychczasowe (`src/main.rs`/`src/lib.rs` + PELNY, nadpisujacy
 !!! zapis `Cargo.toml`). `some(nazwa)` = multi-binarki (odpowiednik
-!!! Cargo `src/bin/*.rs`, patrz `docs/VIRUS.md`, "Plan: multi-binarki
+!!! Cargo `src/bin/*.rs`, patrz `docs/BIT.md`, "Plan: multi-binarki
 !!! na czlonka") - PISZE do `src/bin/<nazwa>.rs` i DOPISUJE (nie
 !!! nadpisuje) sekcje `[[bin]]` do JUZ ISTNIEJACEGO `Cargo.toml` -
-!!! wywolujacy (`virus build`/`cmd_build` w main.hcs) MUSI wiec
+!!! wywolujacy (`bit build`/`cmd_build` w main.hcs) MUSI wiec
 !!! najpierw zbudowac glowny entry (`cmd/main.hcs`, `bin_name =
 !!! none()`), ktory tworzy `Cargo.toml` od zera, zanim zbuduje
 !!! ktorykolwiek dodatkowy `cmd/bin/*.hcs` z `bin_name = some(...)`.
@@ -1515,9 +1535,9 @@ fun trim_str(s: Str) -> Str [
 !!! OPCJONALNE-w-praktyce parametry na koncu: `own_version` (domyslnie
 !!! `"0.4"`, patrz `VERSION` w main.hcs) i `version_binaries` (domyslnie
 !!! `dict()` - brak delegacji, stare zachowanie bez zmian). Wypelniane
-!!! przez `virus build` (patrz `virus/cmd/multiversion.hcs`) przez
+!!! przez `bit build` (patrz `bit`) przez
 !!! `hackerc build --version-map wersja1=sciezka1;wersja2=sciezka2`.
-fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, vira_root: Option<Str>, crate_name: Str, force_library: Bool, bin_name: Option<Str>, own_version: Str, version_binaries: Dict<Str, Str>) -> ProjectResult [
+fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, bit_root: Option<Str>, crate_name: Str, force_library: Bool, bin_name: Option<Str>, own_version: Str, version_binaries: Dict<Str, Str>) -> ProjectResult [
     let src_dir = out_dir + "/src"
     let main_rs_path = src_dir + "/main.rs"
     let warnings: List<Str> = []
@@ -1546,7 +1566,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
             br = find_bootstrap_root(entry.clone())
         ]
     ]
-    let vr = vira_root
+    let vr = bit_root
     match vr.clone() [
         Some(_v) -> [
         ]
@@ -1692,7 +1712,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
         ]
         !! ROZBUDOWA (ta runda, patrz docs/JAVA.md) - parytet z
         !! `native_cpp_sources` wyzej, ale kind "java_class" zamiast
-        !! "native_cpp" (virus/cmd/build.hcs je rozroznia - `javac`
+        !! "native_cpp" (bit je rozroznia - `javac`
         !! zamiast `cc::Build`).
         if r.needs_native_java [
             needs_native_java = true
@@ -1714,7 +1734,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
         ]
         !! DODANE (ta runda, patrz docs/KOTLIN.md) - parytet z blokiem
         !! `native_java_*` powyzej, kind "kotlin_class" zamiast
-        !! "java_class" (virus/cmd/build.hcs je rozroznia - `kotlinc`
+        !! "java_class" (bit je rozroznia - `kotlinc`
         !! zamiast `javac`, patrz tam).
         if r.needs_native_kotlin [
             needs_native_kotlin = true
@@ -1928,7 +1948,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     !! dostaje ten sam `needs_wasm_bindgen` i pisze `[lib] -> path =
     !! "src/lib.rs"` zamiast `[[bin]] -> path = "src/main.rs"`).
     !! ROZBUDOWA (ta runda) - `force_library` (`--library`, patrz
-    !! `TargetLibrary` w `virus/cmd/build.hcs`) przelacza docelowa
+    !! `TargetLibrary` w `bit`) przelacza docelowa
     !! sciezke na `src/lib.rs` dokladnie tak samo, jak juz robi to
     !! `needs_wasm_bindgen` - `entry_rust` (kod funkcji uzytkownika) jest
     !! IDENTYCZNY w obu przypadkach, rozni sie tylko plik docelowy i
@@ -2006,7 +2026,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     !! `CodeGen::native_cpp_sources`) jako `out_dir/native/<fn_name>.cpp`,
     !! zawijajac surowy kod jako cialo `extern "C" void <fn_name>()`
     !! (dokladnie to, czego oczekuje deklaracja FFI wyemitowana przez
-    !! `gen_native()` w `main.rs`/module) - `virus build` kompiluje ten
+    !! `gen_native()` w `main.rs`/module) - `bit build` kompiluje ten
     !! plik przez `cc::Build` na podstawie linii "native_cpp" w
     !! `.hks-extern-links.txt` nizej.
     let nci = 0
@@ -2064,7 +2084,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
 
     !! ROZBUDOWA (ta runda, patrz docs/JAVA.md) - materializuje kazdy
     !! `native {java}(...)` (`CodeGen::native_java_sources`) jako
-    !! `out_dir/java/<ClassName>.java` - `virus build` kompiluje ten
+    !! `out_dir/java/<ClassName>.java` - `bit build` kompiluje ten
     !! plik przez `javac` na podstawie linii "java_class" w
     !! `.hks-extern-links.txt` nizej. W odroznieniu od C++, zrodlo Javy
     !! (`java_src`, zbudowane juz w calosci przez
@@ -2104,7 +2124,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
 
     !! DODANE (ta runda, patrz docs/KOTLIN.md) - parytet z blokiem
     !! `native_java_*` powyzej: materializuje kazdy `native
-    !! {kotlin}(...)` jako `out_dir/kotlin/<Nazwa>.kt` - `virus build`
+    !! {kotlin}(...)` jako `out_dir/kotlin/<Nazwa>.kt` - `bit build`
     !! kompiluje go `kotlinc`iem na podstawie linii "kotlin_class" w
     !! `.hks-extern-links.txt`.
     let nki = 0
@@ -2140,7 +2160,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
 
     !! DODANE (Tura 10, patrz docs/GO.md) - `native {go}`: JEDEN plik
     !! `out_dir/go/hks_go.go` (+ `go.mod`) ze WSZYSTKIMI blokami
-    !! projektu jako funkcjami `//export hks_native_go_N`. `virus
+    !! projektu jako funkcjami `//export hks_native_go_N`. `bit
     !! build` kompiluje go `go build -buildmode=c-archive` (patrz linie
     !! "go_archive"/"go_dep" w `.hks-extern-links.txt`).
     if needs_native_go [
@@ -2201,10 +2221,10 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     !!! ZMIANA 0.3 - sidecar `.hks-extern-links.txt` (jedna linia
     !!! "kind\tname\ttryb" na `get <extern:...> use <...>`/
     !!! `get <c:...>`/`get <cpp:...>` znaleziony w calym module) -
-    !!! jedyny kanal miedzy `hackerc` (ten plik) a `virus build`
+    !!! jedyny kanal miedzy `hackerc` (ten plik) a `bit build`
     !!! (osobna binarka - patrz `TranspileResult::extern_link_specs`
     !!! wyzej). Pomijany calkowicie (brak pliku), jesli zaden taki
-    !!! `get <...>` nie wystapil - `virus build` traktuje brak pliku
+    !!! `get <...>` nie wystapil - `bit build` traktuje brak pliku
     !!! jako "nic do polaczenia", parytet z reszta best-effort/
     !!! brak-pliku-znaczy-brak-pracy tego bootstrapu.
     let extern_links_path: Option<Str> = none()
@@ -2222,7 +2242,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
 
     !!! ROZBUDOWA - sidecar `.hks-use.txt` (linie "klucz\twartosc") z dyrektyw
     !!! `use <lang:..>`/`use <crosscompile>`/`use <arc:..>` - czytany przez
-    !!! `virus build` (patrz virus/cmd/crossbuild.hcs). Brak pliku = brak dyrektyw.
+    !!! `bit build` (patrz bit). Brak pliku = brak dyrektyw.
     if use_lines.len() > 0 [
         let use_path = out_dir + "/.hks-use.txt"
         match write_file(use_path.clone(), str_join(use_lines.clone(), "\n") + "\n") [
