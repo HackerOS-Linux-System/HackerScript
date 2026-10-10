@@ -4,8 +4,9 @@ include <typecheck>
 include <diagnostics>
 include <transpiler>
 include <lsp_features>
+include <formatter>
 get <std:json> import <JsonValue::JsonEntry::json_parse::json_escape_string>
-get <std:string> import <str_starts_with::str_trim::str_join::str_to_int>
+get <std:string> import <str_starts_with::str_trim::str_join::str_to_int::str_split>
 
 !!! ============================================================
 !!! `hackerc lsp` - Etap 2a (patrz docs/LSP.md): Language Server
@@ -31,7 +32,7 @@ get <std:string> import <str_starts_with::str_trim::str_join::str_to_int>
 !!!     `collect_project_signatures`) - importy z `get <...>` z innych
 !!!     plikow moga dawac spurious W0002 (parytet z tym samym
 !!!     ograniczeniem juz udokumentowanym przy W0002 w
-!!!     `virus/cmd/repair.hcs`).
+!!!     `bit`).
 !!! ============================================================
 
 !!! Duplikuje `parse_with_direct` z `main.hcs` (zamiast `include
@@ -278,7 +279,7 @@ fun lsp_send_result(id_json: Str, result_json: Str) [
 !!! `publishDiagnostics`, nie pull-owego `textDocument/diagnostic` z
 !!! LSP 3.17 - prostszy model, wystarczajacy dla Etapu 2a).
 fun lsp_capabilities_json() -> Str [
-    end "{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true,\"definitionProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\"]}},\"serverInfo\":{\"name\":\"hackerc-lsp\",\"version\":\"0.4\"}}"
+    end "{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true,\"documentFormattingProvider\":true,\"definitionProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\"]}},\"serverInfo\":{\"name\":\"hackerc-lsp\",\"version\":\"0.4\"}}"
 ]
 
 !!! Tura 10 - pomocnicy do zadan pozycyjnych (hover/definition/
@@ -513,6 +514,26 @@ fun lsp_run() [
                                             ]
                                         ]
                                         None -> [
+                                        ]
+                                    ]
+                                ] elif method == "textDocument/formatting" [
+                                    !! ROZBUDOWA - formatowanie calego dokumentu (parytet z `hackerc fmt`):
+                                    !! jeden TextEdit zastepujacy caly tekst. Dokument z bledami
+                                    !! skladni NIE jest formatowany (odpowiedz `null`).
+                                    let fmt_uri = lsp_params_uri(params.clone())
+                                    match docs.fetch(fmt_uri.clone()) [
+                                        Some(fsrc) -> [
+                                            let fparse = lsp_parse_with_direct_checked(fsrc.clone(), "dokument")
+                                            if fparse.errors.len() > 0 [
+                                                lsp_send_result(id_json, "null")
+                                            ] else [
+                                                let formatted = format_source(fsrc.clone(), "dokument")
+                                                let nl = str_split(fsrc.clone(), "\n").len()
+                                                lsp_send_result(id_json, "[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":" + (nl as Str) + ",\"character\":0}},\"newText\":" + json_escape_string(formatted) + "}]")
+                                            ]
+                                        ]
+                                        None -> [
+                                            lsp_send_result(id_json, "null")
                                         ]
                                     ]
                                 ] elif method == "textDocument/hover" or method == "textDocument/definition" or method == "textDocument/completion" [
