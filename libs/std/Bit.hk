@@ -1,5 +1,20 @@
 [package]
 -> name        => std
 -> version     => 0.4
+-> description => Biblioteka standardowa HackerScript, 100% .hcs. Importowana przez get std lub get work.
+-> authors     => ["HackerOS Team"]
+-> license     => MIT
+-> lang        => HackerScript
 -> using       => 0.4
--> description => std: biblioteka standardowa HackerScript (100% .hcs). Biblioteka - brak cmd/, importowalna przez `get <std:...>` (alias dedykowany) i `get <work:std::...>` (ogolny, 0.4).
+
+[layout]
+-> lib => lib
+
+[lib]
+-> output => hlib
+
+[build]
+-> link => static
+
+[default-build]
+-> profile => release
