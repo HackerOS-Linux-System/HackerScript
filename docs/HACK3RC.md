@@ -103,10 +103,13 @@ Obsługiwane:
   wyczerpywania — brak wariantu to błąd)
 - listy: literał, `xs[i]` (odczyt/zapis, także `xs[i].pole += x`,
   `g[i][j] = ...`), `.len()`, `.push(x)`, `.pop()` → `Option<T>`, `.clear()`,
-  `.clone()`, `for x in lista`
+  `.reverse()`, `.sort()` (tylko `List<Int>`), `.contains(x)` (`List<Int/Bool/Str>`),
+  `.insert(i, x)`, `.remove(i)` → element, `.clone()`, `for x in lista`
 - `Option`: `some(x)`, `none()` (typ z kontekstu: `let o: Option<Int> = none()`,
   `end none()`), `.is_some()`, `.is_none()`
-- `Str`: literały, `+`, `==`, `!=`, `.len()` (bajty), `x as Str` (Int/Float/Bool)
+- `Str`: literały, `+`, `==`, `!=`, `.len()` (bajty), `.is_empty()`, `.contains(s)`,
+  `.starts_with(s)`, `.ends_with(s)`, `.find(s)` (indeks bajtu albo -1), `.to_upper()`,
+  `.to_lower()`, `.trim()`, `.repeat(n)`, `x as Str` (Int/Float/Bool)
 - `.clone()` — **głębokie kopiowanie** struktur, enumów, list, Option
 - `let`, przypisania `=`, `+=`, `-=`, `*=`, `/=` (też na polach i elementach),
   `if/elif/else`, `while`, `break`, `continue`, `end`
@@ -117,8 +120,7 @@ Obsługiwane:
   `read_int()`, `exit(Int)`
 
 Nieobsługiwane (czytelny błąd `H0xxx`, nie crash): `Dict`, `Result` i `?`,
-`for` po czymkolwiek poza listą, metody `Str` poza `len`/`clone`,
-`insert`/`remove`/`contains`/`sort` na listach, funkcje asocjacyjne,
+`for` po czymkolwiek poza listą, funkcje asocjacyjne,
 interpolacja, `get`/`include`, `native`/`direct`, async/kanały, domyślne
 wartości parametrów.
 
@@ -129,8 +131,8 @@ wartości parametrów.
 - arytmetyka `Int` zawija się; dzielenie/reszta przez zero i indeks poza
   zakresem listy → komunikat na stderr i **kod wyjścia 101**
 - `lista[i].pole += x` i `lista[i][j] += x` **modyfikują element w miejscu**.
-  Znany błąd `hackerc`: generuje tu `.clone()` i po cichu gubi zapis (test
-  `inplace` nie ma więc odpowiednika referencyjnego)
+  Znany błąd `hackerc`: generuje tu `.clone()` i po cichu gubił zapis — naprawione w `hackerc` (`gen_lvalue`, test
+  `inplace`)
 - `Float → Int` jest nasycające (NaN → 0); `log` drukuje floaty najkrótszą
   reprezentacją jak Rust; bardzo duże/małe floaty drukują się wykładniczo
   (`1e+21`), Rust drukuje pełne rozwinięcie
@@ -177,7 +179,7 @@ P): oczekiwano Int, jest Float`). Błędy składni pochodzą z parsera `hackerc`
 | H0220–H0222 | `main` |
 | H0300–H0302, H0310–H0312, H0320–H0323 | typy, struct/enum, `impl` |
 | H0412–H0413, H0420–H0424 | `none()`/`some()`, `match` |
-| H0430–H0431, H0440, H0450–H0451, H0460–H0462, H0470–H0474 | listy, warianty, indeksy, pola, metody |
+| H0430–H0431, H0440, H0450–H0451, H0460–H0462, H0470–H0478 | listy, warianty, indeksy, pola, metody |
 
 ## Architektura
 
@@ -213,8 +215,7 @@ Układ obiektów: struct = pola w kolejnych 8-bajtowych slotach; enum/Option =
 ## Testy
 
 ```
-hack3rc/tests/run.hcs   # runner w HackerScript
-/tmp/h3-tests/target/release/h3_tests <hack3rc> hack3rc/tests [cel]
+hack3rc/tests/run.sh [ścieżka-do-hack3rc]   # kompiluje każdy tests/*.hcs, porównuje z *.out (także z HKS_GC_STRESS=1)
 ```
 
 `TESTS`: programy z oczekiwanym wyjściem i kodem wyjścia, warianty `nazwa+gc`
@@ -237,8 +238,8 @@ kompilowany i uruchamiany dla tej architektury (pod QEMU).
 
 - kompilator C (`cc`/cross-gcc/clang/zig cc) jest wymagany do linkowania
   i do kompilacji runtime'u; tylko cele 64-bitowe
-- brak `Dict`, `Result`/`?`, async, metod `Str` poza `len`, funkcji
-  asocjacyjnych; `for` tylko po listach
+- brak `Dict`, `Result`/`?`, async, funkcji asocjacyjnych i interpolacji;
+  `for` tylko po listach; `sort` tylko dla `List<Int>`
 - diagnostyki mają linię i kolumnę znalezione przeszukiwaniem tekstu
   (AST nie niesie pozycji) — przybliżenie
 - dostęp do list idzie przez wywołania runtime (bez wstawiania inline) —
