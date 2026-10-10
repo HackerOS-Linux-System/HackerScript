@@ -1,5 +1,12 @@
 [package]
-name = "showcase"
-version = "0.0"
-using = "0.4"
-description = "Ogromny przyklad pokazujacy jak najwiecej mozliwosci HackerScript w jednym pliku (0.4, wlacznie z FFI: region/extern/native C++, i workspace: get<work:...>)."
+-> name        => showcase
+-> version     => 0.0.1
+-> description => Duzy przyklad pokazujacy mozliwosci HackerScript w jednym pliku, razem z FFI i workspace.
+-> lang        => HackerScript
+-> using       => 0.4
+
+[build]
+-> link => static
+
+[default-build]
+-> profile => release
