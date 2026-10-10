@@ -1,5 +1,17 @@
 [package]
 -> name        => playground
 -> version     => 0.4
+-> description => Checker HackerScript, parser typecheck i diagnostyki, skompilowany do WASM. Budowanie bit build --wasm w tym katalogu.
+-> authors     => ["HackerOS Team"]
+-> license     => MIT
+-> lang        => HackerScript
 -> using       => 0.4
--> description => Checker HackerScript (parser+typecheck+diagnostyki) skompilowany do WASM - patrz cmd/main.hcs i web/. Buduj: `virus build --wasm` w tym katalogu.
+
+[layout]
+-> cmd => cmd
+
+[build]
+-> link => static
+
+[default-build]
+-> profile => release
