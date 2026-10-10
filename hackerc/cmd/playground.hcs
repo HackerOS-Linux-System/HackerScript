@@ -47,11 +47,11 @@ fun check_source(source: Str) -> Str [
 !!! logika zyje juz NAPRAWDE, linkowana statycznie (nie kopiowana) w
 !!! `playground/cmd/main.hcs` (patrz `include <work:hackerc::...>` w
 !!! docs/SYNTAX.md), gdzie `check_source` ma `@wasm_export` i jest
-!!! faktycznie budowana przez `virus build --wasm` (patrz
+!!! faktycznie budowana przez `bit build --wasm` (patrz
 !!! `playground/web/README.md`). Ta funkcja tutaj zostaje jako
 !!! szybki smoke-test SAMEGO `hackerc` (`hackerc build
 !!! hackerc/cmd/playground.hcs && cargo run`), bez potrzeby
-!!! `virus`/workspace/WASM.
+!!! `bit`/workspace/WASM.
 fun main() [
     log(check_source("fun main() [\n    log(\"hello\")\n    end\n]"))
     log("---")
