@@ -1,10 +1,17 @@
 [package]
 -> name        => hackerc
 -> version     => 0.4
+-> description => Samo-hostowany transpilator HackerScript do Rusta. Komendy check, lint, build, fmt, lsp, hlib, emit-module.
+-> authors     => ["HackerOS Team"]
+-> license     => MIT
+-> lang        => HackerScript
 -> using       => 0.4
--> description => Samo-hostowany transpilator HackerScript -> Rust (bootstrap/hackerc-self/, 12 plikow .hcs) - CLI: check/lint/build/fmt/hlib.
 
-[dependencies]
--> std
---> io => "*"
---> fs => "*"
+[layout]
+-> cmd => cmd
+
+[build]
+-> link => static
+
+[default-build]
+-> profile => release
