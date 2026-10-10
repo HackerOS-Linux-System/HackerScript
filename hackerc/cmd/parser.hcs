@@ -344,7 +344,7 @@ impl Parser [
 
         !!! ZMIANA 0.3 - `get <extern:sciezka> use <static|dynamic>`:
         !!! `use <...>` istnieje TYLKO za `get <extern:...>` (inne
-        !!! zrodla - std/core/crates/pypi/npm/jsr/vira/c/cpp - nie maja
+        !!! zrodla - std/core/crates/pypi/npm/jsr/bit/c/cpp - nie maja
         !!! trybu linkowania w tym miejscu skladni), i zapisuje tryb w
         !!! tym samym slocie co `::wersja` (patrz komentarz przy
         !!! `GetImportStmt` w ast_nodes.hcs) - `extern` nigdy nie ma
