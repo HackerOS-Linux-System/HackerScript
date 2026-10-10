@@ -1,7 +1,7 @@
 # Roadmap / znane braki HackerScript
 
 Ten plik jest cytowany z dziesiątek komentarzy `!!!` w całym kodzie
-(`hackerc/cmd/*.hcs`, `virus/cmd/*.hcs`, `libs/*/lib/mod.hcs`,
+(`hackerc/cmd/*.hcs`, `hack3rc/cmd/*.hcs`, `libs/*/lib/mod.hcs`,
 `README.adoc`, `docs/SYNTAX.md`) jako "pełna, szczera lista braków" —
 ale fizycznie nie istniał w repozytorium. To jest jego pierwsza wersja,
 zebrana z tamtych komentarzy plus wiedzy zdobytej przy pracy nad 0.4.
@@ -14,32 +14,32 @@ braku czasu, i gdzie kolejna runda pracy przyniesie najwięcej.
 ## Zrobione w 0.4
 
 * **Wspólny `cache/` dla całego workspace** (naprawiony bug). Każdy
-  członek workspace (`hackerc/`, `virus/`, `libs/core/`, `libs/std/`)
-  ma własny, w pełni poprawny `Virus.hk` — co wcześniej powodowało, że
-  `find_project_root` (virus/cmd/cache.hcs) zatrzymywał się na
-  NAJBLIŻSZYM `Virus.hk` zamiast na korzeniu całego workspace, i
-  `virus <cokolwiek>` odpalone z wnętrza `hackerc/` czy `virus/`
+  członek workspace (`hackerc/`, `hack3rc/`, `libs/core/`, `libs/std/`)
+  ma własny, w pełni poprawny `Bit.hk` — co wcześniej powodowało, że
+  `find_project_root` (bit) zatrzymywał się na
+  NAJBLIŻSZYM `Bit.hk` zamiast na korzeniu całego workspace, i
+  `bit <cokolwiek>` odpalone z wnętrza `hackerc/` czy `bit/`
   tworzyło **własny, osobny** `cache/` zamiast dzielić jeden wspólny z
   korzeniem — dokładnie tak jak `cargo` w workspace zawsze dzieli
   jeden `target/`, niezależnie z którego członka go odpalisz. Naprawa:
   `find_project_root` teraz idzie w górę przez WSZYSTKICH przodków
   (nie tylko bezpośredniego rodzica), sprawdzając, czy jakiś dalszy
-  `Virus.hk` z sekcją `[workspace]` rości sobie prawa (przez
+  `Bit.hk` z sekcją `[workspace]` rości sobie prawa (przez
   `-> members`) do znalezionego katalogu — i bierze najdalszego takiego
-  przodka. Patrz `virus/cmd/cache.hcs::climb_to_workspace_root`.
+  przodka. Patrz `bit`.
 
-* **Usunięcie `[build]` z `Virus.hk`.** Sekcja `[build] -> entry =>
+* **Usunięcie `[build]` z `Bit.hk`.** Sekcja `[build] -> entry =>
   <ścieżka>`, pozwalająca nadpisać plik wejściowy, została CAŁKOWICIE
   usunięta z formatu `.hk`. Powód: to była jedyna sekcja w całym
   manifeście pozwalająca odejść od konwencji `cmd/main.hcs` — a w
-  praktyce (`hackerc/Virus.hk`: `-> entry => cli.hcs`, bez `cmd/`)
+  praktyce (`hackerc/Bit.hk`: `-> entry => cli.hcs`, bez `cmd/`)
   wskazywała na plik, który **nigdy nie istniał** (prawdziwa ścieżka
-  to zawsze była `hackerc/cmd/cli.hcs`), więc `virus build` na
+  to zawsze była `hackerc/cmd/cli.hcs`), więc `bit build` na
   korzeniu workspace po cichu pomijał `hackerc` jako rzekomą
   "bibliotekę bez entry point". Naprawa: plik przemianowany na
   `hackerc/cmd/main.hcs` (jedyna dopuszczalna nazwa od 0.4), pole
   `[build]` usunięte wszędzie — patrz `find_cmd_entry()` w
-  `virus/cmd/manifest.hcs`, dokładny analog tego, jak Cargo samo
+  `bit`, dokładny analog tego, jak Cargo samo
   znajduje `src/main.rs` bez żadnego pola w `Cargo.toml`.
 
 * **`get <work:członek[::plik]>`** — ogólny import dowolnego członka
@@ -71,12 +71,12 @@ braku czasu, i gdzie kolejna runda pracy przyniesie najwięcej.
   bez duplikowania plików. Patrz `docs/SYNTAX.md`, sekcja
   "`include <work:...>`".
 
-* **`@wasm_export` + `virus build --wasm`** — pierwszy działający
+* **`@wasm_export` + `bit build --wasm`** — pierwszy działający
   pipeline kompilacji do WASM: marker `@wasm_export` (wzorowany na
   `@hot_reload`) oznacza funkcję do wyeksportowania przez
   `wasm-bindgen`; obecność choć jednej takiej funkcji przełącza
   wygenerowany `Cargo.toml` z `[[bin]]` na `[lib]` (cdylib+rlib);
-  `virus build --wasm` kompiluje na `wasm32-unknown-unknown` i (gdy
+  `bit build --wasm` kompiluje na `wasm32-unknown-unknown` i (gdy
   `wasm-bindgen-cli` jest zainstalowany) generuje glue JS. Patrz
   `docs/SYNTAX.md`, oraz **`playground/`** — pierwszy prawdziwy
   konsument obu nowości: `playground/cmd/main.hcs` statycznie linkuje
@@ -126,12 +126,12 @@ nadrobione podczas bootstrapu.
   projektu przez crate `cc`, obok `get <c:...>`/`get <cpp:...>`
   (które nadal tylko linkują systemową bibliotekę po nazwie) — nowa
   sekcja manifestu `[native_sources] -> c = [...]` / `cpp = [...]`
-  (`virus/cmd/manifest.hcs::NativeSourcesSection`), którą
-  `build_wire_extern_dependencies` (`virus/cmd/build.hcs`) zamienia na
+  (`bit::NativeSourcesSection`), którą
+  `build_wire_extern_dependencies` (`bit`) zamienia na
   wywołania `cc::Build::new().file(...).compile(...)` w generowanym
   `build.rs`, dopisując `[build-dependencies] cc = "1"` do Cargo.toml,
   gdy jeszcze go tam nie ma.
-* ✅ **Zrobione (ta runda), częściowo:** `virus build` sprawdza z góry
+* ✅ **Zrobione (ta runda), częściowo:** `bit build` sprawdza z góry
   dostępność kompilatora C/C++ (`cc`/`gcc`/`clang`/`cl`), gdy projekt
   używa `[native_sources]`, i zwraca czytelny błąd zamiast surowego
   błędu `cc`/`rustc` w środku `cargo build`. **Zostaje:** inline
@@ -146,9 +146,9 @@ nadrobione podczas bootstrapu.
   `rustc` na wygenerowanym kodzie. Patrz `docs/SYNTAX.md`, sekcja FFI
   "Ograniczenia".
 * Format `.hlib` (biblioteki binarne) — dopiero raczkuje:
-  `hackerc hlib build/inspect/verify` działa, ale integracja z `virus
+  `hackerc hlib build/inspect/verify` działa, ale integracja z `bit
   install` (auto-generowanie stubów `get <extern:...>`) jest
-  częściowa. **Plan:** `virus install hlib <nazwa>` po pobraniu
+  częściowa. **Plan:** `bit install hlib <nazwa>` po pobraniu
   archiwum `.hlib` woła `hackerc hlib inspect --stubs` (nowa flaga) i
   zapisuje wygenerowane stuby `get <extern:...> use <...>` +
   `region [...]` do `cache/hlib_stubs/<nazwa>.hcs`, gotowe do
@@ -162,7 +162,7 @@ ale moduły dodatkowe (`toml`, `http`, `process`, `term`,
 Pythonie/Rust.
 
 **Plan domykania, moduł po module** (kolejność wg tego, co dziś
-najczęściej brakuje w praktyce, ustalona przy pisaniu `docs/VIRUS.md`
+najczęściej brakuje w praktyce, ustalona przy pisaniu `docs/BIT.md`
 i `docs/FAST_DIRECT.md`):
 1. `libs/std/lib/process.hcs` — brakuje przechwytywania stdout/stderr
    jako strumieni (dziś tylko odpowiednik `run-and-collect`); potrzebne
@@ -172,11 +172,11 @@ i `docs/FAST_DIRECT.md`):
    całe ciało odpowiedzi na raz); zderza się z tym samym obszarem co
    przyszłe `fast direct {httpx}`/`{aiohttp}`.
 3. `libs/std/lib/term.hcs` — pokrycie kolorów/kursora wystarczające
-   dla dzisiejszych potrzeb (`virus`, patrz `docs/VIRUS.md`), brakuje
+   dla dzisiejszych potrzeb (`bit`, patrz `docs/BIT.md`), brakuje
    odczytu rozmiaru terminala i trybu raw (potrzebne pod interaktywne
-   `virus repair`/przyszłe `lsp` logi debug).
-4. `libs/std/lib/toml.hcs` — brak zapisu (tylko odczyt) — `Virus.hk`
-   dziś edytowany przez `virus install`/`remove` na poziomie tekstu,
+   `bit repair`/przyszłe `lsp` logi debug).
+4. `libs/std/lib/toml.hcs` — brak zapisu (tylko odczyt) — `Bit.hk`
+   dziś edytowany przez `bit install`/`remove` na poziomie tekstu,
    nie przez ten moduł; docelowo `install.hcs`/`remove.hcs` powinny
    przejść na `toml.hcs` do zapisu, gdy ten zyska serializację.
 5. `libs/std/lib/cybersecurity/entropy.hcs` — dziś tylko entropia
@@ -190,34 +190,15 @@ prostu wypisuje ostrzeżenie i uruchamia bez izolacji, gdy brakuje
 uprawnień (np. `CAP_SYS_ADMIN`) — zamiast twardo odmówić lub
 zaoferować alternatywę.
 
-## 6. Menedżer pakietów `virus`
+## 6. Menedżer pakietów `bit`
 
-Cztery z pięciu punktów niżej są teraz **zaimplementowane w kodzie**
-(nie tylko zaprojektowane) — pełny opis w **`docs/VIRUS.md`**, sekcja
-"Plany rozbudowy" (nazwa sekcji zostaje historyczna, treść już
-odzwierciedla stan "zrobione").
-
-* ✅ **Zrobione (ta runda):** baza diagnostyk `virus repair`
-  przepisana na zgodną 1:1 z realnymi kodami z `typecheck.hcs`
-  (`virus/cmd/repair.hcs`), plus dopasowanie przybliżone
-  (Levenshtein) nieznanego kodu do najbliższego znanego.
-* ✅ **Zrobione (ta runda):** rozpoznawanie `.a`/`.so`/`.dylib`/`.dll`
-  jawną tabelą zamiast cichego domyślnego "dynamic" dla wszystkiego
-  poza `.a` (`virus/cmd/build.hcs`) — nieznane rozszerzenie teraz
-  jawnie OSTRZEGA, że tryb linkowania jest zgadywany.
-* ✅ **Zrobione (ta runda):** `--library`/`TargetLibrary` — pełny
-  łańcuch `hackerc build --library` → `[lib] crate-type=["rlib"]`
-  (`project.hcs`) → `cargo build --lib` → kopia `.rlib`
-  (`virus/cmd/build.hcs`, `hackerc_bridge.hcs`). Członkowie workspace
-  z samym `lib/mod.hcs` (np. `libs/core`, `libs/std`) są teraz
-  budowani jako `.rlib` zamiast pomijani.
-* ✅ **Zrobione (ta runda):** multi-binarki — `cmd/bin/*.hcs` obok
-  `cmd/main.hcs` dopisują własne `[[bin]]` do Cargo.toml
-  (`hackerc build --bin-name`, `project.hcs::build_project`), `virus
-  build` buduje domyślnie wszystkie, `virus build --bin <nazwa>`
-  buduje tylko jedną.
-* **Nowość — `virus lsp`** (jeszcze nieistniejąca komenda, projekt
-  gotowy, kod jeszcze nie napisany): patrz `docs/LSP.md`.
+`bit` jest **osobnym projektem** (H#, repozytorium bit-io/bit) — nie jest
+częścią tego repozytorium. Po stronie HackerScript zostają: kontrakt
+CLI `hackerc build` (flagi `-o`, `--crate-name`, `--library`,
+`--bin-name`, `--version-map`, `--libs-root`, `--bootstrap-root`,
+`--bit-root`), rozwiązywanie `get <bit:...>` (`BIT_LIBS`,
+`cache/libs/<nazwa>/`, `~/.hackeros/libs/<nazwa>/current/`) oraz format
+manifestu `Bit.hk`. Pełny opis: **`docs/BIT.md`**.
 
 ## 7. Dokumentacja
 
@@ -232,8 +213,8 @@ komentarzach `!!!` w kodzie.
   w notacji EBNF, z osobną sekcją nazywającą wprost dwa miejsca, gdzie
   gramatyka formalna i dzisiejszy parser się rozjeżdżają (brak
   `ParseError`, brak numerów linii w AST — patrz sekcja 1 niżej).
-* ✅ **Osobny dokument opisujący `virus`** — `docs/VIRUS.md`, dodana w
-  tej rundzie. Opisuje manifest `Virus.hk`, wszystkie komendy
+* ✅ **Osobny dokument opisujący `bit`** — `docs/BIT.md`, dodana w
+  tej rundzie. Opisuje manifest `Bit.hk`, wszystkie komendy
   (`init`/`build`/`cache`/`check`/`lint`/`fmt`/`install`/`remove`/
   `repair`/`clean`) i — nowość względem samego `--help` — rozpisany
   plan implementacji dla każdego z czterech braków w sekcji 6 niżej.
@@ -245,7 +226,7 @@ specyfikacja + dokumentacja; kod przyjdzie w kolejnych rundach,
 iteracyjnie, żeby każdy krok był realnie sprawdzalny zamiast
 deklarowany "zrobiony" bez pokrycia w działającym kodzie):
 
-* ✅ **Zrobione (ta runda) — Etap 2a:** `hackerc lsp`/`virus lsp`
+* ✅ **Zrobione (ta runda) — Etap 2a:** `hackerc lsp`/`bit lsp`
   istnieją i działają — JSON-RPC po stdio (`hackerc/cmd/lsp.hcs`),
   `initialize`/`shutdown`/`exit`, `textDocument/didOpen`/`didChange`
   → prawdziwy `textDocument/publishDiagnostics` (reużywa
@@ -277,12 +258,12 @@ sprawdzone i skorygowane w tej sesji:
 * **`mkdir -p`/`create_dir`** - JUZ zaimplementowane (`create_dir` mapuje sie
   na `std::fs::create_dir_all`, rekurencyjne). Doszlifowane: `transpile_file`
   teraz faktycznie tworzy katalog nadrzedny `out_path` przed zapisem.
-* **`virus lsp`** - JUZ w pelni zaimplementowane i podpiete (`cmd_lsp_run` w
-  `virus/cmd/lsp.hcs`, wywolywane z `main.hcs`). Diagnostyka dziala; zakres
+* **`bit lsp`** - JUZ w pelni zaimplementowane i podpiete (`cmd_lsp_run` w
+  `bit`, wywolywane z `main.hcs`). Diagnostyka dziala; zakres
   Etap 2b/2c (hover/definition/completion/rename/formatting) nadal otwarty.
-* **`virus build --jar`** - JUZ w pelni zaimplementowane (`build_package_jar`
-  + flaga `--jar` w `virus/cmd/main.hcs` -> `TargetJar`), NIE placeholder.
-* **`virus build --release --wasm`** - naprawiony realny bug: `include
+* **`bit build --jar`** - JUZ w pelni zaimplementowane (`build_package_jar`
+  + flaga `--jar` w `bit` -> `TargetJar`), NIE placeholder.
+* **`bit build --release --wasm`** - naprawiony realny bug: `include
   <work:hackerc::...>` nigdy nie dzialalo dla czlonkow-binarek (`hackerc`,
   `playground`) trzymajacych kod w `cmd/` zamiast `lib/` - patrz
   `find_workspace_root`/`work_module_file_path` w `hackerc/cmd/project.hcs`.
@@ -294,8 +275,8 @@ sprawdzone i skorygowane w tej sesji:
   fail-closed (kod wyjscia 111, polecenie NIE wykonuje sie bez izolacji).
 * **NOWOSC: `using <wersja>` per plik** - patrz **`docs/MULTI_VERSION.md`** -
   rozne pliki `.hcs` w JEDNYM projekcie moga deklarowac rozne wersje jezyka;
-  `virus build` pobiera wszystkie potrzebne binarki `hackerc` i orkiestruje
-  delegacje per-plik. Plus `Virus.hk -> [package] -> all-versions => [...]`.
+  `bit build` pobiera wszystkie potrzebne binarki `hackerc` i orkiestruje
+  delegacje per-plik. Plus `Bit.hk -> [package] -> all-versions => [...]`.
 * **`hack3rc`** - dodany do `[workspace]`, manifest + plan architektury
   (frontend re-used z `hackerc`, backend Cranelift) - **implementacja
   jeszcze NIE zaczeta** (tylko manifest/plan), patrz `docs/HACK3RC.md`
@@ -303,22 +284,22 @@ sprawdzone i skorygowane w tej sesji:
 
 Wciaz calkowicie nieruszone: Go FFI (`get <go:>`/`native {go}`), `fast direct
 {backend}` (19 backendow), `ParseError`/numery linii w AST, typ `Set`,
-LSP Etap 2b/2c, stuby `.hlib` w `virus install`.
+LSP Etap 2b/2c, stuby `.hlib` w `bit install`.
 
 ## Aktualizacja sesji 2
 
-* **Stuby `.hlib` w `virus install`** - odkryto, ze `hackerc` JUZ ma
+* **Stuby `.hlib` w `bit install`** - odkryto, ze `hackerc` JUZ ma
   PELNA, automatyczna obsluge `get <hlib:nazwa>` (`find_hlib_file_path`/
   `hlib_extract_for_import` w `project.hcs` - szuka `.hlib` w
   `<projekt>/hlibs/`, generuje `region [...]` z `manifest.json` gdy brak
-  zrodla). Jedyny brakujacy element: `virus build` (zaleznosci `bytes`/
+  zrodla). Jedyny brakujacy element: `bit build` (zaleznosci `bytes`/
   `bit` konczace sie na `.hlib`) tylko OSTRZEGAL "dopisz recznie" zamiast
   skopiowac plik do `<projekt>/hlibs/<nazwa>.hlib`, gdzie `get
-  <hlib:nazwa>` juz by go znalazl. Naprawione (`virus/cmd/build.hcs`) -
+  <hlib:nazwa>` juz by go znalazl. Naprawione (`bit`) -
   teraz to dziala od razu, bez zadnego recznego kroku.
 * **`Set<T>`** dodany (`std::collections::HashSet`) - patrz tura 4 w
   SESSION_LOG.md.
-* **Kolorowe diagnostyki + timing w `virus build`** - patrz tura 4 w
+* **Kolorowe diagnostyki + timing w `bit build`** - patrz tura 4 w
   SESSION_LOG.md.
 
 Wciaz calkowicie nieruszone: Go FFI, `fast direct {backend}` (19
@@ -352,10 +333,10 @@ backendow), LSP hover/definition/completion/rename/formatting,
 ## Aktualizacja sesji 4 - PIERWSZA realna weryfikacja przez `cargo build`
 
 W tej sesji po raz pierwszy zainstalowano `rustc`/`cargo` i faktycznie
-skompilowano `hackerc`, `virus` oraz programy testowe. Wyniki (pelne
+skompilowano `hackerc`, `bit` oraz programy testowe. Wyniki (pelne
 szczegoly w SESSION_LOG.md, Tura 7):
 
-* **`hackerc` i `virus` kompiluja sie i dzialaja** - self-hosting
+* **`hackerc` i `bit` kompiluja sie i dzialaja** - self-hosting
   fixed-point zweryfikowany (dwie generacje transpilacji daja
   identyczny wynik).
 * **`Set<T>`, `Dict.keys()/values()`, `ParseError`** - zweryfikowane
@@ -364,7 +345,7 @@ szczegoly w SESSION_LOG.md, Tura 7):
 * Znalezione i naprawione 2 realne bledy kompilacji we wczesniejszych
   turach tej sesji (`tt.generic1` -> `tt.generic`, `VERSION.clone()` ->
   `VERSION.to_string()`) - niewidoczne bez `cargo build`.
-* **`virus build --wasm`/playground - CZESCIOWO naprawione**: oryginalny
+* **`bit build --wasm`/playground - CZESCIOWO naprawione**: oryginalny
   zglaszany blad (`E0432 unresolved import`) jest naprawiony, ALE
   odkryto GLEBSZY problem: `include <work:...>` nie kanonizuje nazw
   modulow po sciezce pliku, wiec plik zaladowany i BEZPOSREDNIO (przez
@@ -503,3 +484,31 @@ arytmetyka calkowita).
   inline'owanie dostępu do list i szybsza ścieżka alokacji, `native
   {JavaScript}` w backendzie JS, `Int` jako BigInt (opcjonalnie), prawdziwe
   pozycje w AST dla diagnostyk, test strony w prawdziwej przeglądarce.
+
+## Runda 12 — porządki wokół `bit`, naprawy i rozbudowa
+
+Zrobione i zweryfikowane kompilacją/uruchomieniem:
+
+* **Błąd generatora Rusta naprawiony**: `lista[i].pole += x`,
+  `g[i][j] += x` i `lista[i] = x` modyfikują element w miejscu
+  (`codegen.hcs::gen_lvalue`; dawniej zapis trafiał w tymczasowy `.clone()`).
+* **`get <bit:nazwa[::plik]>`** rozwiązuje się zgodnie z układem `bit`
+  (`BIT_LIBS`, `cache/libs/<nazwa>/`, `~/.hackeros/libs/<nazwa>/current/`;
+  źródła w `lib/`). Patrz `docs/BIT.md`.
+* **Usunięte** wszystkie starsze źródła `get` poza `bit` (nieznane źródło
+  daje `E0003`) i ich wzmianki; wszystkie `Bit.hk` w nowym formacie; workflowy budują tylko
+  `hackerc` i `hack3rc`.
+* **`hack3rc`**: metody `Str` (`contains`, `starts_with`, `ends_with`,
+  `find`, `to_upper`, `to_lower`, `trim`, `repeat`, `is_empty`) i list
+  (`contains`, `insert`, `remove`, `sort`, `reverse`); testy w
+  `hack3rc/tests/` (z GC w trybie stress).
+* **LSP**: `textDocument/formatting` (dokumenty bez błędów składni).
+* **Backend Kotlin**: nieobsługiwane wyrażenie to błąd kompilacji, nie
+  `TODO_unsupported_expr()` w wyniku.
+* Atrapy `std_placeholder`/`core_placeholder` zastąpione stałymi wersji.
+
+Nadal otwarte (nie ruszane w tej rundzie): `Dict`, `Result` i `?`, funkcje
+asocjacyjne, interpolacja i async w `hack3rc`; pozycje (linia/kolumna) w AST;
+`Dict.items()`; `log()` dla struktur/enumów; LSP `rename`; zapis w `toml`;
+`isatty`; kanały JS bez ręcznego `await`; statyczne linkowanie CPythona;
+weryfikacja `crosscompile`/`arc`; podział `codegen.hcs`.
