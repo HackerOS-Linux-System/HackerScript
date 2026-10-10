@@ -128,7 +128,7 @@ klucze: `lang`, `mode`, `crosscompile`, `arc`.
 | `use <lang:javascript>` (alias `js`) | `hackerc build` generuje JavaScript (Node.js) zamiast crate'a Rust — patrz `docs/JAVASCRIPT.md` |
 | `use <mode:website>` | `hackerc build` generuje stronę (`index.html` + `app.js`) — patrz `docs/WEBSITE.md` |
 | `use <lang:kotlin>` | eksperymentalny backend Kotlina (`hackerc kotlin`) |
-| `use <crosscompile>`, `use <arc:architektura>` | zapisywane w pliku pomocniczym dla `bit`/`virus` |
+| `use <crosscompile>`, `use <arc:architektura>` | zapisywane w pliku pomocniczym dla `bit` |
 
 `get <crates:nazwa::wersja>` dodaje zależność Cargo. Od wersji 0.6 część po
 pierwszym `+` to **features** Cargo (rozdzielone `+`):
@@ -149,20 +149,21 @@ get <core:memory::arena>                    !! `core`, z podmodułem po `::`
 get <crates:serde::1.0>                     !! prawdziwa zależność Cargo
 get <pypi:rich>                             !! dostępne tylko w direct[ ... ]
 get <npm:left-pad> / get <jsr:@std/path>    !! JS/TS (w budowie, patrz ROADMAP)
-get <vira:nazwa>                            !! biblioteka Vira typu "git" (.hcs)
+get <bit:nazwa>                             !! biblioteka zainstalowana przez bit (lib/mod.hcs)
+get <bit:nazwa::plik>                       !! ...jej podmodul lib/plik.hcs
 get <work:parser>                           !! czlonek workspace "parser" (0.4, cale lib/mod.hcs)
 get <work:parser::ast>                      !! ...jego podmodul lib/ast.hcs
 ```
 
 Zrodła obsługiwane dziś przez `get <źródło:nazwa[::wersja]>`: `std`,
-`core`, `selfhost` (tylko `include`, blokowane w `get`), `virus`,
-`vira`, `work`, `hlib`, `bytes`, `bit`, `crates`, `pypi`, `npm`, `jsr`
+`core`, `selfhost` (tylko `include`, blokowane w `get`), `bit`,
+`work`, `hlib`, `crates`, `pypi`, `npm`, `jsr`
 — oraz, od **0.3**, `extern`, `c`, `cpp` (patrz sekcja FFI niżej).
 
 ### `get <work:członek[::plik]>` — import z workspace (nowość 0.4)
 
 Odpowiednik Rustowego `use nazwa_membera::modul::*;` dla dowolnego
-członka `[workspace] -> members` z `Virus.hk` — nie tylko `core`/`std`
+członka `[workspace] -> members` z `Bit.hk` — nie tylko `core`/`std`
 (które mają własne, krótsze aliasy `get <core:...>`/`get <std:...>`,
 działające identycznie i nadal zalecane dla nich dwóch).
 
@@ -176,15 +177,15 @@ get <work:parser> import <parse_ast> !! import wybranych nazw, jak przy std/core
 **Kiedy członek jest importowalny w ten sposób.** Każdy członek
 workspace ma jeden z dwóch kształtów (albo oba naraz), rozpoznawany
 wyłącznie po zawartości jego własnego katalogu — **bez** żadnego pola
-w `Virus.hk` (sekcja `[build]` z takim polem została usunięta w 0.4,
+w `Bit.hk` (sekcja `[build]` z takim polem została usunięta w 0.4,
 patrz niżej):
 
 | Kształt        | Wymagany plik      | Budowany przez     | Importowalny przez        |
 |-----------------|---------------------|---------------------|-----------------------------|
-| "binarka"       | `cmd/main.hcs` (`fun main()`) | `virus build`       | nie (uruchamiany, nie importowany) |
+| "binarka"       | `cmd/main.hcs` (`fun main()`) | `bit build`       | nie (uruchamiany, nie importowany) |
 | "biblioteka"    | `lib/mod.hcs`       | nie (nie ma `cmd/`) | `get <work:nazwa[::plik]>` |
 
-`hackerc`/`virus` same są dziś "binarkami" (mają tylko `cmd/main.hcs`),
+`hackerc`/`bit` same są dziś "binarkami" (mają tylko `cmd/main.hcs`),
 `libs/core`/`libs/std` są "bibliotekami" (mają tylko `lib/mod.hcs`).
 Nic nie stoi na przeszkodzie, żeby przyszły członek miał **oba**
 naraz — byłby wtedy jednocześnie samodzielnym narzędziem i biblioteką
@@ -241,7 +242,7 @@ funkcji co `get <work:...>` (`find_workspace_root` +
 `work_module_file_path`) — szuka w górę drzewa katalogów, zaczynając
 od pliku z `include`, aż znajdzie `<przodek>/<członek>/lib`.
 
-### `@wasm_export` i `virus build --wasm` (nowość 0.4)
+### `@wasm_export` i `bit build --wasm` (nowość 0.4)
 
 Marker tekstowy (na wzór istniejącego `@hot_reload`) przed
 `fun nazwa(...) [ ... ]` na najwyższym poziomie pliku — oznacza
@@ -266,12 +267,12 @@ nie są wspierane — kompilują się normalnie, ale bez atrybutu, z
 ostrzeżeniem jako komentarz w wygenerowanym Ruście.
 
 Gdy co najmniej jedna funkcja w projekcie jest oznaczona
-`@wasm_export`, `hackerc build`/`virus build` generuje `Cargo.toml` w
+`@wasm_export`, `hackerc build`/`bit build` generuje `Cargo.toml` w
 kształcie `[lib]` (`crate-type = ["cdylib", "rlib"]`, `path =
 "src/lib.rs"`) zamiast zwykłego `[[bin]]` (`src/main.rs`) —
 automatycznie, bez żadnej flagi (patrz `project.hcs::cargo_toml_text`).
 
-`virus build --wasm` (`TargetWasm` w `virus/cmd/build.hcs`) kompiluje
+`bit build --wasm` (`TargetWasm` w `bit`) kompiluje
 ten crate na `wasm32-unknown-unknown` (`cargo build --target
 wasm32-unknown-unknown --release`), po czym — jeśli `wasm-bindgen`
 (CLI, **osobny** program od crate'a/cargo, instalowany przez `cargo
@@ -280,26 +281,26 @@ wygenerować glue `.js`/`.d.ts` + finalny, przetworzony `..._bg.wasm`
 gotowy pod `import` w przeglądarce. Wersja CLI **musi** zgadzać się z
 wersją `wasm-bindgen` w `Cargo.toml` (`"0.2"`) — niedopasowanie kończy
 się twardym błędem CLI, to ograniczenie całego ekosystemu
-`wasm-bindgen`, nie coś specyficznego dla `virus`. Brak CLI nie jest
+`wasm-bindgen`, nie coś specyficznego dla `bit`. Brak CLI nie jest
 błędem krytycznym: surowy `.wasm` (bez glue) i tak trafia do
 `cache/build/`, z ostrzeżeniem jak go dokończyć ręcznie.
 
 Zobacz `playground/` (`playground/lib/mod.hcs` + `playground/web/`) -
 działający przykład: `check_source` oznaczone `@wasm_export`, budowane
-z `virus build --wasm` uruchomionym w `playground/`.
+z `bit build --wasm` uruchomionym w `playground/`.
 
 
 
-Do 0.3 `Virus.hk` mógł mieć sekcję `[build] -> entry => <ścieżka>`,
+Do 0.3 `Bit.hk` mógł mieć sekcję `[build] -> entry => <ścieżka>`,
 nadpisującą, który plik jest punktem wejścia. Od **0.4** ta sekcja
 została **całkowicie usunięta** — plik wejściowy dowolnego budowalnego
 członka/projektu to zawsze, bez wyjątku, `cmd/main.hcs` (dokładny
 odpowiednik tego, jak Cargo samo znajduje `src/main.rs`, bez żadnego
-pola w `Cargo.toml`). Jeśli w starym `Virus.hk` sekcja `[build]` nadal
+pola w `Cargo.toml`). Jeśli w starym `Bit.hk` sekcja `[build]` nadal
 występuje, jest po prostu ignorowana (nieznane sekcje nie są błędem).
 
 `using <wersja>` na początku pliku (albo `[package] using` w
-`Virus.hk`) deklaruje wymaganą wersję kompilatora `hackerc`.
+`Bit.hk`) deklaruje wymaganą wersję kompilatora `hackerc`.
 
 ## `direct[ ... ]` — surowy Python
 
@@ -391,8 +392,8 @@ get <extern:libmysystemlib> use <dynamic>
 Sama deklaracja `get <extern:...>` **niczego nie linkuje** — mówi
 kompilatorowi "następny `region [ ... ]` w tym pliku należy do tej
 biblioteki, w tym trybie". Samo linkowanie (znalezienie/skopiowanie
-pliku, dopisanie `cargo:rustc-link-*` do `build.rs`) robi `virus
-build` (patrz `virus/cmd/build.hcs::build_wire_extern_dependencies`).
+pliku, dopisanie `cargo:rustc-link-*` do `build.rs`) robi `bit
+build` (patrz `bit`).
 
 ### `region [ ... ]`
 
@@ -452,7 +453,7 @@ dostarczona w Twoim środowisku).
 W odróżnieniu od `native {JavaScript}` (interpretowane w runtime przez
 QuickJS), `native {C++}` jest **kompilowane build-time**: kod C++ w
 środku jest zawijany jako ciało `extern "C" void
-__hks_native_cpp_block_N()`, kompilowany przez `virus build` (crate
+__hks_native_cpp_block_N()`, kompilowany przez `bit build` (crate
 `cc`, `.cpp(true)`) i linkowany statycznie do binarki:
 
 ```
@@ -465,7 +466,7 @@ fun main() [
 ```
 
 Wymaga kompilatora C++ (g++/clang++) w środowisku, w którym uruchamiasz
-`virus build` — dokładnie tak, jak `native {JavaScript}` wymaga
+`bit build` — dokładnie tak, jak `native {JavaScript}` wymaga
 kompilatora C (bo `rquickjs-sys` kompiluje C QuickJS przez `cc`).
 
 ### Ograniczenia (uczciwie, jak reszta tego bootstrapu)
@@ -473,8 +474,8 @@ kompilatora C (bo `rquickjs-sys` kompiluje C QuickJS przez `cc`).
 * `get <c:...>`/`get <cpp:...>` (BEZ `use <...>`) wciąż linkują
   wyłącznie **systemową** bibliotekę po nazwie. Kompilowanie WŁASNEGO
   źródła `.c`/`.cpp` z projektu jest od tej rundy możliwe — ale przez
-  osobny mechanizm: sekcja `[native_sources]` w `Virus.hk` (patrz
-  `docs/VIRUS.md`), nie przez `get <c:...>`/`get <cpp:...>`.
+  osobny mechanizm: sekcja `[native_sources]` w `Bit.hk` (patrz
+  `docs/BIT.md`), nie przez `get <c:...>`/`get <cpp:...>`.
 * ~~Sygnatury zadeklarowane w `region [ ... ]` nie są dziś wpuszczane
   do `typecheck.hcs`/`typeinfer.hcs`~~ **Naprawione**: od tej rundy
   `collect_signatures` (`hackerc/cmd/typeinfer.hcs`) wpisuje każdą
