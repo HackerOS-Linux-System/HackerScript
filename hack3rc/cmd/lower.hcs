@@ -1174,7 +1174,39 @@ impl Lw [
                 self.need_ext("hks_str_len", "s", "i")
                 end Ex("(call hks_str_len " + o.ir + ")", "i")
             ]
-            self.err_h("H0470", "Str nie ma metody '" + m + "' w hack3rc (dostepne: len, clone)", hint.clone())
+            if m == "is_empty" and args.len() == 0 [
+                self.need_ext("hks_str_len", "s", "i")
+                end Ex("(cmp eq i (call hks_str_len " + o.ir + ") (i 0))", "b")
+            ]
+            if (m == "to_upper" or m == "to_lower" or m == "trim") and args.len() == 0 [
+                let ssym = "hks_str_" + m
+                self.need_ext(ssym.clone(), "s", "s")
+                end Ex("(call " + ssym + " " + o.ir + ")", "s")
+            ]
+            if m == "contains" or m == "starts_with" or m == "ends_with" or m == "find" [
+                let swant: List<Str> = ["s"]
+                let sr: Str = self.lower_args("Str::" + m, args.clone(), swant, hint.clone())
+                if sr == "!" [
+                    end self.bad()
+                ]
+                let ssym2 = "hks_str_" + m
+                if m == "find" [
+                    self.need_ext(ssym2.clone(), "ss", "i")
+                    end Ex("(call " + ssym2 + " " + o.ir + sr + ")", "i")
+                ]
+                self.need_ext(ssym2.clone(), "ss", "i")
+                end Ex("(cmp ne i (call " + ssym2 + " " + o.ir + sr + ") (i 0))", "b")
+            ]
+            if m == "repeat" [
+                let rwant: List<Str> = ["i"]
+                let rr: Str = self.lower_args("Str::repeat", args.clone(), rwant, hint.clone())
+                if rr == "!" [
+                    end self.bad()
+                ]
+                self.need_ext("hks_str_repeat", "si", "s")
+                end Ex("(call hks_str_repeat " + o.ir + rr + ")", "s")
+            ]
+            self.err_h("H0470", "Str nie ma metody '" + m + "' w hack3rc (dostepne: len, is_empty, contains, starts_with, ends_with, find, to_upper, to_lower, trim, repeat, clone)", hint.clone())
             end self.bad()
         ]
         if ty_is_list(o.ty.clone()) [
@@ -1243,7 +1275,68 @@ impl Lw [
             let ir = "(seq ((let " + sid + " p (call hks_list_pop " + o.ir + ")) (let " + rid + " p (call hks_alloc (i 16) (daddr " + sym + "))) (if (cmp ne i (v " + sid + ") (i 0)) ((store i (v " + rid + ") 0 (i 1)) " + some_store + ") ())) (v " + rid + "))"
             end Ex(ir, "O<" + elem + ">")
         ]
-        self.err_h("H0474", "List nie ma metody '" + m + "' (dostepne: len, push, pop, clear, clone)", hint.clone())
+        if m == "reverse" and args.len() == 0 [
+            self.need_ext("hks_list_reverse", "p", "u")
+            end Ex("(call hks_list_reverse " + o.ir + ")", "u")
+        ]
+        if m == "sort" and args.len() == 0 [
+            if elem != "i" [
+                self.err_h("H0475", "List::sort w hack3rc dziala tylko dla List<Int>", hint.clone())
+                end self.bad()
+            ]
+            self.need_ext("hks_list_sort_i", "p", "u")
+            end Ex("(call hks_list_sort_i " + o.ir + ")", "u")
+        ]
+        if m == "contains" [
+            if elem != "i" and elem != "s" and elem != "b" [
+                self.err_h("H0476", "List::contains w hack3rc dziala dla List<Int>, List<Bool> i List<Str>", hint.clone())
+                end self.bad()
+            ]
+            let cwant: List<Str> = [elem.clone()]
+            let cr: Str = self.lower_args("List::contains", args.clone(), cwant, hint.clone())
+            if cr == "!" [
+                end self.bad()
+            ]
+            let csym = "hks_list_contains_i"
+            let cpt = "pi"
+            if elem == "s" [
+                csym = "hks_list_contains_s"
+                cpt = "ps"
+            ]
+            if elem == "b" [
+                self.need_ext("hks_list_contains_i", "pi", "i")
+                end Ex("(cmp ne i (call hks_list_contains_i " + o.ir + " (cast b i " + cr.slice(1, cr.len()) + ")) (i 0))", "b")
+            ]
+            self.need_ext(csym.clone(), cpt, "i")
+            end Ex("(cmp ne i (call " + csym + " " + o.ir + cr + ") (i 0))", "b")
+        ]
+        if m == "remove" [
+            let rwant2: List<Str> = ["i"]
+            let rr2: Str = self.lower_args("List::remove", args.clone(), rwant2, hint.clone())
+            if rr2 == "!" [
+                end self.bad()
+            ]
+            self.need_ext("hks_list_remove", "pi", "p")
+            end Ex(ir_load(elem.clone(), "(call hks_list_remove " + o.ir + rr2 + ")", 0), elem.clone())
+        ]
+        if m == "insert" [
+            if args.len() != 2 [
+                self.err_h("H0477", "List::insert przyjmuje 2 argumenty: indeks i wartosc", hint.clone())
+                end self.bad()
+            ]
+            let ia = self.lower_expr(args[0].clone())
+            let va = self.lower_expr(args[1].clone())
+            if ia.ty == "?" or va.ty == "?" [
+                end self.bad()
+            ]
+            if ia.ty != "i" or va.ty != elem [
+                self.err_h("H0478", "List::insert oczekuje (Int, " + tag_name(elem.clone()) + ")", hint.clone())
+                end self.bad()
+            ]
+            self.need_ext("hks_list_insert", "pi", "p")
+            end Ex(ir_store(elem.clone(), "(call hks_list_insert " + o.ir + " " + ia.ir + ")", 0, va.ir), "u")
+        ]
+        self.err_h("H0474", "List nie ma metody '" + m + "' (dostepne: len, push, pop, clear, reverse, sort, contains, remove, insert, clone)", hint.clone())
         end self.bad()
     ]
 
