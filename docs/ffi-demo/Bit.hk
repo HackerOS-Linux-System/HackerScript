@@ -1,5 +1,12 @@
 [package]
-name = "ffi-demo"
-version = "0.0"
-using = "0.4"
-description = "Minimalny, samodzielny przyklad FFI 0.3/0.4: get<extern:...> use<...> + region, oraz native {C++}."
+-> name        => ffi-demo
+-> version     => 0.0.1
+-> description => Minimalny przyklad FFI, get extern use plus region oraz native C++.
+-> lang        => HackerScript
+-> using       => 0.4
+
+[build]
+-> link => static
+
+[default-build]
+-> profile => release
