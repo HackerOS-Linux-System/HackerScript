@@ -1,9 +1,12 @@
 [package]
-name = "hello-world"
-version = "0.0"
-using = "0.4"
-authors = ["HackerOS Team <hackeros068@gmail.com>"]
-description = "Przykladowy projekt HackerScript pokazujacy podstawowa skladnie."
+-> name        => hello-world
+-> version     => 0.0.1
+-> description => Przykladowy projekt HackerScript pokazujacy podstawowa skladnie.
+-> lang        => HackerScript
+-> using       => 0.4
 
-[dependencies]
-# "pypi:rich" = "*"
+[build]
+-> link => static
+
+[default-build]
+-> profile => release
