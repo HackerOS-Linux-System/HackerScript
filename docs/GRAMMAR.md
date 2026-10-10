@@ -45,8 +45,8 @@ get_decl       = 'get' '<' get_source ':' get_name [ '::' version_or_sub ] '>'
                   [ 'import' '<' ident , { '::' , ident } '>' ]
                   [ 'use' '<' link_mode '>' ] ;
 
-get_source     = 'std' | 'core' | 'virus' | 'vira' | 'work' | 'hlib'
-                | 'bytes' | 'bit' | 'crates' | 'pypi' | 'npm' | 'jsr'
+get_source     = 'std' | 'core' | 'bit' | 'work' | 'hlib'
+                | 'crates' | 'pypi' | 'npm' | 'jsr'
                 | 'extern' | 'c' | 'cpp' ;
 
 link_mode      = 'static' | 'dynamic' ;
