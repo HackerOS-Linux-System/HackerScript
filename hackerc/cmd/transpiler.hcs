@@ -27,12 +27,12 @@ struct TranspileResult [
     !! `collect_extern_link_specs` nizej) - `project.hcs` zbiera to ze
     !! WSZYSTKICH plikow modulu i zapisuje do sidecar
     !! `.hks-extern-links.txt` obok wygenerowanego Cargo.toml, ktory
-    !! `virus build` czyta, zeby dopisac linkowanie do `build.rs`
-    !! (patrz `virus/cmd/build.hcs::build_wire_extern_dependencies`) -
-    !! `hackerc` i `virus` sa OSOBNYMI binarkami (`virus` woła
-    !! `hackerc` przez `run_command`, patrz `hackerc_bridge.hcs`), wiec
+    !! `bit build` czyta, zeby dopisac linkowanie do `build.rs`
+    !! (patrz `bit`) -
+    !! `hackerc` i `bit` sa OSOBNYMI binarkami (`bit` woła
+    !! `hackerc` jako proces zewnetrzny), wiec
     !! plik na dysku jest jedynym kanalem miedzy nimi (parytet z tym,
-    !! jak `.vira-meta.txt` przenosi informacje o bibliotekach Vira).
+    !! jak `.bit-meta.txt` przenosi informacje o bibliotekach bit).
     extern_link_specs: List<Str>,
     !! DODANE - patrz `CodeGen::native_cpp_sources`/`native_cpp_order`.
     native_cpp_sources: Dict<Str, Str>,
@@ -1305,7 +1305,7 @@ fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native
         i = i + 1
     ]
 
-    let header: List<Str> = ["// Plik wygenerowany automatycznie przez hackerc (HackerScript -> Rust).", "// NIE EDYTUJ RECZNIE - edytuj zrodlo .hcs i uruchom 'virus build' ponownie.", "#![allow(non_snake_case, unused_mut, dead_code)]"]
+    let header: List<Str> = ["// Plik wygenerowany automatycznie przez hackerc (HackerScript -> Rust).", "// NIE EDYTUJ RECZNIE - edytuj zrodlo .hcs i uruchom 'bit build' ponownie.", "#![allow(non_snake_case, unused_mut, dead_code)]"]
     if gen.needs_pyo3 [
         header.push("use pyo3::prelude::*;")
     ]
@@ -1349,8 +1349,8 @@ fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native
     !! POLOZENIA BINARKI (`env::current_exe()` -> katalog nadrzedny ->
     !! `java_classes/`), NIE wzgledem sciezki budowania - zeby
     !! zbudowana binarka dzialala uruchomiona z DOWOLNEGO katalogu
-    !! roboczego, o ile `java_classes/` (skopiowane przez `virus
-    !! build` obok binarki, patrz `virus/cmd/build.hcs`) jedzie razem
+    !! roboczego, o ile `java_classes/` (skopiowane przez `bit
+    !! build` obok binarki, patrz `bit`) jedzie razem
     !! z nia.
     if gen.needs_native_java or gen.needs_native_kotlin [
         header.push("static HKS_JVM: std::sync::OnceLock<jni::JavaVM> = std::sync::OnceLock::new();")
@@ -1365,9 +1365,9 @@ fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native
             !!! `kotlin-stdlib.jar` - to NIE JEST opcjonalne (w
             !!! odroznieniu od `get <java:...>`/`get <kotlin:...>`
             !!! classpath, ktore sa potrzebne TYLKO gdy kod faktycznie
-            !!! odwoluje sie do zewnetrznych klas). `virus build`
+            !!! odwoluje sie do zewnetrznych klas). `bit build`
             !!! kopiuje `kotlin-stdlib.jar` (znaleziony obok
-            !!! `kotlinc`, patrz virus/cmd/build.hcs) do
+            !!! `kotlinc`, patrz bit) do
             !!! `kotlin_classes/kotlin-stdlib.jar` OBOK finalnej
             !!! binarki - dokladnie tak samo jak `java_classes/` (ten
             !!! sam wzorzec `env::current_exe()`), wiec dopisujemy go
