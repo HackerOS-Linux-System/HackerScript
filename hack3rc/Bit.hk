@@ -1,12 +1,17 @@
 [package]
 -> name        => hack3rc
--> version     => 0.0.1
+-> version     => 0.4
+-> description => Kompilator AOT HackerScript przez Cranelift, wiele architektur, w 100% HackerScript. Frontend wspolny z hackerc.
+-> authors     => ["HackerOS Team"]
+-> license     => MIT
+-> lang        => HackerScript
 -> using       => 0.4
--> authors     => ["HackerOS-Linux-System <hackeros068@gmail.com>"]
--> description => Eksperymentalny drugi kompilator HackerScript - sam kompilator napisany W HackerScript (parytet frontendu z hackerc, patrz include <work:hackerc::...>), ale generujacy kod maszynowy WPROST przez Cranelift (crate cranelift-codegen/cranelift-jit/cranelift-object) zamiast transpilowac do Rusta. Status: SZKIELET (patrz docs/HACK3RC.md) - dziala tylko waski podzbior jezyka (patrz "Zakres 0.0.1" w tym pliku).
 
-[dependencies]
--> std
---> io => "*"
---> fs => "*"
---> string => "*"
+[layout]
+-> cmd => cmd
+
+[build]
+-> link => static
+
+[default-build]
+-> profile => release
