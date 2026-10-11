@@ -1066,6 +1066,12 @@ fun build_recursion_info(sigs: Signatures) -> RecursionInfo [
 !!! `_compute_mut_params`/`_find_self_method_calls`/
 !!! `_compute_method_mut_params`) -------------------------------------
 
+!!! Metody tylko-do-odczytu, dla ktorych odbiorca moze byc POZYCZONY (bez
+!!! `.clone()` calego elementu listy) - ZMIANA 0.5 (wydajnosc).
+fun is_borrowing_method(name: Str) -> Bool [
+    end name == "len" or name == "is_empty" or name == "clone" or name == "contains" or name == "contains_key" or name == "slice" or name == "char_at" or name == "fetch"
+]
+
 !!! Parytet z `_MUTATING_METHODS`.
 fun is_mutating_method(name: Str) -> Bool [
     end name == "push" or name == "pop" or name == "remove" or name == "insert" or name == "clear" or name == "sort" or name == "extend" or name == "truncate"
@@ -1079,7 +1085,47 @@ fun is_mutating_method(name: Str) -> Bool [
 !!! jakos "przejrzec" znalezione nazwy.
 struct MutTracker [
     mutated: Dict<Str, Bool>,
-    order: List<Str>
+    order: List<Str>,
+    !! NAPRAWIONE 0.5: wpisy `"funkcja::indeks::zmienna"` dla wywolan wolnych
+    !! funkcji `f(x, ...)` (podstawa do propagacji `&mut` po grafie wywolan).
+    call_fns: List<Str>,
+    call_idx: List<Int>,
+    call_vars: List<Str>
+]
+
+!! Czy w lancuchu `a.b[i].c` wystepuje indeksowanie?
+fun expr_has_index(e: Expr) -> Bool [
+    let e2 = e.clone()
+    match e2 [
+        Index(target, index) -> [
+            end true
+        ]
+        Attr(target, name) -> [
+            end expr_has_index(target)
+        ]
+        _ -> [
+            end false
+        ]
+    ]
+]
+
+!! Nazwa zmiennej na dnie lancucha `a.b[i].c` (albo "" gdy to nie jest lancuch).
+fun base_ident_name(e: Expr) -> Str [
+    let e2 = e.clone()
+    match e2 [
+        IdentExpr(name) -> [
+            end name
+        ]
+        Attr(target, name) -> [
+            end base_ident_name(target)
+        ]
+        Index(target, index) -> [
+            end base_ident_name(target)
+        ]
+        _ -> [
+            end ""
+        ]
+    ]
 ]
 
 impl MutTracker [
@@ -1107,6 +1153,10 @@ impl MutTracker [
                 let target_name = expr_as_ident_name(target)
                 if target_name != "" [
                     self.mark_mutated(target_name)
+                ] else [
+                    !! NAPRAWIONE 0.5: `u.nodes[i].x = v` / `a.b.c = v` - baza
+                    !! (`u`) siedzi pod warstwami Attr/Index, nie bezposrednio.
+                    self.mark_base(target)
                 ]
             ]
             IdentExpr(name) -> [
@@ -1125,6 +1175,27 @@ impl MutTracker [
     !!! ...)`), wiec bezposrednie dopasowanie wymagaloby dereferencji,
     !!! ktorej HackerScript nie ma - trzeba przejsc przez GRANICE
     !!! WYWOLANIA (bezpieczna koercja `Box<Expr> -> &Expr`).
+    fun record_call(self, callee: Expr, args: List<Expr>) [
+        let c = callee.clone()
+        match c [
+            IdentExpr(fname) -> [
+                let k = 0
+                let kn = args.len()
+                while k < kn [
+                    let an = base_ident_name(args[k].clone())
+                    if an != "" [
+                        self.call_fns.push(fname.clone())
+                        self.call_idx.push(k)
+                        self.call_vars.push(an)
+                    ]
+                    k = k + 1
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+    ]
+
     fun handle_mutating_call(self, callee: Expr) [
         let c = callee.clone()
         match c [
@@ -1148,6 +1219,7 @@ impl MutTracker [
         match e2 [
             Call(callee, args) -> [
                 self.handle_mutating_call(callee)
+                self.record_call(callee, args)
                 self.walk_expr(callee)
                 let i = 0
                 let n = args.len()
@@ -1268,7 +1340,7 @@ impl MutTracker [
 
 !!! Parytet z wolnej funkcji `_mutated_names_in_body()`.
 fun mutated_names_in_body(body: List<Stmt>) -> MutTracker [
-    let tracker = MutTracker(dict(), [])
+    let tracker = MutTracker(dict(), [], [], [], [])
     tracker.walk_stmts(body)
     end tracker
 ]
@@ -1452,7 +1524,20 @@ fun find_self_method_calls(body: List<Stmt>) -> SelfCallTracker [
 !!! bootstrap nie ma wygodnych zagniezdzonych Dict, patrz podobne
 !!! decyzje w `RecursionInfo`/`Signatures.methods` wczesniej).
 fun compute_mut_params(prog: Program) -> Dict<Str, Bool> [
+    let no_seed: Dict<Str, Bool> = dict()
+    end compute_mut_params_seeded(prog, no_seed)
+]
+
+!!! NAPRAWIONE 0.5: jak `compute_mut_params`, ale `seed` (znane juz klucze
+!!! `"funkcja::param"` z INNYCH plikow/modulow) bierze udzial w propagacji
+!!! `&mut` po grafie wywolan (wywolanie `ui_open(ui)` z innego modulu).
+fun compute_mut_params_seeded(prog: Program, seed: Dict<Str, Bool>) -> Dict<Str, Bool> [
     let result: Dict<Str, Bool> = dict()
+    let all_callers: List<Str> = []
+    let all_callees: List<Str> = []
+    let all_idx: List<Int> = []
+    let all_vars: List<Str> = []
+    let pnames: Dict<Str, Str> = dict()
     let i = 0
     let n = prog.body.len()
     while i < n [
@@ -1467,11 +1552,64 @@ fun compute_mut_params(prog: Program) -> Dict<Str, Bool> [
                     result.insert(name.clone() + "::" + vname, true)
                     j = j + 1
                 ]
+                !! NAPRAWIONE 0.5: zapamietaj wywolania i nazwy parametrow
+                !! (do propagacji `&mut` po grafie wywolan nizej).
+                let cj = 0
+                let cn = tracker.call_fns.len()
+                while cj < cn [
+                    all_callers.push(name.clone())
+                    all_callees.push(tracker.call_fns[cj].clone())
+                    all_idx.push(tracker.call_idx[cj])
+                    all_vars.push(tracker.call_vars[cj].clone())
+                    cj = cj + 1
+                ]
+                let pj = 0
+                let pn = params.len()
+                while pj < pn [
+                    pnames.insert(name.clone() + "::" + (pj as Str), params[pj].name.clone())
+                    pj = pj + 1
+                ]
             ]
             _ -> [
             ]
         ]
         i = i + 1
+    ]
+    !! NAPRAWIONE 0.5: punkt staly - jesli funkcja przekazuje swoj parametr/
+    !! zmienna do parametru `&mut` innej funkcji, sama tez potrzebuje `&mut`
+    !! (wczesniej `top(u: &U)` wolalo `add(&mut u)` -> blad E0308/E0596).
+    let changed = true
+    let guard = 0
+    while changed and guard < 64 [
+        changed = false
+        guard = guard + 1
+        let q = 0
+        let qn = all_callees.len()
+        while q < qn [
+            let hit = false
+            let pkey = all_callees[q].clone() + "::" + (all_idx[q] as Str)
+            match pnames.fetch(pkey) [
+                Some(pname) -> [
+                    if result.contains(all_callees[q].clone() + "::" + pname) or seed.contains(all_callees[q].clone() + "::" + pname) [
+                        hit = true
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+            !! funkcja z INNEGO modulu: seed trzyma tez klucze indeksowe `f::#k`
+            if seed.contains(all_callees[q].clone() + "::#" + (all_idx[q] as Str)) [
+                hit = true
+            ]
+            if hit [
+                let ckey = all_callers[q].clone() + "::" + all_vars[q].clone()
+                if not result.contains(ckey.clone()) [
+                    result.insert(ckey, true)
+                    changed = true
+                ]
+            ]
+            q = q + 1
+        ]
     ]
     end result
 ]
@@ -2207,6 +2345,15 @@ impl CodeGen [
         match c [
             Attr(target, name) -> [
                 let rendered = self.gen_expr(target)
+                !! NAPRAWIONE 0.5: `ui.nodes[p].children.push(i)` - dla metod
+                !! mutujacych odbiorca idzie jako lvalue (bez `.clone()` z
+                !! `gen_index`), inaczej mutacja trafiala w tymczasowa kopie.
+                if is_mutating_method(name.clone()) and expr_has_index(target.clone()) [
+                    rendered = self.gen_lvalue(target.clone())
+                ] elif is_borrowing_method(name.clone()) and expr_has_index(target.clone()) [
+                    !! metody tylko-do-odczytu: bez kopiowania odbiorcy
+                    rendered = self.gen_lvalue(target.clone())
+                ]
                 let tt = self.infer_type(target)
                 end MethodCallShape(true, name, rendered, tt)
             ]
@@ -2276,6 +2423,28 @@ impl CodeGen [
     !!! non-Copy elementow" opisana w komentarzu przy `A.Index` w
     !!! codegen.py (i juz uzyta RECZNIE wielokrotnie w tym bootstrapie,
     !!! patrz sekcje wyzej o `.clone()`-utracie-typu).
+    !!! NAPRAWIONE 0.5 - cel PRZYPISANIA (`xs[i] = v`, `u.nodes[i].x = v`):
+    !!! bez `.clone()` doklejanego przez `gen_index` dla elementow
+    !!! "refable" (inaczej przypisanie trafialo w tymczasowa kopie i
+    !!! bylo cicho gubione).
+    fun gen_lvalue(self, e: Expr) -> Str [
+        if not expr_has_index(e.clone()) [
+            end self.gen_expr(e)
+        ]
+        let e2 = e.clone()
+        match e2 [
+            Index(target, index) -> [
+                end self.gen_lvalue(target) + "[" + self.gen_expr(index) + " as usize]"
+            ]
+            Attr(target, name) -> [
+                end self.gen_lvalue(target) + "." + name
+            ]
+            _ -> [
+                end self.gen_expr(e)
+            ]
+        ]
+    ]
+
     fun gen_index(self, target: Expr, index: Expr) -> Str [
         let base = self.gen_expr(target.clone()) + "[" + self.gen_expr(index) + " as usize]"
         let tt = self.infer_type(target)
@@ -2751,6 +2920,12 @@ impl CodeGen [
                 end self.gen_binop(op, left, right)
             ]
             Attr(target, name) -> [
+                !! ZMIANA 0.5 (wydajnosc): `xs[i].pole` nie klonuje juz CALEGO
+                !! elementu (`xs[i].clone().pole`) - pozyczamy element i
+                !! klonujemy tylko pole (dla Copy to no-op).
+                if expr_has_index(target.clone()) [
+                    end self.gen_lvalue(target) + "." + name + ".clone()"
+                ]
                 end self.gen_expr(target) + "." + name
             ]
             Index(target, index) -> [
@@ -3727,9 +3902,9 @@ impl CodeGen [
             ]
             AssignStmt(target, op, value) -> [
                 if op == "=" [
-                    self.emit(self.gen_expr(target) + " " + op + " " + self.gen_owned_arg(value) + ";")
+                    self.emit(self.gen_lvalue(target) + " " + op + " " + self.gen_owned_arg(value) + ";")
                 ] else [
-                    self.emit(self.gen_expr(target) + " " + op + " " + self.gen_expr(value) + ";")
+                    self.emit(self.gen_lvalue(target) + " " + op + " " + self.gen_expr(value) + ";")
                 ]
             ]
             IfStmt(cond, body, elifs, else_body) -> [
@@ -4281,7 +4456,14 @@ impl CodeGen [
             if is_wasm_export [
                 params_str = params_str + p2.name.clone() + ": " + self.wasm_param_type_str(p2)
             ] else [
-                params_str = params_str + p2.name.clone() + ": " + self.param_type_str(name.clone(), p2)
+                let pts = self.param_type_str(name.clone(), p2)
+                if pts.len() >= 5 and pts.slice(0, 5) == "&mut " [
+                    !! NAPRAWIONE 0.5: `&mut x` dla parametru `x: &mut T`
+                    !! (przekazanie dalej) wymaga mutowalnego bindingu.
+                    params_str = params_str + "mut " + p2.name.clone() + ": " + pts
+                ] else [
+                    params_str = params_str + p2.name.clone() + ": " + pts
+                ]
             ]
             j = j + 1
         ]
@@ -4388,7 +4570,11 @@ impl CodeGen [
                             if self.method_mut_params.contains(mkey) [
                                 prefix = "&mut "
                             ]
-                            params_str = params_str + ", " + p.name + ": " + prefix + base
+                            if prefix == "&mut " [
+                                params_str = params_str + ", mut " + p.name + ": " + prefix + base
+                            ] else [
+                                params_str = params_str + ", " + p.name + ": " + prefix + base
+                            ]
                         ] else [
                             params_str = params_str + ", " + p.name + ": " + base
                         ]
