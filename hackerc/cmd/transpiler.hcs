@@ -282,22 +282,34 @@ fun merge_signatures_with_extra(local: Signatures, extra: ExtraSignatures) -> Si
 !!! dla tego pliku) z `extra.mut_params` - lokalne wygrywaja, parytet z
 !!! `{**extra_mut_params, **gen.mut_params}` w `generate()` (codegen.py).
 fun merge_mut_params_with_extra(local_mut: Dict<Str, Bool>, extra: ExtraSignatures) -> Dict<Str, Bool> [
-    let out = local_mut.clone()
+    let out: Dict<Str, Bool> = local_mut.clone()
     let i = 0
     let n = extra.function_names.len()
     while i < n [
-        let name = extra.function_names[i]
-        match local_mut.fetch(name) [
-            Some(_v) -> [
-            ]
-            None -> [
-                match extra.mut_params.fetch(name) [
-                    Some(v) -> [
-                        out.insert(name, v)
+        let name = extra.function_names[i].clone()
+        !! NAPRAWIONE 0.5: klucze to `"funkcja::param"`, nie sama nazwa funkcji
+        !! (wczesniej nic z `extra.mut_params` nie trafialo do wyniku).
+        match extra.functions.fetch(name.clone()) [
+            Some(fstmt) -> [
+                match fstmt [
+                    FunDecl(fname, fparams, fret, fbody, fpub, ftp, fasync) -> [
+                        let j = 0
+                        let jn = fparams.len()
+                        while j < jn [
+                            let key = name.clone() + "::" + fparams[j].name.clone()
+                            if extra.mut_params.contains(key.clone()) [
+                                if not out.contains(key.clone()) [
+                                    out.insert(key, true)
+                                ]
+                            ]
+                            j = j + 1
+                        ]
                     ]
-                    None -> [
+                    _ -> [
                     ]
                 ]
+            ]
+            None -> [
             ]
         ]
         i = i + 1
@@ -1282,7 +1294,7 @@ fun hot_reload_runtime_block(names: List<Str>, default_source_path: Str) -> List
 fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native_blocks: List<Str>, native_engines: List<Str>, sandbox_blocks: List<Str>, hot_reload_names: List<Str>, wasm_export_names: List<Str>, default_source_path: Str, extra: ExtraSignatures, fast_direct_blocks: List<Str>, fast_direct_backends: List<Str>, work_member: Option<Str>) -> TranspileResult [
     let local_sigs = collect_signatures(prog.clone())
     let sigs = merge_signatures_with_extra(local_sigs, extra)
-    let local_mut = compute_mut_params(prog.clone())
+    let local_mut = compute_mut_params_seeded(prog.clone(), extra.mut_params.clone())
     let mut_params = merge_mut_params_with_extra(local_mut, extra)
     let method_mut_params = compute_method_mut_params(prog.clone(), extra.method_mut_params.clone())
     let info = build_recursion_info(sigs.clone())
