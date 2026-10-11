@@ -1212,19 +1212,10 @@ fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_roo
             si = si + 1
         ]
 
-        let file_mut_params = compute_mut_params(df.program.clone())
-        let fmi = 0
-        let fmn = function_names.len()
-        while fmi < fmn [
-            match file_mut_params.fetch(function_names[fmi].clone()) [
-                Some(v) -> [
-                    mut_params.insert(function_names[fmi].clone(), v)
-                ]
-                None -> [
-                ]
-            ]
-            fmi = fmi + 1
-        ]
+        !! NAPRAWIONE 0.5: tu byl `file_mut_params.fetch(<nazwa funkcji>)`, a
+        !! klucze maja postac `"funkcja::param"` - wiec NIC nie trafialo do
+        !! `mut_params` i wywolania `&mut`-funkcji z INNYCH modulow dostawaly
+        !! `&x` zamiast `&mut x`. Teraz: globalny punkt staly po petli (nizej).
 
         let empty_extra: Dict<Str, Bool> = dict()
         let file_method_mut_params = compute_method_mut_params(df.program.clone(), empty_extra)
@@ -1242,6 +1233,44 @@ fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_roo
         ]
 
         fi = fi + 1
+    ]
+
+    !! NAPRAWIONE 0.5: globalna propagacja `&mut` miedzy modulami (punkt staly).
+    let mpass = 0
+    let mgrew = true
+    while mgrew and mpass < 8 [
+        mgrew = false
+        mpass = mpass + 1
+        let fj = 0
+        while fj < fn_ [
+            let df2 = disc.files[fj].clone()
+            let fm = compute_mut_params_seeded(df2.program.clone(), mut_params)
+            let sj = 0
+            let sjn = df2.program.body.len()
+            while sj < sjn [
+                match df2.program.body[sj].clone() [
+                    FunDecl(fname2, fparams2, fret2, fbody2, fpub2, ftp2, fasync2) -> [
+                        let pj = 0
+                        let pjn = fparams2.len()
+                        while pj < pjn [
+                            let mkey = fname2.clone() + "::" + fparams2[pj].name.clone()
+                            if fm.contains(mkey.clone()) [
+                                if not mut_params.contains(mkey.clone()) [
+                                    mut_params.insert(mkey, true)
+                                    mut_params.insert(fname2.clone() + "::#" + (pj as Str), true)
+                                    mgrew = true
+                                ]
+                            ]
+                            pj = pj + 1
+                        ]
+                    ]
+                    _ -> [
+                    ]
+                ]
+                sj = sj + 1
+            ]
+            fj = fj + 1
+        ]
     ]
 
     let sigs = ExtraSignatures(functions, function_names, structs, struct_names, enums, enum_names, methods, method_names, mut_params, method_mut_params, extern_fn_names, extern_fn_name_list)
@@ -1996,7 +2025,13 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
             !! stracilibysmy [[bin]] glownej binarki + [dependencies].
             match read_file(cargo_toml_path.clone()) [
                 Ok(existing) -> [
-                    let appended = existing + "\n[[bin]]\nname = \"" + bn2 + "\"\npath = \"src/bin/" + bn2 + ".rs\"\n"
+                    !! NAPRAWIONE 0.5 - ponowny build tego samego crate'a
+                    !! (cache `bit`) nie dubluje juz `[[bin]]` (Cargo:
+                    !! "duplicate binary name").
+                    let appended = existing.clone()
+                    if not str_contains(existing, "path = \"src/bin/" + bn2 + ".rs\"") [
+                        appended = existing + "\n[[bin]]\nname = \"" + bn2 + "\"\npath = \"src/bin/" + bn2 + ".rs\"\n"
+                    ]
                     match write_file(cargo_toml_path.clone(), appended) [
                         Ok(_v) -> [
                         ]
@@ -2005,8 +2040,23 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
                         ]
                     ]
                 ]
-                Err(e) -> [
-                    warnings.push(cargo_toml_path + " (multi-binarka '" + bn2 + "' wymaga, zeby glowny 'cmd/main.hcs' byl zbudowany JAKO PIERWSZY): " + e)
+                Err(_e) -> [
+                    !! NAPRAWIONE 0.5 - `bit build` przekazuje `--bin-name`
+                    !! juz dla GLOWNEJ binarki (kazda binarka ma wlasny
+                    !! `<nazwa>-crate`), wiec Cargo.toml jeszcze nie
+                    !! istnieje. Zamiast ostrzegac (i zostawiac crate bez
+                    !! manifestu -> `cargo: manifest path ... does not exist`)
+                    !! generujemy go od zera i kierujemy `[[bin]]` na
+                    !! `src/bin/<nazwa>.rs`.
+                    let fresh = cargo_toml_text(crate_name, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, needs_native_cpp, needs_wasm_bindgen, force_library, crates_names.clone(), crates_versions.clone(), needs_native_java or needs_native_kotlin, needs_sha256)
+                    fresh = str_replace(fresh, "[[bin]]\nname = \"" + crate_name + "\"\npath = \"src/main.rs\"", "[[bin]]\nname = \"" + bn2 + "\"\npath = \"src/bin/" + bn2 + ".rs\"")
+                    match write_file(cargo_toml_path.clone(), fresh) [
+                        Ok(_v) -> [
+                        ]
+                        Err(e2) -> [
+                            warnings.push(cargo_toml_path + ": " + e2)
+                        ]
+                    ]
                 ]
             ]
         ]
