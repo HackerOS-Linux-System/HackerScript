@@ -14,7 +14,7 @@ get <std:fs> import <create_dir_ok>
 get <std:string> import <str_ends_with::str_join>
 get <std:term> import <c_bold_green::c_bold_red::c_bold_cyan::c_bold_yellow::c_red::c_gray::print_progress_line>
 
-const VERSION: Str = "0.4"
+const VERSION: Str = "0.5"
 
 !!! DODANE w tej rundzie (patrz docs/ROADMAP.md) - `hackerc` byl do tej
 !!! pory calkowicie monochromatyczny (`log("hackerc: ...", ...)`).
