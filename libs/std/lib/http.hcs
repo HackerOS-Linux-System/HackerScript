@@ -25,3 +25,77 @@ fun http_get_ok(url: Str) -> Bool [
         ]
     ]
 ]
+
+!! ---------------------------------------------------------------------
+!! Rozszerzenia 0.5: POST, wlasne naglowki, kod statusu. Zbudowane na
+!! `ureq` 2 (ta sama zaleznosc co http_get). Cialo odpowiedzi MUSI byc UTF-8.
+!! ---------------------------------------------------------------------
+
+!! POST z cialem tekstowym (`Content-Type: text/plain; charset=utf-8`).
+fun http_post(url: Str, body: Str) -> Result<Str, Str> [
+    end http_post_typed(url, body, "text/plain; charset=utf-8")
+]
+
+!! POST z cialem JSON (`Content-Type: application/json`).
+fun http_post_json(url: Str, json: Str) -> Result<Str, Str> [
+    end http_post_typed(url, json, "application/json")
+]
+
+!! POST z dowolnym `Content-Type`. Kod odpowiedzi spoza 2xx daje Err("HTTP <kod>: ...").
+fun http_post_typed(url: Str, body: Str, content_type: Str) -> Result<Str, Str> [
+    let good = false
+    let out = ""
+    native {Rust} [
+        match ureq::post(&url).set("Content-Type", &content_type).send_string(&body) {
+            Ok(resp) => match resp.into_string() {
+                Ok(s) => { good = true; out = s; }
+                Err(e) => { out = format!("odpowiedz nie jest poprawnym UTF-8: {}", e); }
+            },
+            Err(ureq::Error::Status(code, resp)) => {
+                let text = resp.into_string().unwrap_or_default();
+                out = format!("HTTP {}: {}", code, text);
+            }
+            Err(e) => { out = format!("{}", e); }
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err("POST " + url + " nie powiodl sie: " + out)
+]
+
+!! GET z jednym dodatkowym naglowkiem (np. `Authorization`, `Accept`).
+fun http_get_with_header(url: Str, header: Str, value: Str) -> Result<Str, Str> [
+    let good = false
+    let out = ""
+    native {Rust} [
+        match ureq::get(&url).set(&header, &value).call() {
+            Ok(resp) => match resp.into_string() {
+                Ok(s) => { good = true; out = s; }
+                Err(e) => { out = format!("odpowiedz nie jest poprawnym UTF-8: {}", e); }
+            },
+            Err(ureq::Error::Status(code, resp)) => {
+                let text = resp.into_string().unwrap_or_default();
+                out = format!("HTTP {}: {}", code, text);
+            }
+            Err(e) => { out = format!("{}", e); }
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err("GET " + url + " nie powiodl sie: " + out)
+]
+
+!! Kod statusu HTTP odpowiedzi na GET (takze 4xx/5xx); 0 gdy nie udalo sie polaczyc.
+fun http_status(url: Str) -> Int [
+    let code = 0
+    native {Rust} [
+        match ureq::get(&url).call() {
+            Ok(resp) => { code = resp.status() as i64; }
+            Err(ureq::Error::Status(c, _)) => { code = c as i64; }
+            Err(_) => { code = 0; }
+        }
+    ]
+    end code
+]
