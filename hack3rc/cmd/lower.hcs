@@ -53,6 +53,40 @@ fun ty_is_opt(t: Str) -> Bool [
     end ty_starts(t, "O<")
 ]
 
+!!! Result<T, E> w napisie-typie: "R<T,E>". `;` jest separatorem list typow
+!!! (parametry/pola), wiec rozdzielamy po przecinku na glebokosci 0 nawiasow <>.
+fun ty_is_res(t: Str) -> Bool [
+    end ty_starts(t, "R<")
+]
+
+!!! Czesc Result: 0 = T (Ok), 1 = E (Err).
+fun res_part(t: Str, which: Int) -> Str [
+    let inner = ty_inner(t)
+    let depth = 0
+    let cut = -1
+    let i = 0
+    while i < inner.len() [
+        let c = inner.char_at(i)
+        if c == "<" [
+            depth = depth + 1
+        ]
+        if c == ">" [
+            depth = depth - 1
+        ]
+        if c == "," and depth == 0 and cut < 0 [
+            cut = i
+        ]
+        i = i + 1
+    ]
+    if cut < 0 [
+        end "?"
+    ]
+    if which == 0 [
+        end inner.slice(0, cut)
+    ]
+    end inner.slice(cut + 1, inner.len())
+]
+
 fun ty_is_struct(t: Str) -> Bool [
     end ty_starts(t, "S:")
 ]
@@ -64,7 +98,7 @@ fun ty_is_enum(t: Str) -> Bool [
 !!! Typ, ktorego wartosc trzeba kopiowac gleboko w `.clone()`
 !!! (Str jest niezmienny, wiec jest wspoldzielony).
 fun ty_deep(t: Str) -> Bool [
-    end ty_is_list(t.clone()) or ty_is_opt(t.clone()) or ty_is_struct(t.clone()) or ty_is_enum(t.clone())
+    end ty_is_list(t.clone()) or ty_is_opt(t.clone()) or ty_is_res(t.clone()) or ty_is_struct(t.clone()) or ty_is_enum(t.clone())
 ]
 
 !!! Wnetrze `L<...>` / `O<...>`.
@@ -108,6 +142,9 @@ fun tag_name(t: Str) -> Str [
     if ty_is_opt(t.clone()) [
         end "Option<" + tag_name(ty_inner(t.clone())) + ">"
     ]
+    if ty_is_res(t.clone()) [
+        end "Result<" + tag_name(res_part(t.clone(), 0)) + ", " + tag_name(res_part(t.clone(), 1)) + ">"
+    ]
     end "?"
 ]
 
@@ -117,7 +154,7 @@ fun ty_mangle(t: Str) -> Str [
     let i = 0
     while i < t.len() [
         let c = t.char_at(i)
-        if c == "<" or c == ">" or c == ":" [
+        if c == "<" or c == ">" or c == ":" or c == "," [
             out = out + "_"
         ] else [
             out = out + c
@@ -553,6 +590,31 @@ impl Lw [
         if n == "Str" [
             end "s"
         ]
+        if n == "Result" [
+            let rok = "?"
+            let rerr = "?"
+            match tr.generic.clone() [
+                Some(g1) -> [
+                    rok = self.type_of_ref(g1.clone())
+                ]
+                None -> [
+                    rok = "?"
+                ]
+            ]
+            match tr.generic2.clone() [
+                Some(g2) -> [
+                    rerr = self.type_of_ref(g2.clone())
+                ]
+                None -> [
+                    rerr = "?"
+                ]
+            ]
+            if rok == "?" or rerr == "?" [
+                self.err_h("H0300", "typ 'Result' wymaga dwoch parametrow (np. Result<Int, Str>)", n.clone())
+                end "?"
+            ]
+            end "R<" + rok + "," + rerr + ">"
+        ]
         if n == "List" or n == "Option" [
             let inner = "?"
             match tr.generic.clone() [
@@ -578,7 +640,7 @@ impl Lw [
         if self.find_in(self.en_names.clone(), n.clone()) >= 0 [
             end "E:" + n
         ]
-        self.err_h("H0301", "nieobslugiwany typ '" + n + "' (dozwolone: Int, Float, Bool, Str, List<T>, Option<T>, struct, enum)", n.clone())
+        self.err_h("H0301", "nieobslugiwany typ '" + n + "' (dozwolone: Int, Float, Bool, Str, List<T>, Option<T>, Result<T, E>, struct, enum)", n.clone())
         end "?"
     ]
 
@@ -662,6 +724,23 @@ impl Lw [
         end self.build_obj(16, sym, tag, used, vals)
     ]
 
+    !!! Result<T, E>: tag 0 = Ok(T), 1 = Err(E) (payload w slowie 1).
+    !!! Osobny deskryptor na wariant, bo maski wskaznikow roznia sie typem.
+    fun res_alloc(self, rty: Str, is_err: Bool, val_ir: Str) -> Str [
+        let which = 0
+        let vname = "ok"
+        if is_err [
+            which = 1
+            vname = "err"
+        ]
+        let pty = res_part(rty.clone(), which)
+        let sym = "hks_d_R_" + vname + "_" + ty_mangle(pty.clone())
+        let dtypes: List<Str> = [pty.clone()]
+        self.need_desc(sym.clone(), 2, self.ptr_mask(dtypes.clone(), 1))
+        let vals: List<Str> = [val_ir]
+        end self.build_obj(16, sym, which, dtypes, vals)
+    ]
+
     !!! ---------------------------------------------------------------
     !!! Wyrazenia
     !!! ---------------------------------------------------------------
@@ -685,6 +764,27 @@ impl Lw [
                         end self.bad()
                     ]
                     end Ex(self.option_alloc(ty_inner(expected.clone()), false, ""), expected.clone())
+                ]
+                if (nm == "Ok" or nm == "ok" or nm == "Err" or nm == "err") and args.len() == 1 and not self.is_local(nm.clone()) [
+                    let is_e = nm == "Err" or nm == "err"
+                    if not ty_is_res(expected.clone()) [
+                        self.err_h("H0414", nm + "() wymaga znanego typu Result<T, E> (np. 'let x: Result<Int, Str> = Ok(1)' albo 'end Ok(1)' w funkcji zwracajacej Result)", nm.clone())
+                        end self.bad()
+                    ]
+                    let rwhich = 0
+                    if is_e [
+                        rwhich = 1
+                    ]
+                    let rwant = res_part(expected.clone(), rwhich)
+                    let rx = self.lower_expr_exp(args[0].clone(), rwant.clone())
+                    if rx.ty == "?" [
+                        end rx
+                    ]
+                    if rx.ty != rwant [
+                        self.err_h("H0415", nm + "(): oczekiwano " + tag_name(rwant.clone()) + ", jest " + tag_name(rx.ty.clone()), nm.clone())
+                        end self.bad()
+                    ]
+                    end Ex(self.res_alloc(expected.clone(), is_e, rx.ir.clone()), expected.clone())
                 ]
                 if nm == "some" and args.len() == 1 and not self.is_local("some") [
                     let want_inner = ""
@@ -871,9 +971,8 @@ impl Lw [
                 self.err("H0050", "null nie jest obslugiwany w hack3rc")
                 end self.bad()
             ]
-            TryOp(_a) -> [
-                self.err("H0053", "operator '?' nie jest obslugiwany w hack3rc (brak Result)")
-                end self.bad()
+            TryOp(ta) -> [
+                end self.lower_try(ta.clone())
             ]
         ]
     ]
@@ -1221,6 +1320,17 @@ impl Lw [
                 end Ex("(cmp " + cmp_op + " i " + ir_load("i", o.ir.clone(), 0) + " (i 0))", "b")
             ]
             self.err_h("H0471", "Option nie ma metody '" + m + "' (dostepne: is_some, is_none, clone; uzyj match)", hint.clone())
+            end self.bad()
+        ]
+        if ty_is_res(o.ty.clone()) [
+            if (m == "is_ok" or m == "is_err") and args.len() == 0 [
+                let rcmp = "eq"
+                if m == "is_err" [
+                    rcmp = "ne"
+                ]
+                end Ex("(cmp " + rcmp + " i " + ir_load("i", o.ir.clone(), 0) + " (i 0))", "b")
+            ]
+            self.err_h("H0474", "Result nie ma metody '" + m + "' (dostepne: is_ok, is_err, clone; uzyj match albo '?')", hint.clone())
             end self.bad()
         ]
         if ty_is_struct(o.ty.clone()) or ty_is_enum(o.ty.clone()) [
@@ -1764,20 +1874,60 @@ impl Lw [
         end head + " (while " + cond + " (" + bind + inner + ") (" + step + "))"
     ]
 
-    !!! `match` na enumie albo Option: lancuch if po tagu, wiazanie pol w armach.
+    !!! Operator `?`: dla Result<T, E> przy Err zwraca z funkcji Err(e) (ta sama E,
+    !!! funkcja musi zwracac Result<_, E>); dla Option<T> przy None zwraca none().
+    !!! Wynik wyrazenia to payload (T). Wczesny `ret` siedzi w `(seq ...)`.
+    fun lower_try(self, a: Expr) -> Ex [
+        let x = self.lower_expr(a.clone())
+        if x.ty == "?" [
+            end x
+        ]
+        let tid = self.fresh()
+        if ty_is_res(x.ty.clone()) [
+            if not ty_is_res(self.cur_ret.clone()) [
+                self.err_h("H0054", "'?' na Result mozna uzyc tylko w funkcji zwracajacej Result<_, E>, ta zwraca " + tag_name(self.cur_ret.clone()), "?")
+                end self.bad()
+            ]
+            let e_in = res_part(x.ty.clone(), 1)
+            let e_out = res_part(self.cur_ret.clone(), 1)
+            if e_in != e_out [
+                self.err_h("H0055", "'?': typ bledu " + tag_name(e_in.clone()) + " nie zgadza sie z typem bledu funkcji " + tag_name(e_out.clone()) + " (brak automatycznej konwersji)", "?")
+                end self.bad()
+            ]
+            let t_ok = res_part(x.ty.clone(), 0)
+            let ret_err = self.res_alloc(self.cur_ret.clone(), true, ir_load(e_in.clone(), "(v " + tid + ")", 8))
+            let ir_r = "(seq ((let " + tid + " p " + x.ir + ") (if (cmp eq i " + ir_load("i", "(v " + tid + ")", 0) + " (i 1)) ((ret " + ret_err + ")) ())) " + ir_load(t_ok.clone(), "(v " + tid + ")", 8) + ")"
+            end Ex(ir_r, t_ok)
+        ]
+        if ty_is_opt(x.ty.clone()) [
+            if not ty_is_opt(self.cur_ret.clone()) [
+                self.err_h("H0056", "'?' na Option mozna uzyc tylko w funkcji zwracajacej Option<_>, ta zwraca " + tag_name(self.cur_ret.clone()), "?")
+                end self.bad()
+            ]
+            let o_in = ty_inner(x.ty.clone())
+            let ret_none = self.option_alloc(ty_inner(self.cur_ret.clone()), false, "")
+            let ir_o = "(seq ((let " + tid + " p " + x.ir + ") (if (cmp eq i " + ir_load("i", "(v " + tid + ")", 0) + " (i 0)) ((ret " + ret_none + ")) ())) " + ir_load(o_in.clone(), "(v " + tid + ")", 8) + ")"
+            end Ex(ir_o, o_in)
+        ]
+        self.err_h("H0053", "operator '?' dziala na Result<T, E> i Option<T>, jest " + tag_name(x.ty.clone()), "?")
+        end self.bad()
+    ]
+
+    !!! `match` na enumie, Option albo Result: lancuch if po tagu, wiazanie pol w armach.
     fun lower_match(self, subject: Expr, arms: List<MatchArm>) -> Str [
         let sub = self.lower_expr(subject.clone())
         if sub.ty == "?" [
             end ""
         ]
         let is_opt = ty_is_opt(sub.ty.clone())
-        if not is_opt and not ty_is_enum(sub.ty.clone()) [
-            self.err_h("H0420", "'match' obsluguje enum i Option, jest " + tag_name(sub.ty.clone()), "match ")
+        let is_res = ty_is_res(sub.ty.clone())
+        if not is_opt and not is_res and not ty_is_enum(sub.ty.clone()) [
+            self.err_h("H0420", "'match' obsluguje enum, Option i Result, jest " + tag_name(sub.ty.clone()), "match ")
             end ""
         ]
         let ename = ""
         let total = 2
-        if not is_opt [
+        if not is_opt and not is_res [
             ename = tag_name(sub.ty.clone())
             total = 0
             let c = 0
@@ -1804,7 +1954,16 @@ impl Lw [
             ] else [
                 let tag = -1
                 let ftypes: List<Str> = []
-                if is_opt [
+                if is_res [
+                    if arm.variant == "Ok" [
+                        tag = 0
+                        ftypes.push(res_part(sub.ty.clone(), 0))
+                    ]
+                    if arm.variant == "Err" [
+                        tag = 1
+                        ftypes.push(res_part(sub.ty.clone(), 1))
+                    ]
+                ] elif is_opt [
                     if arm.variant == "None" [
                         tag = 0
                     ]
