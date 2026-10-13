@@ -1,0 +1,98 @@
+get <crates:sha2::0.10>
+
+!! encoding - kodowanie hex i HMAC-SHA256 (std 0.5).
+!! Uzycie: get <std:cybersecurity::encoding>
+
+!! Bajty UTF-8 napisu jako male cyfry hex ("Hi" -> "4869").
+fun hex_encode(text: Str) -> Str [
+    let out = ""
+    native {Rust} [
+        out = text.as_bytes().iter().map(|b| format!("{:02x}", b)).collect::<String>();
+    ]
+    end out
+]
+
+!! Odwrotnosc `hex_encode`; Err przy nieparzystej dlugosci, znaku spoza 0-9a-f lub gdy
+!! wynik nie jest poprawnym UTF-8.
+fun hex_decode(hex: Str) -> Result<Str, Str> [
+    let good = false
+    let out = ""
+    native {Rust} [
+        let h = hex.trim();
+        if h.len() % 2 != 0 {
+            out = "nieparzysta dlugosc".to_string();
+        } else {
+            let mut bytes: Vec<u8> = Vec::new();
+            let mut bad = false;
+            let raw = h.as_bytes();
+            let mut i = 0;
+            while i < raw.len() {
+                let pair = &h[i..i + 2];
+                match u8::from_str_radix(pair, 16) {
+                    Ok(b) => bytes.push(b),
+                    Err(_) => { bad = true; break; }
+                }
+                i += 2;
+            }
+            if bad {
+                out = "niepoprawny znak hex".to_string();
+            } else {
+                match String::from_utf8(bytes) {
+                    Ok(s) => { good = true; out = s; }
+                    Err(_) => { out = "wynik nie jest poprawnym UTF-8".to_string(); }
+                }
+            }
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err(out)
+]
+
+!! SHA-256 napisu jako hex (64 znaki).
+fun sha256_text_hex(text: Str) -> Str [
+    let out = ""
+    native {Rust} [
+        use sha2::{Digest, Sha256};
+        out = Sha256::digest(text.as_bytes()).iter().map(|b| format!("{:02x}", b)).collect::<String>();
+    ]
+    end out
+]
+
+!! HMAC-SHA256 (RFC 2104) jako hex; klucz i wiadomosc to bajty UTF-8 napisow.
+fun hmac_sha256_hex(key: Str, message: Str) -> Str [
+    let out = ""
+    native {Rust} [
+        use sha2::{Digest, Sha256};
+        let mut k: Vec<u8> = key.as_bytes().to_vec();
+        if k.len() > 64 {
+            k = Sha256::digest(&k).to_vec();
+        }
+        k.resize(64, 0);
+        let mut ipad: Vec<u8> = k.iter().map(|b| b ^ 0x36).collect();
+        let mut opad: Vec<u8> = k.iter().map(|b| b ^ 0x5c).collect();
+        ipad.extend_from_slice(message.as_bytes());
+        let inner = Sha256::digest(&ipad);
+        opad.extend_from_slice(&inner);
+        out = Sha256::digest(&opad).iter().map(|b| format!("{:02x}", b)).collect::<String>();
+    ]
+    end out
+]
+
+!! Losowe bajty z /dev/urandom jako hex (2*n znakow); Linux/Unix. Pusty napis gdy brak urzadzenia.
+fun random_hex(n: Int) -> Str [
+    let out = ""
+    native {Rust} [
+        use std::io::Read;
+        if n > 0 {
+            if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+                let mut buf = vec![0u8; n as usize];
+                if f.read_exact(&mut buf).is_ok() {
+                    out = buf.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+                }
+            }
+        }
+    ]
+    end out
+]
