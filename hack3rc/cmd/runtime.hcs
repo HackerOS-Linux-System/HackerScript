@@ -1,19 +1,5 @@
 get <std:string> import <str_join>
 
-!!! hack3rc 0.2 - runtime linkowany z kazdym programem.
-!!!
-!!! Zawiera: wejscie/wyjscie (log, read_int, exit), panic (kod 101),
-!!! napisy, listy oraz KONSERWATYWNY ODSMIECACZ PAMIECI (mark-sweep:
-!!! skanuje stos, rejestry i zawartosc obiektow; wspiera wskazniki
-!!! wewnetrzne). Obiekty (struct/enum/lista/Option) maja naglowek
-!!! {rozmiar, deskryptor, mark}; deskryptor `{rodzaj, slowa, maska}`
-!!! (generowany przez kompilator jako `(data ...)`) mowi `hks_clone`,
-!!! ktore pola kopiowac gleboko. Zmienne srodowiskowe do diagnostyki:
-!!! HKS_GC_STRESS=1 (GC przy kazdej alokacji), HKS_GC_MIN_KB=<n> (prog).
-!!!
-!!! Tekst C jest zapisywany przez driver do katalogu tymczasowego i
-!!! kompilowany przez `cc` razem z plikiem obiektowym z Cranelifta
-!!! (to samo `cc` sluzy do linkowania).
 fun runtime_c_source() -> Str [
     let l: List<Str> = []
     l.push("#include <stdio.h>")
