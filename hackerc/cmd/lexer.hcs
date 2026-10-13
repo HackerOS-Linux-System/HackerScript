@@ -56,6 +56,27 @@ fun is_alnum(c: Str) -> Bool [
 !!! extern/region/c/cpp". `use` DODANE jako nowe slowo kluczowe
 !!! wylacznie dla `get <extern:...> use <tryb>` (patrz
 !!! `parse_get_import()`).
+!!! Slowa zarezerwowane przez Rust, ktore NIE sa slowami kluczowymi
+!!! HackerScript (np. `loop`, `ref`, `move`, `type`). Uzyte jako nazwa
+!!! zmiennej/pola/funkcji dawaly niepoprawny Rust (`let mut loop: i64`).
+!!! Lekser dopisuje do takiej nazwy `_` (loop -> loop_) - spojnie w calym
+!!! pliku, wiec program dziala bez zmian. Bloki `native {...}` sa tekstem
+!!! surowym i nie sa tu przepisywane.
+fun is_rust_reserved(w: Str) -> Bool [
+    let kws = ["loop", "ref", "move", "mut", "static", "unsafe", "where",
+               "yield", "dyn", "abstract", "become", "box", "do", "final",
+               "macro", "override", "priv", "try", "typeof", "unsized",
+               "virtual", "crate", "super", "extern", "trait", "type"]
+    let i = 0
+    while i < kws.len() [
+        if kws[i] == w [
+            end true
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
 fun is_keyword(w: Str) -> Bool [
     let kws = ["fun", "let", "const", "if", "else", "elif", "while", "for", "in",
                "return", "end", "get", "import", "using", "direct", "manual",
@@ -331,6 +352,8 @@ fun tokenize(source: Str) -> List<Token> [
             let text = src.slice(i, j)
             if is_keyword(text) [
                 tokens.push(Token(Keyword, text, line, col, false))
+            ] elif is_rust_reserved(text) [
+                tokens.push(Token(Ident, text + "_", line, col, false))
             ] else [
                 tokens.push(Token(Ident, text, line, col, false))
             ]
