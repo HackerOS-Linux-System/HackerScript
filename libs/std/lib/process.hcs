@@ -54,3 +54,54 @@ fun run_command_combined_labeled(program: Str, args: List<Str>) -> Str [
 fun run_command_inherit_ok(program: Str, args: List<Str>) -> Bool [
     end run_command_inherit(program, args) == 0
 ]
+
+!! ---------------------------------------------------------------------
+!! Rozszerzenia 0.5: osobne stdout/stderr + kod wyjscia, stdin z tekstu.
+!! ---------------------------------------------------------------------
+
+struct CmdOutput [
+    code: Int,
+    stdout: Str,
+    stderr: Str
+]
+
+!! Uruchamia `program` z `args` (BEZ powloki) i zwraca kod wyjscia (-1 gdy zabity
+!! sygnalem) oraz osobno stdout i stderr. Err tylko gdy nie udalo sie uruchomic procesu.
+fun run_capture(program: Str, args: List<Str>) -> Result<CmdOutput, Str> [
+    end run_capture_input(program, args, "")
+]
+
+!! Jak `run_capture`, ale karmi stdin procesu tekstem `input` (np. `sort`, `wc -l`).
+fun run_capture_input(program: Str, args: List<Str>, input: Str) -> Result<CmdOutput, Str> [
+    let started = false
+    let code = 0
+    let so = ""
+    let se = ""
+    let why = ""
+    native {Rust} [
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        match Command::new(&program).args(args.iter()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+            Ok(mut child) => {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let data = input.clone();
+                    std::thread::spawn(move || { let _ = stdin.write_all(data.as_bytes()); });
+                }
+                match child.wait_with_output() {
+                    Ok(o) => {
+                        started = true;
+                        code = o.status.code().unwrap_or(-1) as i64;
+                        so = String::from_utf8_lossy(&o.stdout).to_string();
+                        se = String::from_utf8_lossy(&o.stderr).to_string();
+                    }
+                    Err(e) => { why = format!("{}", e); }
+                }
+            }
+            Err(e) => { why = format!("{}", e); }
+        }
+    ]
+    if started [
+        end ok(CmdOutput(code, so, se))
+    ]
+    end err("nie udalo sie uruchomic '" + program + "': " + why)
+]
