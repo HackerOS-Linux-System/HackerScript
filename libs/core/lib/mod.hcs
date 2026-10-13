@@ -4,4 +4,4 @@
 !!   get <core:memory::pool_allocator>   - alokator pulowy z free-list
 
 !! Wersja biblioteki core (zgodna z wersja kompilatora).
-const CORE_VERSION: Str = "0.4"
+const CORE_VERSION: Str = "0.5"
