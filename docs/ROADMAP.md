@@ -512,3 +512,11 @@ asocjacyjne, interpolacja i async w `hack3rc`; pozycje (linia/kolumna) w AST;
 `Dict.items()`; `log()` dla struktur/enumów; LSP `rename`; zapis w `toml`;
 `isatty`; kanały JS bez ręcznego `await`; statyczne linkowanie CPythona;
 weryfikacja `crosscompile`/`arc`; podział `codegen.hcs`.
+
+
+## Aktualizacja 0.5 (2026-10-12)
+
+Zrobione i sprawdzone w tej rundzie: patrz `CHANGELOG.md` (wersje 0.5, escapowanie słów Rusta w lekserze,
+patch portu Hacker Lang, nowe workflowy, testy, brakujące dokumenty). Lista rzeczy nadal otwartych jest
+na końcu `CHANGELOG.md` i zastępuje starsze listy "Nadal otwarte" powyżej tam, gdzie są sprzeczne.
+Uwaga: sekcje 1 (brak ParseError / numerów linii) i duplikat wpisu `get <work:...>` są historyczne.
