@@ -252,3 +252,32 @@ fun term_set_raw(enable: Bool) -> Bool [
     ]
     end run_command_inherit_ok("stty", ["sane"])
 ]
+
+!! ---------------------------------------------------------------------
+!! Rozszerzenia 0.5: wykrywanie terminala (std::io::IsTerminal).
+!! ---------------------------------------------------------------------
+
+!! Czy stdout jest terminalem (false przy przekierowaniu do pliku/potoku).
+fun term_stdout_is_tty() -> Bool [
+    let t = false
+    native {Rust} [
+        use std::io::IsTerminal;
+        t = std::io::stdout().is_terminal();
+    ]
+    end t
+]
+
+!! Czy stdin jest terminalem (false gdy dane przychodza z potoku).
+fun term_stdin_is_tty() -> Bool [
+    let t = false
+    native {Rust} [
+        use std::io::IsTerminal;
+        t = std::io::stdin().is_terminal();
+    ]
+    end t
+]
+
+!! Kolory wlaczone, gdy stdout to terminal i nie ustawiono NO_COLOR.
+fun term_use_color() -> Bool [
+    end term_stdout_is_tty() and term_color_enabled()
+]
