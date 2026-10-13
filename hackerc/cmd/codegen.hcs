@@ -663,7 +663,7 @@ fun char_indexed_str_params(body: List<Stmt>, str_param_names: List<Str>, sigs: 
     !! (`AssignStmt`) gdziekolwiek w ciele funkcji, KAZDE kolejne
     !! `.slice()`/`.char_at()` na X nadal czyta ze STAREGO cache -
     !! dajac cichy zly wynik zamiast bledu kompilacji (zaobserwowane w
-    !! `virus/cmd/build.hcs::vira_split_dir_libname`: `name =
+    !! `bit (build)::vira_split_dir_libname`: `name =
     !! name.slice(3, ...)` [usuniecie "lib"], potem `name =
     !! name.slice(0, dot)` [obciecie do kropki] - DRUGIE `.slice()`
     !! po cichu indeksowalo w ORYGINALNA, nieobcieta nazwe, dajac np.
@@ -1845,15 +1845,15 @@ struct CodeGen [
     !! `native` `{C++}` `[ ... ]` (patrz `gen_native()`) - flaguje, ze
     !! wygenerowany crate potrzebuje zaleznosci budujacej i lacza
     !! wbudowanego C++ (`cc` w `[build-dependencies]`, patrz
-    !! `virus/cmd/build.hcs`).
+    !! `bit (build)`).
     needs_native_cpp: Bool,
     !! DODANE - surowe zrodlo C++ per wygenerowana funkcja
     !! (`__hks_native_cpp_block_N` -> tekst), zbierane obok
     !! `needs_native_cpp` w `gen_native()` - `project.hcs::build_project`
     !! zapisuje kazdy wpis do `native/<fn_name>.cpp` i dopisuje linie do
     !! `.hks-extern-links.txt` (kind "native_cpp"), zeby
-    !! `virus build` mogl je skompilowac/zlinkowac przez `cc::Build`
-    !! (patrz `virus/cmd/build.hcs::build_wire_extern_dependencies`).
+    !! `bit build` mogl je skompilowac/zlinkowac przez `cc::Build`
+    !! (patrz `bit (build)::build_wire_extern_dependencies`).
     !! `native_cpp_order` obok (kolejnosc kluczy) - Dict nie ma `.keys()`
     !! w tym bootstrapie (patrz "Ograniczenia" w typeinfer.hcs), parytet
     !! z para `hot_reload_order`/`hot_reload_bodies` nizej.
@@ -1893,7 +1893,7 @@ struct CodeGen [
     native_java_sources: Dict<Str, Str>,
     native_java_order: List<Str>,
     !! `get <java:sciezka.jar>` - wpisy classpath (kolejnosc zachowana,
-    !! duplikaty dozwolone - `virus build` sam je odduplikuje przy
+    !! duplikaty dozwolone - `bit build` sam je odduplikuje przy
     !! skladaniu `-cp`) potrzebne PRZY KOMPILACJI `native {java}
     !! [ ... ]` (javac -cp) I w runtime (`-Djava.class.path`).
     java_classpath_entries: List<Str>,
@@ -1903,7 +1903,7 @@ struct CodeGen [
     !! patrz transpiler.hcs - Kotlin kompiluje sie do TEGO SAMEGO
     !! bajtkodu JVM co Java, wiec RUNTIME jest identyczny; rozni sie
     !! TYLKO kompilator (`kotlinc` zamiast `javac`, patrz
-    !! virus/cmd/build.hcs) i to, ze bajtkod Kotlina wymaga
+    !! bit (build)) i to, ze bajtkod Kotlina wymaga
     !! `kotlin-stdlib.jar` na classpath w RUNTIME - stad osobna flaga
     !! `needs_native_kotlin`, mimo wspoldzielonego `java_classpath_entries`
     !! dla wpisow `get <java:...>`/`get <kotlin:...>` (oba silniki
@@ -2498,7 +2498,7 @@ impl CodeGen [
             end "std::fs::read_to_string(&" + self.gen_expr(args[0]) + ").map_err(|e| e.to_string())"
         ]
         !! ROZBUDOWA (ta runda, patrz docs/LSP.md) - czytanie ZE STDIN,
-        !! potrzebne dla `hackerc lsp`/`virus lsp` (ramkowanie JSON-RPC:
+        !! potrzebne dla `hackerc lsp`/`bit lsp` (ramkowanie JSON-RPC:
         !! naglowki linia po linii az do pustej linii, potem DOKLADNIE
         !! `Content-Length` bajtow tresci). Oba dziela ten sam globalny
         !! uchwyt `std::io::stdin()` (w Ruscie to jest bezpieczne -
@@ -2593,7 +2593,7 @@ impl CodeGen [
             let args_expr2 = self.gen_expr(args[1])
             end "(|| -> String {\n        let __hks_cmd_out2 = match std::process::Command::new(&" + program_expr2 + ")\n            .args(" + args_expr2 + ")\n            .output() {\n            Ok(o) => o,\n            Err(e) => return e.to_string(),\n        };\n        let mut __hks_combined = String::from_utf8_lossy(&__hks_cmd_out2.stdout).to_string();\n        __hks_combined.push_str(&String::from_utf8_lossy(&__hks_cmd_out2.stderr));\n        __hks_combined\n    })()"
         ]
-        !! ROZBUDOWA (ta runda, patrz docs/VIRUS.md - "virus lsp") -
+        !! ROZBUDOWA (ta runda, patrz docs/BIT.md - "bit lsp") -
         !! `run_command_inherit(program, argumenty) -> Int` -
         !! `Stdio::inherit()` na WSZYSTKICH trzech strumieniach dziecka
         !! (w odroznieniu od `run_command`/`run_command_combined`
@@ -2619,8 +2619,8 @@ impl CodeGen [
         !! - `now_ms()` - biezacy czas w milisekundach od epoki Unix, jako
         !! `Int`. Tylko `std::time` (bez dodatkowego crate, w
         !! odroznieniu od `sha256_hex` powyzej) - uzywane do mierzenia
-        !! czasu trwania krokow builda w `virus` (patrz
-        !! `virus/cmd/progress.hcs`).
+        !! czasu trwania krokow builda w `bit` (patrz
+        !! `bit`, modul postepu).
         if ident_name == "now_ms" and args.len() == 0 [
             end "(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|__d| __d.as_millis() as i64).unwrap_or(0))"
         ]
@@ -3333,7 +3333,7 @@ impl CodeGen [
     !!! surowego tekstu Pythona ZE ZRODLA `.hcs` PRZED tokenizacja
     !!! (`transpiler.hcs::extract_direct_blocks`). STATUS (ta sesja):
     !!! ekstrakcja BYLA juz zaimplementowana, ale `project.hcs`
-    !!! (sciezka wieloplikowa uzywana przez `hackerc build`/`virus
+    !!! (sciezka wieloplikowa uzywana przez `hackerc build`/`bit
     !!! build`) gubila jej wynik - `DiscoveredFile` nie mial pola na
     !!! `blocks`, a `transpile_program_with_extra` bylo wolane z `[]`
     !!! na sztywno. Naprawione + zweryfikowane end-to-end (patrz
@@ -3465,16 +3465,45 @@ impl CodeGen [
     !!! (build-time), tak samo jak `rquickjs-sys` kompiluje C QuickJS:
     !!! surowy kod C++ jest zawijany jako cialo
     !!! `extern "C" void __hks_native_cpp_block_<idx>()` i zapisywany
-    !!! przez `virus build` do osobnego `.cpp` w wygenerowanym crate,
+    !!! przez `bit build` do osobnego `.cpp` w wygenerowanym crate,
     !!! kompilowanego crate'em `cc` (`.cpp(true)`, wymaga g++/clang++ w
-    !!! srodowisku budujacym - patrz `virus/cmd/build.hcs`) - `hackerc`
+    !!! srodowisku budujacym - patrz `bit (build)`) - `hackerc`
     !!! tutaj emituje TYLKO deklaracje FFI + wywolanie, samo zapisanie
-    !!! `.cpp`/wpiecie do `cc::Build` robi `virus build`
+    !!! `.cpp`/wpiecie do `cc::Build` robi `bit build`
     !!! (`needs_native_cpp` nizej sygnalizuje to project.hcs/build.hcs,
     !!! parytet z `needs_native_js`/`needs_pyo3`). Nieznany `engine`
     !!! (inny niz "JavaScript"/"C++") -> tylko komentarz w
     !!! wygenerowanym Ruscie, bez polamanego kodu (parytet z
     !!! fallbackiem `gen_get_import` dla nieznanego `source`).
+    !!! PATCH (port Hacker Lang): `native {Rust} [ ... ]` NA POZIOMIE MODULU
+    !!! - tresc wklejana DOSLOWNIE jako itemy Rusta (struct/enum/impl/const/
+    !!! use/mod...), bez otaczajacego `{ }`. Pozwala zachowac oryginalne
+    !!! typy Rusta (usize, u32, char, ...) ktorych hcs nie wyraza.
+    fun gen_native_toplevel(self, idx_text: Str) [
+        let raw = ""
+        match self.native_blocks.fetch(idx_text) [
+            Some(r) -> [
+                raw = r
+            ]
+            None -> [
+            ]
+        ]
+        let engine = ""
+        match self.native_engines.fetch(idx_text) [
+            Some(e) -> [
+                engine = e
+            ]
+            None -> [
+            ]
+        ]
+        if engine == "Rust" [
+            self.emit(raw)
+            end
+        ]
+        log("[hackerc-self] codegen: na poziomie modulu dozwolony tylko native {Rust} [ ... ]")
+        end
+    ]
+
     fun gen_native(self, idx_text: Str) [
         let raw = ""
         match self.native_blocks.fetch(idx_text) [
@@ -3532,9 +3561,9 @@ impl CodeGen [
         !!! "wolnostojacej funkcji `extern "C"`" - kazdy kod Javy MUSI
         !!! byc CIALEM METODY jakiejs klasy. Surowy tekst bloku staje
         !!! sie wiec cialem statycznej metody `run()` SYNTETYCZNEJ
-        !!! klasy publicznej `HksNativeJavaN` - `virus build` kompiluje
+        !!! klasy publicznej `HksNativeJavaN` - `bit build` kompiluje
         !!! ja `javac`iem do `java_classes/` (patrz
-        !!! `virus/cmd/build.hcs`), a ten kod w runtime laduje jedna,
+        !!! `bit (build)`), a ten kod w runtime laduje jedna,
         !!! WSPOLNA (na caly PROCES - JNI pozwala na TYLKO JEDNA JVM na
         !!! proces) embedded JVM przez `hks_get_jvm()` (funkcja pomocnicza
         !!! emitowana raz w naglowku pliku, patrz transpiler.hcs) i
@@ -3565,7 +3594,7 @@ impl CodeGen [
         !!! z `//export` - WSZYSTKIE takie bloki projektu trafiaja do
         !!! JEDNEGO pliku `go/hks_go.go` (Go nie pozwala zlinkowac dwoch
         !!! archiwow c-archive z osobnymi runtime'ami), kompilowanego
-        !!! przez `virus build` (`go build -buildmode=c-archive`) do
+        !!! przez `bit build` (`go build -buildmode=c-archive`) do
         !!! `libhksgo.a` i linkowanego STATYCZNIE (jak `{C++}`).
         !!! Importy Go deklaruje sie przez `get <go:pakiet>`.
         if engine == "go" or engine == "Go" or engine == "golang" [
@@ -4663,7 +4692,10 @@ impl CodeGen [
             ]
         ]
         let module = flat_include_module_name(effective_path)
-        self.emit("use crate::" + module + "::*;")
+        !! `pub use` zamiast `use` - odsprzega itemy wlaczonego pliku az do
+        !! korzenia crate'a (aliasy `hl_parser`/`hl_core` w `native {Rust}` na
+        !! poziomie modulu oraz widocznosc z kazdego pliku; port Hacker Lang).
+        self.emit("pub use crate::" + module + "::*;")
     ]
 
     fun gen_get_import(self, source: Str, name: Str, version: Option<Str>, details: List<Str>) [
@@ -4674,12 +4706,12 @@ impl CodeGen [
         !!! samego crate'a (patrz Discovery.resolve), wiec tu trzeba
         !!! juz tylko wyemitowac `use crate::<flat_module_name>::*;`
         !!! (albo `::{a, b};` dla `get <work:x> import <a::b>`).
-        if source == "std" or source == "core" or source == "selfhost" or source == "virus" or source == "bit" or source == "work" or source == "hlib" [
+        if source == "std" or source == "core" or source == "selfhost" or source == "bit" or source == "work" or source == "hlib" [
             let module = flat_module_name(source, name.clone(), version)
             if details.len() > 0 [
-                self.emit("use crate::" + module + "::{" + self.join_binds(details) + "};")
+                self.emit("pub use crate::" + module + "::{" + self.join_binds(details) + "};")
             ] else [
-                self.emit("use crate::" + module + "::*;")
+                self.emit("pub use crate::" + module + "::*;")
             ]
             end
         ]
@@ -4723,13 +4755,13 @@ impl CodeGen [
             ]
             self.pending_extern_lib = some(name.clone())
             self.pending_extern_mode = some(mode.clone())
-            self.emit("// get <extern:" + name + "> use <" + mode + "> - nastepny 'region [ ... ]' zostanie polaczony z ta biblioteka (" + mode + "); samo linkowanie (.so/.a -> rustc-link-lib) robi 'virus build', patrz virus/cmd/build.hcs")
+            self.emit("// get <extern:" + name + "> use <" + mode + "> - nastepny 'region [ ... ]' zostanie polaczony z ta biblioteka (" + mode + "); samo linkowanie (.so/.a -> rustc-link-lib) robi 'bit build', patrz bit (build)")
             end
         ]
         !!! ZMIANA 0.3 - `get <c:nazwa>`/`get <cpp:nazwa>`: deklaruje
         !!! zaleznosc od biblioteki C/C++ kompilowanej/linkowanej przez
-        !!! `virus build` (crate `cc` w `[build-dependencies]`, `.cpp
-        !!! (true)` dla `cpp` - patrz `virus/cmd/build.hcs`). Sama
+        !!! `bit build` (crate `cc` w `[build-dependencies]`, `.cpp
+        !!! (true)` dla `cpp` - patrz `bit (build)`). Sama
         !!! deklaracja `get` NIE tworzy sygnatur wywolywalnych funkcji -
         !!! do tego wciaz sluzy `get <extern:...> use <...>` +
         !!! `region [ ... ]` (biblioteka C/C++ jest zazwyczaj
@@ -4746,7 +4778,7 @@ impl CodeGen [
             if source == "cpp" [
                 lang_label = "C++"
             ]
-            self.emit("// get <" + source + ":" + name + "> - zaleznosc " + lang_label + ", kompilowana/linkowana przez 'virus build' (crate 'cc'); sygnatury importuj osobnym 'get <extern:" + name + "> use <static>' + 'region [ ... ]'")
+            self.emit("// get <" + source + ":" + name + "> - zaleznosc " + lang_label + ", kompilowana/linkowana przez 'bit build' (crate 'cc'); sygnatury importuj osobnym 'get <extern:" + name + "> use <static>' + 'region [ ... ]'")
             end
         ]
         !! ROZBUDOWA (ta runda, patrz docs/JAVA.md) - `get <java:
@@ -4763,7 +4795,7 @@ impl CodeGen [
         !! FFI jak `region` dla C/C++).
         if source == "java" [
             self.java_classpath_entries.push(name.clone())
-            self.emit("// get <java:" + name + "> - dopisane do classpath dla 'native {java}(...)' w tym pliku; kompilacja/pakowanie robi 'virus build' (patrz virus/cmd/build.hcs, docs/JAVA.md)")
+            self.emit("// get <java:" + name + "> - dopisane do classpath dla 'native {java}(...)' w tym pliku; kompilacja/pakowanie robi 'bit build' (patrz bit (build), docs/JAVA.md)")
             end
         ]
         !! DODANE (ta runda, patrz docs/KOTLIN.md) - `get <kotlin:
@@ -4771,7 +4803,7 @@ impl CodeGen [
         !! CELOWO WSPOLNY `java_classpath_entries` (nie osobna lista),
         !! bo Kotlin i Java koncza w JEDNYM `java_classes/` na WSPOLNYM
         !! classpath (moga wolac nawzajem swoje klasy) - patrz
-        !! `virus/cmd/build.hcs`.
+        !! `bit (build)`.
         !! DODANE (Tura 10, patrz docs/GO.md) - `get <go:pakiet>` /
         !! `get <go:sciezka/modulu::wersja>`: import Go dla blokow
         !! `native {go}` (stdlib: `get <go:fmt>`; zewnetrzne moduly z
@@ -4787,12 +4819,12 @@ impl CodeGen [
                 ]
             ]
             self.go_imports.push(go_entry)
-            self.emit("// get <go:" + name + "> - import Go dla 'native {go}(...)'; kompilacja robi 'virus build' (patrz docs/GO.md)")
+            self.emit("// get <go:" + name + "> - import Go dla 'native {go}(...)'; kompilacja robi 'bit build' (patrz docs/GO.md)")
             end
         ]
         if source == "kotlin" [
             self.java_classpath_entries.push(name.clone())
-            self.emit("// get <kotlin:" + name + "> - dopisane do classpath dla 'native {kotlin}(...)' w tym pliku; kompilacja/pakowanie robi 'virus build' (patrz virus/cmd/build.hcs, docs/KOTLIN.md)")
+            self.emit("// get <kotlin:" + name + "> - dopisane do classpath dla 'native {kotlin}(...)' w tym pliku; kompilacja/pakowanie robi 'bit build' (patrz bit (build), docs/KOTLIN.md)")
             end
         ]
         self.emit("// get <" + source + ":" + name + "> - nieznane zrodlo, pomijam import")
@@ -4810,7 +4842,7 @@ impl CodeGen [
     !!! parytet z tym jak `rustc`/`cargo` linkuja domyslnie).
     !!! Rzeczywiste dostarczenie biblioteki (skopiowanie/skompilowanie
     !!! .so/.a i dodanie sciezki wyszukiwania) zostaje po stronie
-    !!! `virus build` (patrz `virus/cmd/build.hcs`), TAK JAK dla
+    !!! `bit build` (patrz `bit (build)`), TAK JAK dla
     !!! starego `extern "lib" fun` - `region` samo w sobie generuje
     !!! TYLKO deklaracje FFI, nie linkowanie.
 !!! Wyciaga "gola" nazwe biblioteki z pelnej sciezki `get
@@ -4818,10 +4850,10 @@ impl CodeGen [
 !!! atrybutu `#[link(name = "...")]` w `gen_region` nizej. Rust
 !!! ZAWSZE oczekuje tu SAMEJ NAZWY (bez katalogu, bez prefiksu "lib",
 !!! bez rozszerzenia) - katalog do wyszukiwania (`-L`) to osobna
-!!! sprawa, zalatwiana przez `virus build`
-!!! (`vira_split_dir_libname` w virus/cmd/build.hcs - TA SAMA logika,
+!!! sprawa, zalatwiana przez `bit build`
+!!! (`vira_split_dir_libname` w bit (build) - TA SAMA logika,
 !!! zduplikowana tutaj recznie, bo codegen.hcs nie ma dostepu do kodu
-!!! virus/cmd/*.hcs, to osobna binarka). NAPRAWIONY BUG (ta runda,
+!!! bit, to osobna binarka). NAPRAWIONY BUG (ta runda,
 !!! znaleziony realnym buildem - patrz docs/ROADMAP.md): `gen_region`
 !!! wczesniej uzywal calej sciezki WPROST jako `#[link(name=...)]`,
 !!! co dawalo Rustowi/linkerowi doslownie zla nazwe biblioteki (np.
@@ -5005,7 +5037,7 @@ impl CodeGen [
             ]
             UseStmt(use_k, use_v) -> [
                 !! dyrektywy budowania (`use <lang:..>`, `use <crosscompile>`, `use <arc:..>`)
-                !! sa czytane przez project.hcs/virus - tu tylko slad w wygenerowanym kodzie.
+                !! sa czytane przez project.hcs/bit - tu tylko slad w wygenerowanym kodzie.
                 let use_c = "// use <" + use_k
                 match use_v.clone() [
                     Some(uvv) -> [
@@ -5059,7 +5091,13 @@ impl CodeGen [
                 if self.expr_is_doc_string(expr.clone()) [
                     self.emit_module_doc_comment(expr)
                 ] else [
-                    log("[hackerc-self] codegen: nieobslugiwane wyrazenie na najwyzszym poziomie")
+                    let tl_shape = self.call_shape(expr.clone())
+                    if tl_shape.is_call and tl_shape.ident_name == "__native__" and tl_shape.args.len() == 1 [
+                        self.seen_real_toplevel_item = true
+                        self.gen_native_toplevel(self.expr_number_lit_value(tl_shape.args[0].clone()))
+                    ] else [
+                        log("[hackerc-self] codegen: nieobslugiwane wyrazenie na najwyzszym poziomie")
+                    ]
                 ]
             ]
             _ -> [
@@ -5160,7 +5198,7 @@ fun gen_program(prog: Program) -> List<Str> [
         i = i + 1
     ]
 
-    let header: List<Str> = ["// Plik wygenerowany automatycznie przez hackerc (HackerScript -> Rust).", "// NIE EDYTUJ RECZNIE - edytuj zrodlo .hcs i uruchom 'virus build' ponownie.", "#![allow(non_snake_case, unused_mut, dead_code)]"]
+    let header: List<Str> = ["// Plik wygenerowany automatycznie przez hackerc (HackerScript -> Rust).", "// NIE EDYTUJ RECZNIE - edytuj zrodlo .hcs i uruchom 'bit build' ponownie.", "#![allow(non_snake_case, unused_mut, dead_code)]"]
     if gen.needs_pyo3 [
         header.push("use pyo3::prelude::*;")
     ]
