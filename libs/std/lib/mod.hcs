@@ -40,4 +40,4 @@
 !! docs/ROADMAP.md.
 
 !! Wersja biblioteki standardowej (zgodna z wersja kompilatora).
-const STD_VERSION: Str = "0.4"
+const STD_VERSION: Str = "0.5"
