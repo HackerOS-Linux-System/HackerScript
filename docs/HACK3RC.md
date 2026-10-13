@@ -247,3 +247,22 @@ kompilowany i uruchamiany dla tej architektury (pod QEMU).
   zatrzymania pamięci)
 - wywołanie API Cranelifta bez bloku `native` wymagałoby składni `::`
   w parserze HackerScript
+
+
+## Result<T, E> i operator `?` (0.5)
+
+Typ `Result<T, E>` (obiekt na stercie: tag 0 = Ok, 1 = Err, payload w slowie 1; GC skanuje payload
+zgodnie z deskryptorem wariantu). Konstruktory `Ok(x)`/`Err(e)` (tez malymi literami) wymagaja znanego
+typu docelowego: adnotacja `let r: Result<Int, Str> = Ok(1)`, `end Ok(..)` w funkcji zwracajacej Result,
+argument funkcji. `match` na Result (`Ok(v) -> ...`, `Err(e) -> ...`, wyczerpujacy albo z `_`),
+metody `is_ok()`/`is_err()`.
+
+Operator `?`: na `Result<T, E>` w funkcji zwracajacej `Result<_, E>` (ten sam typ bledu, bez konwersji)
+przy `Err` zwraca z funkcji ten sam `Err`, w przeciwnym razie daje `T`. Na `Option<T>` w funkcji
+zwracajacej `Option<_>` przy `None` zwraca `none()`. Bledy: H0414/H0415 (konstruktor bez typu / zly typ),
+H0054/H0055/H0056 (`?` poza pasujaca funkcja / niezgodny typ bledu), H0474 (nieznana metoda Result).
+
+Testy: `hack3rc/tests/cases/result_try`, `result_struct` (payload strukturalny, 20000 iteracji;
+sprawdzone tez z `HKS_GC_STRESS=1`).
+
+Nadal nieobslugiwane: `Dict`, interpolacja stringow, async/kanaly, `get`/`include`, `native`.
