@@ -1380,6 +1380,15 @@ fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, ne
             deps_lines = deps_lines + "tokio = { version = \"" + deps_versions[i] + "\", features = [\"rt-multi-thread\", \"sync\", \"time\"] }\n"
         ] elif deps_names[i] == "ed25519-dalek" [
             deps_lines = deps_lines + deps_names[i] + " = { version = \"" + deps_versions[i] + "\", features = [\"rand_core\"] }\n"
+        ] elif deps_names[i] == "serde" or deps_names[i] == "clap" [
+            !! PATCH (port Hacker Lang): feature "derive" jak w oryg. workspace Cargo.toml
+            deps_lines = deps_lines + deps_names[i] + " = { version = \"" + deps_versions[i] + "\", features = [\"derive\"] }\n"
+        ] elif deps_names[i] == "tracing-subscriber" [
+            deps_lines = deps_lines + deps_names[i] + " = { version = \"" + deps_versions[i] + "\", features = [\"env-filter\"] }\n"
+        ] elif deps_names[i] == "nix" [
+            deps_lines = deps_lines + deps_names[i] + " = { version = \"" + deps_versions[i] + "\", features = [\"user\"] }\n"
+        ] elif deps_names[i] == "cranelift-codegen" and not str_contains(deps_versions[i].clone(), "+") [
+            deps_lines = deps_lines + deps_names[i] + " = { version = \"" + deps_versions[i] + "\", features = [\"all-arch\"] }\n"
         ] else [
             deps_lines = deps_lines + crate_dep_line(deps_names[i].clone(), deps_versions[i].clone())
         ]
@@ -1861,7 +1870,17 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
         while si < sn [
             match df.program.body[si].clone() [
                 GetImportStmt(isource, iname, iversion, idetails) -> [
-                    if isource == "crates" [
+                    !! PATCH (port Hacker Lang): ta sama zaleznosc z wielu plikow
+                    !! (np. `anyhow`) -> jeden wpis w Cargo.toml (TOML zabrania duplikatow).
+                    let crate_already = false
+                    let ci = 0
+                    while ci < crates_names.len() [
+                        if crates_names[ci] == iname [
+                            crate_already = true
+                        ]
+                        ci = ci + 1
+                    ]
+                    if isource == "crates" and not crate_already [
                         crates_names.push(iname)
                         match iversion [
                             Some(v) -> [
@@ -1928,6 +1947,11 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
             !! bin (tam korzen ma wlasny `fn main`, ktory i tak przeslania
             !! glob).
             let mod_rust = str_replace(r.rust_code, "\npub fn main() {", "\nfn main() {")
+            !! Kazdy plik dzielony (include/get) widzi wszystkie publiczne itemy
+            !! calego crate'a bez recznego `use crate::X;` (parytet z jednym
+            !! plikiem; port Hacker Lang). `insert_raw_header` wstawia to PO
+            !! naglowku `#![allow(...)]`, wiec atrybut wewnetrzny zostaje pierwszy.
+            mod_rust = insert_raw_header(mod_rust, "#[allow(unused_imports)]\nuse crate::*;")
             if r.needs_async_rt [
                 mod_rust = insert_raw_header(mod_rust, "#[allow(unused_imports)]\nuse crate::_hks_async_rt::*;")
             ]
