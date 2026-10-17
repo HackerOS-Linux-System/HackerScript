@@ -178,14 +178,140 @@ fun trim_str(s: Str) -> Str [
 !!! `is_expr_end_char`/cofania sie przez biale znaki (uzywanej w
 !!! poprzedniej wersji tej funkcji, dla starej skladni `!=`/`=!`).
 fun strip_multiline_comments(source: Str) -> Str [
+    end scan_comments_and_styles(source, false)
+]
+
+!!! ROZBUDOWA 0.6 - bloki `style { ... }` w `use <mode:website>` (docs/WEBSITE.md).
+!!!
+!!! `style {` na POCZATKU linii otwiera blok z surowym CSS-em, zamkniety
+!!! pasujacym `}` (z uwzglednieniem stringow CSS i komentarzy `/* */`).
+!!! Dla lexera/parsera blok jest "niewidzialny" - zamieniany na te sama
+!!! liczbe `\n`, jak komentarz `!> <!` - wiec `check`/`build`/`lsp` w ogole
+!!! go nie widza. Tresc blokow zbiera `collect_style_css` (generator strony).
+!!!
+!!! Zwraca indeks pierwszego znaku PO `{` albo 0, gdy w `i` nie zaczyna sie
+!!! blok `style {` (przed `style` w linii moga byc tylko biale znaki).
+fun style_block_open(source: Str, i: Int) -> Int [
+    let n = source.len()
+    if i + 6 > n [
+        end 0
+    ]
+    if source.slice(i, i + 5) != "style" [
+        end 0
+    ]
+    let ok = true
+    let scanning = true
+    let b = i
+    while b > 0 and scanning [
+        b = b - 1
+        let pc = source.char_at(b)
+        if pc == "\n" [
+            scanning = false
+        ] elif pc != " " and pc != "\t" and pc != "\r" [
+            ok = false
+            scanning = false
+        ]
+    ]
+    if not ok [
+        end 0
+    ]
+    let j = i + 5
+    while j < n and (source.char_at(j) == " " or source.char_at(j) == "\t") [
+        j = j + 1
+    ]
+    if j < n and source.char_at(j) == "{" [
+        end j + 1
+    ]
+    end 0
+]
+
+!!! `start` = indeks pierwszego znaku po `{`. Zwraca indeks ZA pasujacym `}`
+!!! albo 0, gdy blok nie jest zamkniety (wtedy nie traktujemy go jako bloku
+!!! stylu i parser zglosi zwykly blad skladni).
+fun style_block_close(source: Str, start: Int) -> Int [
+    let n = source.len()
+    let depth = 1
+    let j = start
+    while j < n and depth > 0 [
+        let c = source.char_at(j)
+        if c == "\"" or c == "'" [
+            let q = c
+            j = j + 1
+            while j < n and source.char_at(j) != q and source.char_at(j) != "\n" [
+                if source.char_at(j) == "\\" [
+                    j = j + 2
+                ] else [
+                    j = j + 1
+                ]
+            ]
+            if j < n [
+                j = j + 1
+            ]
+        ] elif c == "/" and j + 1 < n and source.char_at(j + 1) == "*" [
+            j = j + 2
+            while j + 1 < n and not (source.char_at(j) == "*" and source.char_at(j + 1) == "/") [
+                j = j + 1
+            ]
+            j = j + 2
+        ] elif c == "{" [
+            depth = depth + 1
+            j = j + 1
+        ] elif c == "}" [
+            depth = depth - 1
+            j = j + 1
+        ] else [
+            j = j + 1
+        ]
+    ]
+    if depth > 0 [
+        end 0
+    ]
+    end j
+]
+
+!!! Tresc wszystkich blokow `style { ... }` zrodla (bez zewnetrznych `{ }`),
+!!! rozdzielona pustym wierszem. Pusty napis = brak blokow.
+fun collect_style_css(source: Str) -> Str [
+    end scan_comments_and_styles(source, true)
+]
+
+!!! Wspolna petla: `want_css == false` -> zrodlo bez komentarzy wieloliniowych
+!!! i blokow `style` (to widzi lexer); `want_css == true` -> zebrany CSS.
+fun scan_comments_and_styles(source: Str, want_css: Bool) -> Str [
     let out = ""
+    let css = ""
     let i = 0
     let n = source.len()
     while i < n [
         let c = source.char_at(i)
         let is_bang_bang = c == "!" and i + 1 < n and source.char_at(i + 1) == "!"
         let is_open = c == "!" and i + 1 < n and source.char_at(i + 1) == ">"
-        if c == "\"" or c == "'" [
+        let style_open = 0
+        let style_end = 0
+        if c == "s" and i + 1 < n and source.char_at(i + 1) == "t" [
+            style_open = style_block_open(source, i)
+            if style_open > 0 [
+                style_end = style_block_close(source, style_open)
+                if style_end == 0 [
+                    style_open = 0
+                ]
+            ]
+        ]
+        if style_open > 0 [
+            if css != "" [
+                css = css + "\n"
+            ]
+            css = css + source.slice(style_open, style_end - 1)
+            let sblock = source.slice(i, style_end)
+            let sk = 0
+            while sk < sblock.len() [
+                if sblock.char_at(sk) == "\n" [
+                    out = out + "\n"
+                ]
+                sk = sk + 1
+            ]
+            i = style_end
+        ] elif c == "\"" or c == "'" [
             let quote = c
             let j = i + 1
             while j < n and source.char_at(j) != quote and source.char_at(j) != "\n" [
@@ -230,6 +356,9 @@ fun strip_multiline_comments(source: Str) -> Str [
             out = out + c
             i = i + 1
         ]
+    ]
+    if want_css [
+        end css
     ]
     end out
 ]
