@@ -1,3 +1,4 @@
+include <lexer>
 include <ast_nodes>
 include <parser>
 include <typecheck>
@@ -11,7 +12,7 @@ include <kotlin_backend>
 include <javascript_backend>
 get <std:io> import <file_readable>
 get <std:fs> import <create_dir_ok>
-get <std:string> import <str_ends_with::str_join>
+get <std:string> import <str_ends_with::str_join::str_replace>
 get <std:term> import <c_bold_green::c_bold_red::c_bold_cyan::c_bold_yellow::c_red::c_gray::print_progress_line>
 
 const VERSION: Str = "0.5"
@@ -175,7 +176,8 @@ fun cmd_kotlin(src_path: Str, out_path: Str) -> Int [
 
 struct JsLoader [
     visited: List<Str>,
-    errors: List<Str>
+    errors: List<Str>,
+    css: List<Str>
 ]
 
 fun js_dirname(p: Str) -> Str [
@@ -244,6 +246,12 @@ impl JsLoader [
                     ]
                     i = i + 1
                 ]
+                !!! bloki `style { ... }` tego pliku - PO stylach plikow z `include`
+                !!! (biblioteki pierwsze, kod wlasny na koncu - jak w kaskadzie CSS)
+                let own_css = collect_style_css(source.clone())
+                if own_css.len() > 0 [
+                    self.css.push(own_css)
+                ]
                 end out
             ]
         ]
@@ -294,7 +302,9 @@ fun js_build_target(path: Str) -> Str [
     ]
 ]
 
-fun site_index_html(title: Str) -> Str [
+!!! `css` - zebrane bloki `style { ... }` (pusty napis = brak). Trafiaja do
+!!! statycznego <style> PO domyslnym stylu szkieletu, wiec go nadpisuja.
+fun site_index_html(title: Str, css: Str) -> Str [
     let l: List<Str> = []
     l.push("<!doctype html>")
     l.push("<html lang=\"pl\">")
@@ -303,6 +313,11 @@ fun site_index_html(title: Str) -> Str [
     l.push("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">")
     l.push("<title>" + title + "</title>")
     l.push("<style>body { font-family: system-ui, sans-serif; margin: 0; line-height: 1.5; } #app { max-width: 52rem; margin: 0 auto; padding: 1rem; }</style>")
+    if css.len() > 0 [
+        l.push("<style>")
+        l.push(str_replace(css, "</style", "<\\/style"))
+        l.push("</style>")
+    ]
     l.push("</head>")
     l.push("<body>")
     l.push("<div id=\"app\"></div>")
@@ -319,7 +334,7 @@ fun cmd_js(src_path: Str, out_path: Str, site: Bool) -> Int [
         elog(c_red("hackerc:") + " nie znaleziono pliku " + src_path)
         end 1
     ]
-    let loader = JsLoader([], [])
+    let loader = JsLoader([], [], [])
     let body = loader.load(src_path.clone())
     if loader.errors.len() > 0 [
         log(str_join(loader.errors.clone(), "\n"))
@@ -353,6 +368,10 @@ fun cmd_js(src_path: Str, out_path: Str, site: Bool) -> Int [
             ]
         ]
         dw = dw + 1
+    ]
+    let site_css = str_join(loader.css.clone(), "\n")
+    if not site and site_css.len() > 0 [
+        elog(c_bold_yellow("hackerc:") + " bloki `style { ... }` dzialaja tylko w `use <mode:website>` - pominieto")
     ]
     match transpile_js(Program(body), site) [
         Err(msgs) -> [
@@ -395,7 +414,7 @@ fun cmd_js(src_path: Str, out_path: Str, site: Bool) -> Int [
                     end 1
                 ]
             ]
-            match write_file(dir.clone() + "/index.html", site_index_html(stem.clone())) [
+            match write_file(dir.clone() + "/index.html", site_index_html(stem.clone(), site_css.clone())) [
                 Ok(_w2) -> [
                     let unused2 = 0
                 ]
