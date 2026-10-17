@@ -127,6 +127,7 @@ klucze: `lang`, `mode`, `crosscompile`, `arc`.
 |---|---|
 | `use <lang:javascript>` (alias `js`) | `hackerc build` generuje JavaScript (Node.js) zamiast crate'a Rust — patrz `docs/JAVASCRIPT.md` |
 | `use <mode:website>` | `hackerc build` generuje stronę (`index.html` + `app.js`) — patrz `docs/WEBSITE.md` |
+| `style { ... }` (nie `use`, osobna konstrukcja) | surowy CSS dla `mode:website`, wstawiany do `index.html` — patrz sekcja „Style” w `docs/WEBSITE.md` |
 | `use <lang:kotlin>` | eksperymentalny backend Kotlina (`hackerc kotlin`) |
 | `use <crosscompile>`, `use <arc:architektura>` | zapisywane w pliku pomocniczym dla `bit` |
 
