@@ -1,3 +1,4 @@
+include <lexer>
 include <ast_nodes>
 include <parser>
 include <typeinfer>
@@ -703,7 +704,19 @@ fun format_source(source: Str, filename: Str) -> Str [
     let fast_direct_backend_dict = direct_blocks_to_dict(fast_direct_extraction.backends)
     let prog = parse(extraction.stripped_source)
     let fmt = new_formatter(direct_dict, fast_direct_dict, fast_direct_backend_dict)
-    end fmt.format_program(prog)
+    let text = fmt.format_program(prog)
+    !!! Bloki `style { ... }` (mode:website) nie sa czescia AST - lexer ich nie
+    !!! widzi - wiec bez tego `fmt` by je skasowal. Tresc CSS zostaje
+    !!! nietknieta; wszystkie bloki laczone sa w jeden, na koncu pliku.
+    let site_css = collect_style_css(source)
+    if site_css.len() > 0 [
+        if text == "\n" [
+            text = "style {" + site_css + "}\n"
+        ] else [
+            text = text + "\nstyle {" + site_css + "}\n"
+        ]
+    ]
+    end text
 ]
 
 !!! Demonstracyjne uzycie - formatuje maly, celowo "brudno"
