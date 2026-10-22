@@ -1,102 +1,59 @@
 name: Release
 
-# Uruchamiane na tag w formacie v<wersja> (np. v1.2) - MUSI byc zgodne z
-# `using <wersja>` w Virus.hk i z adresem URL w
-# virus/cli/src/hackerc_bridge.rs (release_url/asset_name).
+# Uruchamiane na tag w formacie v<wersja> (np. v0.6). MUSI byc zgodne z
+# `using => <wersja>` w Bit.hk oraz z adresami w scripts/install.sh
+# (`releases/download/v<wersja>/hackerc`) - tak pobiera tez kolejny stage0.
 on:
   push:
     tags:
       - "v*"
 
 jobs:
-  build-hackerc:
-    name: hackerc binarka (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            asset_name: hackerc-linux-x86_64
-          - os: macos-latest
-            asset_name: hackerc-macos-x86_64
-          - os: windows-latest
-            asset_name: hackerc-windows-x86_64.exe
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Zainstaluj hackerc + PyInstaller
-        run: |
-          pip install -e ./hackerc
-          pip install pyinstaller
-      - name: Zbuduj samodzielna binarke (bez wymaganego interpretera obok)
-        working-directory: hackerc
-        run: |
-          pyinstaller --onefile --name hackerc-bin entrypoint.py
-      - name: Zmien nazwe assetu
-        shell: bash
-        run: |
-          mkdir -p dist_final
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            cp hackerc/dist/hackerc-bin.exe "dist_final/${{ matrix.asset_name }}"
-          else
-            cp hackerc/dist/hackerc-bin "dist_final/${{ matrix.asset_name }}"
-          fi
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.asset_name }}
-          path: dist_final/${{ matrix.asset_name }}
-
-  build-virus:
-    name: virus binarka (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            asset_name: virus-linux-x86_64
-          - os: macos-latest
-            asset_name: virus-macos-x86_64
-          - os: windows-latest
-            asset_name: virus-windows-x86_64.exe
+  build:
+    name: hackerc + hack3rc (linux-x86_64)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: virus
-      - name: cargo build --release
-        working-directory: virus
-        run: cargo build --release -p virus
-      - name: Zmien nazwe assetu
-        shell: bash
+      - name: Pobierz stage0 (poprzednie wydanie)
+        run: |
+          STAGE0="$(grep -E '^\s*->\s*using\s*=>' Bit.hk | head -n1 | sed -E 's/.*=>\s*0\.([0-9]+).*/\1/')"
+          curl -fsSL -o stage0-hackerc "https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v0.$((STAGE0 - 1))/hackerc"
+          chmod +x stage0-hackerc
+      - name: stage0 -> hackerc (crate) -> cargo build
+        run: |
+          ./stage0-hackerc build hackerc/cmd/main.hcs -o /tmp/hackerc-crate
+          (cd /tmp/hackerc-crate && cargo build --release)
+      - name: swiezy hackerc -> hack3rc
+        run: |
+          /tmp/hackerc-crate/target/release/hackerscript_app build hack3rc/cmd/main.hcs -o /tmp/hack3rc-crate --crate-name hack3rc
+          (cd /tmp/hack3rc-crate && cargo build --release)
+      - name: Testy
+        env:
+          HACKERC: /tmp/hackerc-crate/target/release/hackerscript_app
+        run: bash tests/run.sh
+      - name: Zbierz assety
         run: |
           mkdir -p dist_final
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            cp virus/target/release/virus.exe "dist_final/${{ matrix.asset_name }}"
-          else
-            cp virus/target/release/virus "dist_final/${{ matrix.asset_name }}"
-          fi
+          cp /tmp/hackerc-crate/target/release/hackerscript_app dist_final/hackerc
+          cp /tmp/hack3rc-crate/target/release/hack3rc dist_final/hack3rc
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: dist_final/${{ matrix.asset_name }}
+          name: hackerscript-${{ github.ref_name }}
+          path: dist_final/*
 
   publish:
-    name: Publikuj GitHub Release
-    needs: [build-hackerc, build-virus]
+    name: Publikacja wydania
     runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          path: dist_final
           merge-multiple: true
-      - name: Lista pobranych artefaktow
-        run: ls -la artifacts
       - uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*
+          files: dist_final/*
           generate_release_notes: true
