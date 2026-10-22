@@ -39,7 +39,7 @@ fun is_builtin_func(name: Str) -> Bool [
     !! skan zrodla PRZY KAZDEJ z nich) zamienial build w wielosekundowa
     !! petle - realna regresja wydajnosci znaleziona i naprawiona w tej
     !! samej turze.
-    end name == "log" or name == "elog" or name == "__direct__" or name == "__fast_direct__" or name == "__native__" or name == "__sandbox__" or name == "some" or name == "none" or name == "ok" or name == "err" or name == "read_file" or name == "write_file" or name == "dict" or name == "set" or name == "chan" or name == "env_var" or name == "run_command" or name == "run_command_combined" or name == "http_get" or name == "current_dir" or name == "read_stdin_line" or name == "read_stdin_exact" or name == "write_stdout" or name == "run_command_inherit" or name == "sha256_hex" or name == "now_ms" or name == "args" or name == "exit" or name == "copy_file" or name == "create_dir" or name == "dir_exists" or name == "list_dir" or name == "path_exists" or name == "remove_dir_all" or name == "remove_file"
+    end name == "log" or name == "elog" or name == "__direct__" or name == "__fast_direct__" or name == "__native__" or name == "__sandbox__" or name == "some" or name == "none" or name == "ok" or name == "err" or name == "read_file" or name == "write_file" or name == "dict" or name == "set" or name == "chan" or name == "env_var" or name == "run_command" or name == "run_command_combined" or name == "http_get" or name == "current_dir" or name == "read_stdin_line" or name == "read_stdin_exact" or name == "write_stdout" or name == "run_command_inherit" or name == "sha256_hex" or name == "now_ms" or name == "target_os" or name == "args" or name == "exit" or name == "copy_file" or name == "create_dir" or name == "dir_exists" or name == "list_dir" or name == "path_exists" or name == "remove_dir_all" or name == "remove_file"
 ]
 
 fun str_starts_with_underscore(s: Str) -> Bool [
@@ -304,8 +304,7 @@ impl FnChecker [
                 match value [
                     Some(v) -> [
                         self.visit_expr(v.clone())
-                        let env = self.env_snapshot()
-                        inferred = infer_expr_type(v, env)
+                        inferred = infer_expr_type_sv(v, self.sigs, self.vars)
                     ]
                     None -> [
                     ]
