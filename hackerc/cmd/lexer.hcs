@@ -288,7 +288,9 @@ fun scan_comments_and_styles(source: Str, want_css: Bool) -> Str [
         let is_open = c == "!" and i + 1 < n and source.char_at(i + 1) == ">"
         let style_open = 0
         let style_end = 0
-        if c == "s" and i + 1 < n and source.char_at(i + 1) == "t" [
+        !! 0.6 (wydajnosc) - `style_block_open` materializuje caly zrodlowy Vec<char> przy
+        !! KAZDYM wywolaniu; wolamy ja tylko przy faktycznym slowie `style`.
+        if c == "s" and i + 5 < n and source.slice(i, i + 5) == "style" [
             style_open = style_block_open(source, i)
             if style_open > 0 [
                 style_end = style_block_close(source, style_open)
