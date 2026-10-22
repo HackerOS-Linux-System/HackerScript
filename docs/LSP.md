@@ -59,7 +59,7 @@ LSP 3.17.
 * `textDocument/completion` — nazwy z aktualnego zasięgu + funkcje
   `std`/`core` po `get <...> import <...>`
 * `textDocument/references`
-* `textDocument/rename`
+* `textDocument/rename` (zrobione w 0.5; działa na skanie tekstu, nie na AST — patrz ROADMAP)
 * `textDocument/formatting` — cienka nakładka na już istniejący
   `hackerc/cmd/formatter.hcs` (parytet z `bit fmt`)
 * `textDocument/codeAction` — "quick fix" korzystający wprost z bazy
