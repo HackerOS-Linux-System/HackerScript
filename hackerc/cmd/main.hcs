@@ -15,7 +15,7 @@ get <std:fs> import <create_dir_ok>
 get <std:string> import <str_ends_with::str_join::str_replace>
 get <std:term> import <c_bold_green::c_bold_red::c_bold_cyan::c_bold_yellow::c_red::c_gray::print_progress_line>
 
-const VERSION: Str = "0.5"
+const VERSION: Str = "0.6"
 
 !!! DODANE w tej rundzie (patrz docs/ROADMAP.md) - `hackerc` byl do tej
 !!! pory calkowicie monochromatyczny (`log("hackerc: ...", ...)`).
@@ -359,7 +359,10 @@ fun cmd_js(src_path: Str, out_path: Str, site: Bool) -> Int [
                 if dk == "lang" and dval != "kotlin" and dval != "javascript" and dval != "js" [
                     elog(c_red("hackerc:") + " nieznana wartosc `use <lang:" + dval + ">` - znane: kotlin, javascript")
                 ]
-                if dk != "mode" and dk != "lang" and dk != "crosscompile" and dk != "arc" [
+                if dk == "os" and dval != "linux" and dval != "windows" and dval != "macos" and dval != "ios" and dval != "android" [
+                    elog(c_red("hackerc:") + " nieznana wartosc `use <os:" + dval + ">` - znane: linux, windows, macos, ios, android")
+                ]
+                if dk != "mode" and dk != "lang" and dk != "crosscompile" and dk != "arc" and dk != "os" [
                     elog(c_red("hackerc:") + " nieznana dyrektywa `use <" + dk + ">`")
                 ]
             ]
