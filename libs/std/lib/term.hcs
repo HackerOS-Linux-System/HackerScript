@@ -1,5 +1,5 @@
-get <std:env> import <env_var_present>
-get <std:string> import <str_to_int::str_trim>
+get <std:env> import <env_var_present::env_var_or>
+get <std:string> import <str_to_int::str_trim::str_split>
 get <std:process> import <run_command_inherit_ok>
 
 !! -- kody ANSI SGR (Select Graphic Rendition) -------------------------------
@@ -280,4 +280,62 @@ fun term_stdin_is_tty() -> Bool [
 !! Kolory wlaczone, gdy stdout to terminal i nie ustawiono NO_COLOR.
 fun term_use_color() -> Bool [
     end term_stdout_is_tty() and term_color_enabled()
+]
+
+!! 0.6 - rozmiar terminala: `COLUMNS`/`LINES` z env, potem `stty size` na /dev/tty,
+!! na koncu wartosc domyslna (80x24). Zwraca dodatnie Int zawsze.
+fun term_size_from_stty(index: Int) -> Int [
+    match run_command("sh", ["-c", "stty size < /dev/tty 2>/dev/null"]) [
+        Ok(out) -> [
+            let parts = str_split(str_trim(out), " ")
+            if parts.len() == 2 [
+                match str_to_int(parts[index]) [
+                    Some(n) -> [
+                        if n > 0 [
+                            end n
+                        ]
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+        ]
+        Err(_e) -> [
+        ]
+    ]
+    end 0
+]
+
+fun term_width() -> Int [
+    match str_to_int(env_var_or("COLUMNS", "")) [
+        Some(n) -> [
+            if n > 0 [
+                end n
+            ]
+        ]
+        None -> [
+        ]
+    ]
+    let w = term_size_from_stty(1)
+    if w > 0 [
+        end w
+    ]
+    end 80
+]
+
+fun term_height() -> Int [
+    match str_to_int(env_var_or("LINES", "")) [
+        Some(n) -> [
+            if n > 0 [
+                end n
+            ]
+        ]
+        None -> [
+        ]
+    ]
+    let h = term_size_from_stty(0)
+    if h > 0 [
+        end h
+    ]
+    end 24
 ]
