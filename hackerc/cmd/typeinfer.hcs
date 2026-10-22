@@ -360,11 +360,11 @@ struct AttrCallShape [
     target_type: Option<TypeRef>
 ]
 
-fun expr_call_shape(e: Expr, env: TypeEnv) -> AttrCallShape [
+fun expr_call_shape(e: Expr, sigs: Signatures, vars: Dict<Str, Option<TypeRef>>) -> AttrCallShape [
     let e2 = e.clone()
     match e2 [
         Attr(target, name) -> [
-            let tt = infer_expr_type(target, env)
+            let tt = infer_expr_type_sv(target, sigs, vars)
             end AttrCallShape(true, name, tt)
         ]
         _ -> [
@@ -376,7 +376,7 @@ fun expr_call_shape(e: Expr, env: TypeEnv) -> AttrCallShape [
 !!! Wywolanie przez IDENTYFIKATOR: `f(...)`, `Struct(...)`,
 !!! `WariantEnuma(...)`, wbudowane (`log`/`read_file`/`write_file`/
 !!! `some`/`none`/`ok`/`err`/`dict`).
-fun infer_ident_call_type(name: Str, env: TypeEnv) -> Option<TypeRef> [
+fun infer_ident_call_type(name: Str, sigs: Signatures) -> Option<TypeRef> [
     if name == "log" [
         end none()
     ]
@@ -444,6 +444,10 @@ fun infer_ident_call_type(name: Str, env: TypeEnv) -> Option<TypeRef> [
     if name == "now_ms" [
         end some(make_type0("Int"))
     ]
+    !! 0.6 - `target_os()` -> Str ("linux"/"windows"/"macos"/"ios"/"android"/...).
+    if name == "target_os" [
+        end some(make_type0("Str"))
+    ]
     if name == "some" or name == "none" or name == "ok" or name == "err" or name == "dict" or name == "set" [
         end none()
     ]
@@ -451,17 +455,17 @@ fun infer_ident_call_type(name: Str, env: TypeEnv) -> Option<TypeRef> [
     if name == "chan" [
         end some(TypeRef("Chan", none(), none()))
     ]
-    match env.sigs.functions.fetch(name) [
+    match sigs.functions.fetch(name) [
         Some(f) -> [
             end fun_decl_ret_type(f)
         ]
         None -> [
         ]
     ]
-    if env.sigs.structs.contains(name) [
+    if sigs.structs.contains(name) [
         end some(make_type0(name))
     ]
-    match env.sigs.variant_owner.fetch(name) [
+    match sigs.variant_owner.fetch(name) [
         Some(enum_name) -> [
             end some(make_type0(enum_name))
         ]
@@ -550,6 +554,28 @@ fun infer_attr_call_type(method_name: Str, target_type: Option<TypeRef>, sigs: S
 
 !!! -- Glowna funkcja: infer_expr_type -----------------------------------
 
+!!! 0.6 (wydajnosc) - cienki wrapper zachowujacy stare API `infer_expr_type(expr, env)`.
+!!! Wlasciwa inferencja to `infer_expr_type_sv(expr, sigs, vars)`: przyjmuje
+!!! `Signatures` i zmienne OSOBNO (jako pozyczone referencje), wiec wolajacy
+!!! (codegen/typecheck) NIE musi budowac `TypeEnv(sigs.clone(), vars.clone())`
+!!! przy kazdym wywolaniu - to byl najwiekszy pojedynczy koszt transpilacji
+!!! (gleboki klon calej tablicy sygnatur na kazde `infer_type`).
+fun infer_expr_type(expr: Expr, env: TypeEnv) -> Option<TypeRef> [
+    end infer_expr_type_sv(expr, env.sigs, env.vars)
+]
+
+!!! 0.6 - odpowiednik `TypeEnv::lookup` na samym slowniku zmiennych.
+fun lookup_var(vars: Dict<Str, Option<TypeRef>>, name: Str) -> Option<TypeRef> [
+    match vars.fetch(name) [
+        Some(inner) -> [
+            end inner
+        ]
+        None -> [
+            end none()
+        ]
+    ]
+]
+
 !!! Parytet z `infer_expr_type(expr, env)` w typeinfer.py. Klonuje `expr`
 !!! do wlasnej, WLASNEJ (owned) lokalnej zmiennej NA STARCIE (patrz
 !!! uwaga projektowa na gorze pliku) - dzieki temu KAZDE dopasowanie w
@@ -558,7 +584,7 @@ fun infer_attr_call_type(method_name: Str, target_type: Option<TypeRef>, sigs: S
 !!! (`Expr` w `BinOp`/`Call`/`Attr`/itd.) sa przekazywane DALEJ tylko
 !!! jako ARGUMENTY WYWOLAN (bezpieczne dzieki koercji Rusta), nigdy
 !!! nie dopasowywane bezposrednio.
-fun infer_expr_type(expr: Expr, env: TypeEnv) -> Option<TypeRef> [
+fun infer_expr_type_sv(expr: Expr, sigs: Signatures, vars: Dict<Str, Option<TypeRef>>) -> Option<TypeRef> [
     let e = expr.clone()
     match e [
         NumberLit(value) -> [
@@ -577,7 +603,7 @@ fun infer_expr_type(expr: Expr, env: TypeEnv) -> Option<TypeRef> [
             end none()
         ]
         IdentExpr(name) -> [
-            end env.lookup(name)
+            end lookup_var(vars, name)
         ]
         UnaryOp(op, operand) -> [
             if op == "not" [
@@ -591,7 +617,7 @@ fun infer_expr_type(expr: Expr, env: TypeEnv) -> Option<TypeRef> [
             if op == "await" [
                 let aw_name = call_callee_ident(operand.clone())
                 if aw_name != "" [
-                    match env.sigs.functions.fetch(aw_name) [
+                    match sigs.functions.fetch(aw_name) [
                         Some(af) -> [
                             end fun_decl_ret_type(af)
                         ]
@@ -601,14 +627,14 @@ fun infer_expr_type(expr: Expr, env: TypeEnv) -> Option<TypeRef> [
                 ]
                 end none()
             ]
-            end infer_expr_type(operand, env)
+            end infer_expr_type_sv(operand, sigs, vars)
         ]
         BinOp(op, left, right) -> [
             if op == "and" or op == "or" or op == "==" or op == "!=" or op == "<" or op == ">" or op == "<=" or op == ">=" [
                 end some(make_type0("Bool"))
             ]
-            let lt = infer_expr_type(left, env)
-            let rt = infer_expr_type(right, env)
+            let lt = infer_expr_type_sv(left, sigs, vars)
+            let rt = infer_expr_type_sv(right, sigs, vars)
             match lt [
                 Some(ltv) -> [
                     match rt [
@@ -637,11 +663,11 @@ fun infer_expr_type(expr: Expr, env: TypeEnv) -> Option<TypeRef> [
         Call(callee, args) -> [
             let ident_name = expr_as_ident_name(callee)
             if ident_name != "" [
-                end infer_ident_call_type(ident_name, env)
+                end infer_ident_call_type(ident_name, sigs)
             ]
-            let shape = expr_call_shape(callee, env)
+            let shape = expr_call_shape(callee, sigs, vars)
             if shape.is_attr_call [
-                end infer_attr_call_type(shape.method_name, shape.target_type, env.sigs)
+                end infer_attr_call_type(shape.method_name, shape.target_type, sigs)
             ]
             end none()
         ]
@@ -649,14 +675,14 @@ fun infer_expr_type(expr: Expr, env: TypeEnv) -> Option<TypeRef> [
             if items.len() == 0 [
                 end some(make_type1("List", make_type0("Any")))
             ]
-            let first = infer_expr_type(items[0], env)
+            let first = infer_expr_type_sv(items[0], sigs, vars)
             match first [
                 Some(ft) -> [
                     let all_same = true
                     let i = 1
                     let n = items.len()
                     while i < n [
-                        let it = infer_expr_type(items[i], env)
+                        let it = infer_expr_type_sv(items[i], sigs, vars)
                         if not types_equal(some(ft.clone()), it) [
                             all_same = false
                         ]
@@ -673,10 +699,10 @@ fun infer_expr_type(expr: Expr, env: TypeEnv) -> Option<TypeRef> [
             ]
         ]
         Attr(target, name) -> [
-            let target_t = infer_expr_type(target, env)
+            let target_t = infer_expr_type_sv(target, sigs, vars)
             match target_t [
                 Some(tt) -> [
-                    match env.sigs.structs.fetch(tt.name) [
+                    match sigs.structs.fetch(tt.name) [
                         Some(s) -> [
                             let fields = struct_decl_fields(s)
                             let i = 0
@@ -701,7 +727,7 @@ fun infer_expr_type(expr: Expr, env: TypeEnv) -> Option<TypeRef> [
             ]
         ]
         Index(target, index) -> [
-            let target_t = infer_expr_type(target, env)
+            let target_t = infer_expr_type_sv(target, sigs, vars)
             match target_t [
                 Some(tt) -> [
                     if tt.name == "List" [
@@ -718,7 +744,7 @@ fun infer_expr_type(expr: Expr, env: TypeEnv) -> Option<TypeRef> [
             end some(type_ref)
         ]
         TryOp(target) -> [
-            let target_t = infer_expr_type(target, env)
+            let target_t = infer_expr_type_sv(target, sigs, vars)
             match target_t [
                 Some(tt) -> [
                     if tt.name == "Result" or tt.name == "Option" [
