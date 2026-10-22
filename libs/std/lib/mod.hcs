@@ -25,6 +25,9 @@
 !!                                              zagniezdzenie ->/-->/--->, klucze kropkowe,
 !!                                              interpolacja ${sekcja.klucz}/${env:VAR}); zwraca
 !!                                              JsonValue, zbudowany na std:toml/std:json/std:env
+!!   get <std:os>                            - 0.6: os_name/os_is_linux/windows/macos/ios/android/
+!!                                              os_is_unix/os_is_mobile/os_path_separator/
+!!                                              os_exe_suffix/os_shared_lib_ext (na wierzchu target_os())
 !!   get <std:env>                           - env_var_or/env_var_present/env_path_entries;
 !!                                              env_var()/args() sa wbudowane w kompilator
 !!   get <std:process>                       - run_command_checked/command_succeeds/run_command_simple;
@@ -40,4 +43,4 @@
 !! docs/ROADMAP.md.
 
 !! Wersja biblioteki standardowej (zgodna z wersja kompilatora).
-const STD_VERSION: Str = "0.5"
+const STD_VERSION: Str = "0.6"
