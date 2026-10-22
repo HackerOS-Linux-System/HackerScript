@@ -1,0 +1,62 @@
+fun os_name() -> Str [
+    end target_os()
+]
+
+fun os_is_linux() -> Bool [
+    end target_os() == "linux"
+]
+
+fun os_is_windows() -> Bool [
+    end target_os() == "windows"
+]
+
+fun os_is_macos() -> Bool [
+    end target_os() == "macos"
+]
+
+fun os_is_ios() -> Bool [
+    end target_os() == "ios"
+]
+
+fun os_is_android() -> Bool [
+    end target_os() == "android"
+]
+
+!! Systemy z rodziny Unix (wszystko poza Windows).
+fun os_is_unix() -> Bool [
+    end target_os() != "windows"
+]
+
+!! iOS / Android.
+fun os_is_mobile() -> Bool [
+    let o = target_os()
+    end o == "ios" or o == "android"
+]
+
+!! Separator sciezek zalecany na systemie docelowym.
+fun os_path_separator() -> Str [
+    if target_os() == "windows" [
+        end "\\"
+    ]
+    end "/"
+]
+
+!! Przyrostek pliku wykonywalnego (`.exe` na Windows, pusty gdzie indziej).
+fun os_exe_suffix() -> Str [
+    if target_os() == "windows" [
+        end ".exe"
+    ]
+    end ""
+]
+
+!! Rozszerzenie bibliotek dynamicznych (bez kropki).
+fun os_shared_lib_ext() -> Str [
+    let o = target_os()
+    if o == "windows" [
+        end "dll"
+    ]
+    if o == "macos" or o == "ios" [
+        end "dylib"
+    ]
+    end "so"
+]
