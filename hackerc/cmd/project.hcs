@@ -1549,6 +1549,274 @@ fun trim_str(s: Str) -> Str [
     end s.slice(start, end_i)
 ]
 
+!!! ============================================================
+!!! 0.6 - `use <os:...>`, zapis tylko przy zmianie, cache budowania
+!!! ============================================================
+
+!!! Wspierane systemy docelowe dla `use <os:...>` (docs/OS.md).
+fun os_is_known(os: Str) -> Bool [
+    end os == "linux" or os == "windows" or os == "macos" or os == "ios" or os == "android"
+]
+
+!!! Normalizuje nazwe architektury z `use <arc:...>` do nazwy uzywanej w triple Rusta.
+fun arch_normalize(arch: Str) -> Str [
+    if arch == "arm64" or arch == "aarch64" [
+        end "aarch64"
+    ]
+    if arch == "amd64" or arch == "x64" or arch == "x86_64" or arch == "" [
+        end "x86_64"
+    ]
+    if arch == "arm" or arch == "armv7" [
+        end "armv7"
+    ]
+    if arch == "x86" or arch == "i686" [
+        end "i686"
+    ]
+    end arch
+]
+
+!!! Triple Rusta (`--target`) dla pary system + architektura. Dla `ios`/`android`
+!!! domyslna architektura to aarch64 (a nie x86_64).
+fun os_target_triple(os: Str, arch_raw: Str) -> Str [
+    let arch = arch_normalize(arch_raw)
+    if arch_raw == "" and (os == "ios" or os == "android") [
+        arch = "aarch64"
+    ]
+    if os == "linux" [
+        end arch + "-unknown-linux-gnu"
+    ]
+    if os == "windows" [
+        if arch == "aarch64" [
+            end "aarch64-pc-windows-msvc"
+        ]
+        end arch + "-pc-windows-gnu"
+    ]
+    if os == "macos" [
+        end arch + "-apple-darwin"
+    ]
+    if os == "ios" [
+        end arch + "-apple-ios"
+    ]
+    if os == "android" [
+        if arch == "armv7" [
+            end "armv7-linux-androideabi"
+        ]
+        end arch + "-linux-android"
+    ]
+    end ""
+]
+
+!!! Kod Rusta doklejany do entry gdy projekt zadeklarowal `use <os:...>` -
+!!! kompilacja na systemie spoza listy konczy sie czytelnym `compile_error!`.
+fun os_guard_rust(oses: List<Str>) -> Str [
+    let conds: List<Str> = []
+    let names: List<Str> = []
+    let i = 0
+    while i < oses.len() [
+        conds.push("target_os = \"" + oses[i].clone() + "\"")
+        names.push(oses[i].clone())
+        i = i + 1
+    ]
+    end "\n// 0.6 - `use <os:...>`: projekt wspiera tylko: " + str_join(names.clone(), ", ") + "\n#[cfg(not(any(" + str_join(conds, ", ") + ")))]\ncompile_error!(\"hackerc: ten projekt deklaruje `use <os:...>` tylko dla: " + str_join(names, ", ") + " - zbuduj go dla jednego z tych systemow (np. `cargo build --target ...`)\");\n"
+]
+
+!!! Zapis pliku TYLKO gdy tresc sie zmienila (zachowuje mtime niezmienionych
+!!! plikow -> `cargo` nie przebudowuje crate'a, gdy transpilacja dala identyczny
+!!! wynik). Zwraca `Ok(true)` gdy plik zapisano, `Ok(false)` gdy byl identyczny.
+fun write_file_if_changed(path: Str, content: Str) -> Result<Bool, Str> [
+    match read_file(path.clone()) [
+        Ok(existing) -> [
+            if existing == content [
+                end ok(false)
+            ]
+        ]
+        Err(_e) -> [
+        ]
+    ]
+    match write_file(path, content) [
+        Ok(_w) -> [
+            end ok(true)
+        ]
+        Err(e) -> [
+            end err(e)
+        ]
+    ]
+]
+
+!!! Sol cache'u budowania - zmien przy KAZDEJ zmianie formatu wynikow transpilacji.
+const HKS_CACHE_SALT: Str = "hackerc-0.6-cache-1"
+
+!!! Cache mozna wylaczyc przez `HACKERC_NO_CACHE=1` (CI, debug transpilatora).
+fun build_cache_enabled() -> Bool [
+    end env_var_or("HACKERC_NO_CACHE", "") == ""
+]
+
+!!! Odcisk calego wejscia budowania: wersja formatu + parametry + sciezka i
+!!! tresc KAZDEGO odkrytego pliku (wlacznie z std/core). Identyczny odcisk =
+!!! identyczne wyjscie transpilacji.
+fun build_fingerprint(files: List<DiscoveredFile>, entry: Str, crate_name: Str, force_library: Bool, bin_name: Option<Str>, own_version: Str) -> Str [
+    let acc: Str = HKS_CACHE_SALT + "\n" + entry + "\n" + crate_name + "\n" + own_version + "\n"
+    if force_library [
+        acc = acc + "lib\n"
+    ]
+    match bin_name [
+        Some(bn) -> [
+            acc = acc + "bin:" + bn + "\n"
+        ]
+        None -> [
+        ]
+    ]
+    let i = 0
+    let n = files.len()
+    while i < n [
+        let fpath: Str = files[i].path.clone()
+        !! `DiscoveredFile.source` to TYLKO znacznik ("main"/"std"/...), nie tresc pliku -
+        !! haszujemy tresc czytana z dysku. Plik nieczytelny => brak cache (pusty odcisk).
+        let fhash: Str = ""
+        match read_file(fpath.clone()) [
+            Ok(ftext) -> [
+                fhash = sha256_hex(ftext)
+            ]
+            Err(_fe) -> [
+                end ""
+            ]
+        ]
+        acc = acc + fpath
+        acc = acc + "\n"
+        acc = acc + fhash
+        acc = acc + "\n"
+        i = i + 1
+    ]
+    end sha256_hex(acc)
+]
+
+fun bool_to_flag(b: Bool) -> Str [
+    if b [
+        end "1"
+    ]
+    end "0"
+]
+
+!!! Serializacja `ProjectResult` do prostego formatu "klucz<TAB>wartosc" (jedna linia
+!!! na wartosc; listy = powtorzone klucze) - patrz `load_cached_result`.
+fun serialize_project_result(r: ProjectResult, fp: Str) -> Str [
+    let out = "fp\t" + fp + "\n"
+    out = out + "crate_dir\t" + r.crate_dir.clone() + "\n"
+    out = out + "main_rs\t" + r.main_rs_path.clone() + "\n"
+    out = out + "cargo\t" + r.cargo_toml_path.clone() + "\n"
+    out = out + "pyo3\t" + bool_to_flag(r.needs_pyo3) + "\n"
+    out = out + "njs\t" + bool_to_flag(r.needs_native_js) + "\n"
+    out = out + "sandbox\t" + bool_to_flag(r.needs_sandbox) + "\n"
+    out = out + "hot\t" + bool_to_flag(r.needs_hot_reload) + "\n"
+    out = out + "cpp\t" + bool_to_flag(r.needs_native_cpp) + "\n"
+    out = out + "wasm\t" + bool_to_flag(r.needs_wasm_bindgen) + "\n"
+    let i = 0
+    while i < r.module_files.len() [
+        out = out + "mod\t" + r.module_files[i].clone() + "\n"
+        i = i + 1
+    ]
+    let j = 0
+    while j < r.crates_deps_names.len() [
+        out = out + "cn\t" + r.crates_deps_names[j].clone() + "\n"
+        out = out + "cv\t" + r.crates_deps_versions[j].clone() + "\n"
+        j = j + 1
+    ]
+    match r.extern_links_path.clone() [
+        Some(el) -> [
+            out = out + "links\t" + el + "\n"
+        ]
+        None -> [
+        ]
+    ]
+    end out
+]
+
+!!! Wczytuje wynik poprzedniego budowania, gdy odcisk sie zgadza ORAZ wszystkie
+!!! pliki wyjsciowe nadal istnieja. Inaczej `none()` (pelne budowanie).
+fun load_cached_result(cache_file: Str, fp: Str) -> Option<ProjectResult> [
+    match read_file(cache_file) [
+        Ok(text) -> [
+            let lines = str_split(text, "\n")
+            if lines.len() == 0 [
+                end none()
+            ]
+            if lines[0] != "fp\t" + fp [
+                end none()
+            ]
+            let crate_dir = ""
+            let main_rs = ""
+            let cargo = ""
+            let f_pyo3 = false
+            let f_njs = false
+            let f_sandbox = false
+            let f_hot = false
+            let f_cpp = false
+            let f_wasm = false
+            let mods: List<Str> = []
+            let cn: List<Str> = []
+            let cv: List<Str> = []
+            let links: Option<Str> = none()
+            let i = 1
+            while i < lines.len() [
+                let parts = str_split(lines[i].clone(), "\t")
+                if parts.len() >= 2 [
+                    let key = parts[0].clone()
+                    let val = parts[1].clone()
+                    if key == "crate_dir" [
+                        crate_dir = val
+                    ] elif key == "main_rs" [
+                        main_rs = val
+                    ] elif key == "cargo" [
+                        cargo = val
+                    ] elif key == "pyo3" [
+                        f_pyo3 = val == "1"
+                    ] elif key == "njs" [
+                        f_njs = val == "1"
+                    ] elif key == "sandbox" [
+                        f_sandbox = val == "1"
+                    ] elif key == "hot" [
+                        f_hot = val == "1"
+                    ] elif key == "cpp" [
+                        f_cpp = val == "1"
+                    ] elif key == "wasm" [
+                        f_wasm = val == "1"
+                    ] elif key == "mod" [
+                        mods.push(val)
+                    ] elif key == "cn" [
+                        cn.push(val)
+                    ] elif key == "cv" [
+                        cv.push(val)
+                    ] elif key == "links" [
+                        links = some(val)
+                    ]
+                ]
+                i = i + 1
+            ]
+            if crate_dir == "" or main_rs == "" or cargo == "" [
+                end none()
+            ]
+            if not file_readable(main_rs.clone()) or not file_readable(cargo.clone()) [
+                end none()
+            ]
+            let m = 0
+            while m < mods.len() [
+                if not file_readable(mods[m].clone()) [
+                    end none()
+                ]
+                m = m + 1
+            ]
+            if cn.len() != cv.len() [
+                end none()
+            ]
+            let no_warnings: List<Str> = []
+            end some(ProjectResult(crate_dir, main_rs, mods, cargo, f_pyo3, f_njs, f_sandbox, f_hot, cn, cv, no_warnings, f_cpp, links, f_wasm))
+        ]
+        Err(_e) -> [
+            end none()
+        ]
+    ]
+]
+
 !!! Transpiluje `entry` + rekurencyjnie kazdy modul `std`/`core`/
 !!! `selfhost`, ktory importuje, do PELNEGO crate'a Rust w `out_dir`
 !!! (Cargo.toml + src/). NIE kompiluje (to robi `bit`/`cargo build`).
@@ -1575,6 +1843,7 @@ fun trim_str(s: Str) -> Str [
 !!! `dict()` - brak delegacji, stare zachowanie bez zmian). Wypelniane
 !!! przez `bit build` (patrz `bit`) przez
 !!! `hackerc build --version-map wersja1=sciezka1;wersja2=sciezka2`.
+
 fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, bit_root: Option<Str>, crate_name: Str, force_library: Bool, bin_name: Option<Str>, own_version: Str, version_binaries: Dict<Str, Str>) -> ProjectResult [
     let src_dir = out_dir + "/src"
     let main_rs_path = src_dir + "/main.rs"
@@ -1622,6 +1891,26 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
         i = i + 1
     ]
 
+    !! 0.6 - CACHE BUDOWANIA: identyczny odcisk wejscia + istniejace pliki wyjsciowe =>
+    !! pomijamy cala transpilacje (kolejne buildy bez zmian = ulamek sekundy).
+    let cache_dir = out_dir + "/.hks-cache"
+    let cache_file = cache_dir + "/build.txt"
+    let cache_on = build_cache_enabled()
+    let fp = ""
+    if cache_on and warnings.len() == 0 [
+        fp = build_fingerprint(disc.files.clone(), entry.clone(), crate_name.clone(), force_library, bin_name.clone(), own_version.clone())
+        if fp != "" [
+            match load_cached_result(cache_file.clone(), fp.clone()) [
+                Some(cached) -> [
+                    elog("hackerc: cache budowania trafiony - pomijam transpilacje (" + fp.slice(0, 12) + ")")
+                    end cached
+                ]
+                None -> [
+                ]
+            ]
+        ]
+    ]
+
     let ps = collect_project_signatures(entry, lr, br, vr, own_version, version_binaries)
     let extra = ps.sigs
 
@@ -1656,6 +1945,9 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     let needs_async_rt = false
     !! ROZBUDOWA (use <...>) - zebrane dyrektywy `use <klucz[:wartosc]>` z calego projektu.
     let use_lines: List<Str> = []
+    !! 0.6 - wartosci `use <os:..>` / `use <arc:..>` z calego projektu.
+    let os_values: List<Str> = []
+    let arc_values: List<Str> = []
     let native_go_sources: Dict<Str, Str> = dict()
     let native_go_names: List<Str> = []
     let go_import_paths: List<Str> = []
@@ -1688,7 +1980,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
                     entry_rust = pre_rust
                 ] else [
                     let mod_out_pv = src_dir + "/" + df.flat_name + ".rs"
-                    match write_file(mod_out_pv.clone(), pre_rust) [
+                    match write_file_if_changed(mod_out_pv.clone(), pre_rust) [
                         Ok(_v3) -> [
                             module_files.push(mod_out_pv)
                             mod_names.push(df.flat_name)
@@ -1907,7 +2199,29 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
                     if use_k == "mode" and use_val != "website" [
                         warnings.push(df.path.clone() + ": nieznana wartosc `use <mode:" + use_val + ">` - znane: website")
                     ]
-                    if use_k == "lang" or use_k == "crosscompile" or use_k == "arc" or use_k == "mode" [
+                    !! 0.6 - `use <os:linux|windows|macos|ios|android>` (docs/OS.md).
+                    if use_k == "os" [
+                        if not os_is_known(use_val.clone()) [
+                            warnings.push(df.path.clone() + ": nieznana wartosc `use <os:" + use_val + ">` - znane: linux, windows, macos, ios, android")
+                            use_val = ""
+                        ] else [
+                            let os_dup = false
+                            let osi = 0
+                            while osi < os_values.len() [
+                                if os_values[osi] == use_val [
+                                    os_dup = true
+                                ]
+                                osi = osi + 1
+                            ]
+                            if not os_dup [
+                                os_values.push(use_val.clone())
+                            ]
+                        ]
+                    ]
+                    if use_k == "arc" [
+                        arc_values.push(use_val.clone())
+                    ]
+                    if (use_k == "os" and use_val != "") or use_k == "lang" or use_k == "crosscompile" or use_k == "arc" or use_k == "mode" [
                         let use_line = use_k.clone() + "\t" + use_val
                         let use_dup = false
                         let udi = 0
@@ -1920,8 +2234,8 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
                         if not use_dup [
                             use_lines.push(use_line)
                         ]
-                    ] else [
-                        warnings.push(df.path.clone() + ": nieznana dyrektywa `use <" + use_k + ">` - znane: lang:kotlin|javascript, mode:website, crosscompile, arc:<architektura>")
+                    ] elif use_k != "os" [
+                        warnings.push(df.path.clone() + ": nieznana dyrektywa `use <" + use_k + ">` - znane: lang:kotlin|javascript, mode:website, os:linux|windows|macos|ios|android, crosscompile, arc:<architektura>")
                     ]
                 ]
                 _ -> [
@@ -1955,7 +2269,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
             if r.needs_async_rt [
                 mod_rust = insert_raw_header(mod_rust, "#[allow(unused_imports)]\nuse crate::_hks_async_rt::*;")
             ]
-            match write_file(mod_out.clone(), mod_rust) [
+            match write_file_if_changed(mod_out.clone(), mod_rust) [
                 Ok(_v) -> [
                     module_files.push(mod_out)
                     mod_names.push(df.flat_name)
@@ -1974,7 +2288,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     !! ROZBUDOWA (async/coroutines) - runtime `src/_hks_async_rt.rs` + `tokio`.
     if needs_async_rt [
         entry_rust = insert_raw_header(entry_rust, "#[allow(dead_code, unused_imports)]\nmod _hks_async_rt;\n#[allow(unused_imports)]\nuse crate::_hks_async_rt::*;")
-        match write_file(src_dir + "/_hks_async_rt.rs", async_runtime_text()) [
+        match write_file_if_changed(src_dir + "/_hks_async_rt.rs", async_runtime_text()) [
             Ok(_v) -> [
             ]
             Err(e) -> [
@@ -2031,7 +2345,11 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
         None -> [
         ]
     ]
-    match write_file(main_rs_path.clone(), entry_rust) [
+    !! 0.6 - `use <os:...>`: ochrona `compile_error!` w entry (patrz `os_guard_rust`).
+    if os_values.len() > 0 [
+        entry_rust = entry_rust + os_guard_rust(os_values.clone())
+    ]
+    match write_file_if_changed(main_rs_path.clone(), entry_rust) [
         Ok(_v) -> [
         ]
         Err(e) -> [
@@ -2056,7 +2374,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
                     if not str_contains(existing, "path = \"src/bin/" + bn2 + ".rs\"") [
                         appended = existing + "\n[[bin]]\nname = \"" + bn2 + "\"\npath = \"src/bin/" + bn2 + ".rs\"\n"
                     ]
-                    match write_file(cargo_toml_path.clone(), appended) [
+                    match write_file_if_changed(cargo_toml_path.clone(), appended) [
                         Ok(_v) -> [
                         ]
                         Err(e) -> [
@@ -2074,7 +2392,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
                     !! `src/bin/<nazwa>.rs`.
                     let fresh = cargo_toml_text(crate_name, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, needs_native_cpp, needs_wasm_bindgen, force_library, crates_names.clone(), crates_versions.clone(), needs_native_java or needs_native_kotlin, needs_sha256)
                     fresh = str_replace(fresh, "[[bin]]\nname = \"" + crate_name + "\"\npath = \"src/main.rs\"", "[[bin]]\nname = \"" + bn2 + "\"\npath = \"src/bin/" + bn2 + ".rs\"")
-                    match write_file(cargo_toml_path.clone(), fresh) [
+                    match write_file_if_changed(cargo_toml_path.clone(), fresh) [
                         Ok(_v) -> [
                         ]
                         Err(e2) -> [
@@ -2086,7 +2404,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
         ]
         None -> [
             let cargo_text = cargo_toml_text(crate_name, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, needs_native_cpp, needs_wasm_bindgen, force_library, crates_names.clone(), crates_versions.clone(), needs_native_java or needs_native_kotlin, needs_sha256)
-            match write_file(cargo_toml_path.clone(), cargo_text) [
+            match write_file_if_changed(cargo_toml_path.clone(), cargo_text) [
                 Ok(_v) -> [
                 ]
                 Err(e) -> [
@@ -2142,7 +2460,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
                     sli = sli + 1
                 ]
                 let cpp_text = str_join(preproc_lines, "\n") + "\nextern \"C\" void " + fnname + "() {\n" + str_join(body_lines, "\n") + "\n}\n"
-                match write_file(cpp_path.clone(), cpp_text) [
+                match write_file_if_changed(cpp_path.clone(), cpp_text) [
                     Ok(_v) -> [
                     ]
                     Err(e) -> [
@@ -2182,7 +2500,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
         match native_java_sources.fetch(cname.clone()) [
             Some(jsrc) -> [
                 let java_path = out_dir + "/java/" + cname + ".java"
-                match write_file(java_path.clone(), jsrc) [
+                match write_file_if_changed(java_path.clone(), jsrc) [
                     Ok(_v) -> [
                     ]
                     Err(e) -> [
@@ -2218,7 +2536,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
         match native_kotlin_sources.fetch(ktname.clone()) [
             Some(ktsrc) -> [
                 let kt_path = out_dir + "/kotlin/" + ktname + ".kt"
-                match write_file(kt_path.clone(), ktsrc) [
+                match write_file_if_changed(kt_path.clone(), ktsrc) [
                     Ok(_v) -> [
                     ]
                     Err(e) -> [
@@ -2266,14 +2584,14 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
             gbi = gbi + 1
         ]
         go_src = go_src + "func main() {}\n"
-        match write_file(go_dir + "/hks_go.go", go_src) [
+        match write_file_if_changed(go_dir + "/hks_go.go", go_src) [
             Ok(_v) -> [
             ]
             Err(e) -> [
                 warnings.push(go_dir + "/hks_go.go: " + e)
             ]
         ]
-        match write_file(go_dir + "/go.mod", "module hksgo\n\ngo 1.21\n") [
+        match write_file_if_changed(go_dir + "/go.mod", "module hksgo\n\ngo 1.21\n") [
             Ok(_v) -> [
             ]
             Err(e) -> [
@@ -2304,7 +2622,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     let extern_links_path: Option<Str> = none()
     if extern_link_specs.len() > 0 [
         let links_path = out_dir + "/.hks-extern-links.txt"
-        match write_file(links_path.clone(), str_join(extern_link_specs.clone(), "\n") + "\n") [
+        match write_file_if_changed(links_path.clone(), str_join(extern_link_specs.clone(), "\n") + "\n") [
             Ok(_v) -> [
                 extern_links_path = some(links_path)
             ]
@@ -2317,9 +2635,21 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     !!! ROZBUDOWA - sidecar `.hks-use.txt` (linie "klucz\twartosc") z dyrektyw
     !!! `use <lang:..>`/`use <crosscompile>`/`use <arc:..>` - czytany przez
     !!! `bit build` (patrz bit). Brak pliku = brak dyrektyw.
+    !! 0.6 - dokladnie JEDEN `use <os:..>` => wskazowka `target\t<triple>` dla `bit build`
+    !! (architektura z `use <arc:..>`, a gdy jej brak - domyslna dla danego systemu).
+    if os_values.len() == 1 [
+        let arch_hint = ""
+        if arc_values.len() > 0 [
+            arch_hint = arc_values[0].clone()
+        ]
+        let triple = os_target_triple(os_values[0].clone(), arch_hint)
+        if triple != "" [
+            use_lines.push("target\t" + triple)
+        ]
+    ]
     if use_lines.len() > 0 [
         let use_path = out_dir + "/.hks-use.txt"
-        match write_file(use_path.clone(), str_join(use_lines.clone(), "\n") + "\n") [
+        match write_file_if_changed(use_path.clone(), str_join(use_lines.clone(), "\n") + "\n") [
             Ok(_v) -> [
             ]
             Err(e) -> [
@@ -2339,7 +2669,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
             ]
         ]
         let hotlib_cargo_text = "[package]\nname = \"hotlib\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n"
-        match write_file(hotlib_dir + "/Cargo.toml", hotlib_cargo_text) [
+        match write_file_if_changed(hotlib_dir + "/Cargo.toml", hotlib_cargo_text) [
             Ok(_v) -> [
             ]
             Err(e) -> [
@@ -2360,7 +2690,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
             ]
             hoi = hoi + 1
         ]
-        match write_file(hotlib_src_dir + "/lib.rs", hotlib_lib_rs) [
+        match write_file_if_changed(hotlib_src_dir + "/lib.rs", hotlib_lib_rs) [
             Ok(_v) -> [
             ]
             Err(e) -> [
@@ -2369,7 +2699,23 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
         ]
     ]
 
-    end ProjectResult(out_dir, main_rs_path, module_files, cargo_toml_path, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, crates_names, crates_versions, warnings, needs_native_cpp, extern_links_path, needs_wasm_bindgen)
+    let final_result = ProjectResult(out_dir, main_rs_path, module_files, cargo_toml_path, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, crates_names, crates_versions, warnings, needs_native_cpp, extern_links_path, needs_wasm_bindgen)
+    !! 0.6 - zapis cache'u TYLKO dla budowania bez ostrzezen/bledow.
+    if cache_on and fp != "" and warnings.len() == 0 [
+        match create_dir(cache_dir.clone()) [
+            Ok(_cv) -> [
+            ]
+            Err(_ce) -> [
+            ]
+        ]
+        match write_file(cache_file.clone(), serialize_project_result(final_result.clone(), fp.clone())) [
+            Ok(_cw) -> [
+            ]
+            Err(_cwe) -> [
+            ]
+        ]
+    ]
+    end final_result
 ]
 
 !!! Demonstracyjne uzycie - `flat_module_name`/`module_file_path` na
