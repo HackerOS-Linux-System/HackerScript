@@ -1,11 +1,11 @@
 [package]
 -> name        => hack3rc
--> version     => 0.4
+-> version     => 0.6
 -> description => Kompilator AOT HackerScript przez Cranelift, wiele architektur, w 100% HackerScript. Frontend wspolny z hackerc.
 -> authors     => ["HackerOS Team"]
 -> license     => MIT
 -> lang        => HackerScript
--> using       => 0.4
+-> using       => 0.6
 
 [layout]
 -> cmd => cmd
