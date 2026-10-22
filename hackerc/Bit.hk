@@ -1,11 +1,11 @@
 [package]
 -> name        => hackerc
--> version     => 0.4
+-> version     => 0.6
 -> description => Samo-hostowany transpilator HackerScript do Rusta. Komendy check, lint, build, fmt, lsp, hlib, emit-module.
 -> authors     => ["HackerOS Team"]
 -> license     => MIT
 -> lang        => HackerScript
--> using       => 0.4
+-> using       => 0.6
 
 [layout]
 -> cmd => cmd
