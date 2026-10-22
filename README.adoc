@@ -12,7 +12,7 @@ niewielkiego fragmentu kodu, ktory nigdy nie bedzie wymagal wydajnosci.
 
 [cols="1,3"]
 |===
-| Status | *Bootstrap osiagniety + FFI 0.3 + workspace 0.4 + 0.5 (escape'y `\xHH`/`\u{...}`, JSON `\uXXXX`, zapis TOML, LSP `rename`)* - `hackerc`
+| Status | *Bootstrap osiagniety + FFI 0.3 + workspace 0.4 + 0.5 + 0.6 (`use <os:...>`, cache budowania, ~6x szybsza transpilacja; 0.5: escape'y `\xHH`/`\u{...}`, JSON `\uXXXX`, zapis TOML, LSP `rename`)* - `hackerc`
 (transpilator) i `hack3rc` (kompilator AOT) sa dzis w calosci
 napisane w samym HackerScript (`.hcs`), nie w Pythonie/Rust jak w
 wersji `0.0.1`. Menedzerem pakietow i narzedziem budowania jest
@@ -25,7 +25,7 @@ nie tylko `core`/`std`), sekcja `[build]` w `Bit.hk` **usunieta**
 (plik wejsciowy jest teraz zawsze `cmd/main.hcs`, bez konfiguracji),
 oraz naprawiony blad z duplikujacym sie `cache/` w workspace (patrz
 <<historia-wersji>>).
-| Wersja | `0.5` (ta - self-hostujaca sie, wydawana na GitHub
+| Wersja | `0.6` (ta - self-hostujaca sie, wydawana na GitHub
 Releases) - `0.0.1` to *zamrozona* wersja startowa sprzed bootstrapu
 (patrz <<historia-wersji>>).
 | Licencja | MIT (c) 2026 HackerOS Team
@@ -99,7 +99,12 @@ HackerScript/
     showcase/               ogromny, jednoplikowy przeglad jezyka (0.3/0.4)
     ffi-demo/               samodzielny przyklad FFI 0.3 (extern/region/c/cpp)
     SYNTAX.md                 pelny opis skladni (w tym get <work:...>, 0.4)
+    OS.md                     use <os:...> + target_os() (0.6)
+    PERFORMANCE.md            wydajnosc transpilacji + cache budowania (0.6)
+    BIT.md                    kontrakt bit <-> hackerc
     ROADMAP.md                 co jeszcze brakuje (szczegolowo, per-plik)
+  tests/                  testy hackerc (run.sh + cases/); hack3rc/tests/ - testy hack3rc
+  CHANGELOG.md            zmiany per wersja
   scripts/                install.sh/remove.sh (HackerOS) + skrypty .hl
   .github/workflows/      CI (buduje I URUCHAMIA wygenerowany crate) + Release
 ----
@@ -177,7 +182,7 @@ dzieli jeden `target/`. Patrz `bit`.
 # hackerc i bit sa binarkami natywnymi (self-hosted) - najprosciej
 # pobrac gotowe wydanie:
 curl -L --fail -o hackerc \
-  https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v0.5/hackerc
+  https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v0.6/hackerc
 chmod +x hackerc
 
 ./hackerc check docs/hello-world/Bit.hk
@@ -270,6 +275,14 @@ strona w stylu Rust Playground). Mechanizm `using <wersja>` pobiera
 teraz `v0.4`. Pelny opis: `docs/SYNTAX.md` (sekcje "`get <work:...>`",
 "`include <work:...>`", "`@wasm_export`") i `docs/ROADMAP.md` (sekcja
 "Zrobione w 0.4").
+
+| `0.6`
+a|
+*Wydajnosc i cele.* `use <os:linux|windows|macos|ios|android>` (guard `compile_error!`,
+wskazowka `target` dla `bit`, `target_os()`, `std:os`); transpilacja ~6x szybsza
+(bez gleboki klonow sygnatur, `push_str` zamiast `format!`, prefiltr leksera); cache budowania
+(`.hks-cache`) i zapis plikow tylko przy zmianie; nowe CI (stage0 -> hackerc -> hack3rc), `tests/`,
+`hack3rc/tests/`. Szczegoly: `CHANGELOG.md`, `docs/OS.md`, `docs/PERFORMANCE.md`.
 |===
 
 == Status projektu
