@@ -1,4 +1,4 @@
-using <0.3>
+using <0.6>
 
 get <core:memory::arena> import <arena_new::arena_alloc::arena_get>
 
