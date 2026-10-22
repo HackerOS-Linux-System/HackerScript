@@ -14,7 +14,7 @@ plików `.rs`/`.c` w repozytorium):
 | `hack3rc/cmd/lower.hcs` | analiza semantyczna + typy + lowering AST → IR (czysty HackerScript) |
 | `hack3rc/cmd/backend.hcs` | backend Cranelift: IR → plik obiektowy |
 | `hack3rc/cmd/runtime.hcs` | runtime (tekst C linkowany z programem): I/O, napisy, listy, **odśmiecacz pamięci** |
-| `hack3rc/tests/` | testy (runner `run.hcs` też w HackerScript) |
+| `hack3rc/tests/` | testy (`run.sh`, `cases/*.hcs` + `*.out`) |
 
 Frontend (lexer, parser, AST, diagnostyki) jest **współdzielony z `hackerc`**
 (`include <work:hackerc::...>`), więc `hack3rc` czyta dokładnie ten sam język.
