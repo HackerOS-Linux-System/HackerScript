@@ -1,4 +1,4 @@
-using <0.4>
+using <0.6>
 
 get <std:string> import <str_trim::str_contains::str_starts_with::str_ends_with::str_replace::str_repeat::str_split::str_join>
 
