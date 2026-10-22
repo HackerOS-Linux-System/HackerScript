@@ -121,7 +121,7 @@ impl Point [
 ## Dyrektywy `use <klucz:wartość>` i features crate'ów
 
 Dyrektywy na poziomie pliku wejściowego wybierają cel kompilacji. Rozpoznawane
-klucze: `lang`, `mode`, `crosscompile`, `arc`.
+klucze: `lang`, `mode`, `os`, `crosscompile`, `arc`.
 
 | Dyrektywa | Znaczenie |
 |---|---|
@@ -129,6 +129,7 @@ klucze: `lang`, `mode`, `crosscompile`, `arc`.
 | `use <mode:website>` | `hackerc build` generuje stronę (`index.html` + `app.js`) — patrz `docs/WEBSITE.md` |
 | `style { ... }` (nie `use`, osobna konstrukcja) | surowy CSS dla `mode:website`, wstawiany do `index.html` — patrz sekcja „Style” w `docs/WEBSITE.md` |
 | `use <lang:kotlin>` | eksperymentalny backend Kotlina (`hackerc kotlin`) |
+| `use <os:linux\|windows\|macos\|ios\|android>` | system docelowy (0.6): guard `compile_error!`, wskazówka `target` dla `bit`, `target_os()` — patrz `docs/OS.md` |
 | `use <crosscompile>`, `use <arc:architektura>` | zapisywane w pliku pomocniczym dla `bit` |
 
 `get <crates:nazwa::wersja>` dodaje zależność Cargo. Od wersji 0.6 część po
