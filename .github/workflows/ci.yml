@@ -1,66 +1,93 @@
 name: CI
 
+# 0.6 - CI dla self-hostujacego sie HackerScript (hackerc + hack3rc napisane w .hcs).
+# Stary job Pythonowy (`pytest hackerc/tests`) i job `virus-build` zostaly usuniete:
+# `virus` zastapil `bit`, a `hackerc` nie jest juz projektem Pythonowym.
+
 on:
   push:
     branches: [main]
   pull_request:
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   hackerc-tests:
-    name: hackerc (Python) - testy
+    name: hackerc - build (stage0) + testy
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-      - name: Zainstaluj hackerc (editable) + pytest
-        run: |
-          pip install -e ./hackerc
-          pip install pytest
-      - name: pytest
-        run: pytest hackerc/tests -v
-      - name: Sanity - transpilacja przykladu hello-world (crate Rust)
-        run: |
-          python -m hackerc.cli check examples/hello-world/cmd/main.hcs
-          python -m hackerc.cli build examples/hello-world/cmd/main.hcs -o /tmp/hw-out
-          cat /tmp/hw-out/Cargo.toml
-          test -f /tmp/hw-out/src/main.rs
       - uses: dtolnay/rust-toolchain@stable
-        if: matrix.python-version == '3.12'
-      - name: KRYTYCZNE - skompiluj i uruchom wygenerowany crate
-        if: matrix.python-version == '3.12'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "/tmp/hackerc-crate"
+      - name: Pobierz stage0 (hackerc z poprzedniego wydania)
         run: |
-          cd /tmp/hw-out
-          cargo run --release
+          STAGE0="$(grep -E '^\s*->\s*using\s*=>' Bit.hk | head -n1 | sed -E 's/.*=>\s*0\.([0-9]+).*/\1/')"
+          STAGE0="0.$((STAGE0 - 1))"
+          echo "stage0 = $STAGE0"
+          curl -fsSL -o stage0-hackerc \
+            "https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v${STAGE0}/hackerc"
+          chmod +x stage0-hackerc
+      - name: stage0 transpiluje hackerc/cmd/main.hcs
+        run: ./stage0-hackerc build hackerc/cmd/main.hcs -o /tmp/hackerc-crate
+      - name: cargo build --release (hackerc)
+        working-directory: /tmp/hackerc-crate
+        run: cargo build --release
+      - name: Testy (tests/run.sh) swiezo zbudowanym hackerc
+        env:
+          HACKERC: /tmp/hackerc-crate/target/release/hackerscript_app
+        run: bash tests/run.sh
+      - name: Samohostowanie - swiezy hackerc transpiluje sam siebie (musi dac identyczny wynik)
+        env:
+          HACKERC: /tmp/hackerc-crate/target/release/hackerscript_app
+        run: |
+          "$HACKERC" build hackerc/cmd/main.hcs -o /tmp/hackerc-gen2
+          diff -rq /tmp/hackerc-crate/src /tmp/hackerc-gen2/src
 
-  virus-build:
-    name: virus (Rust) - build + testy + clippy
-    runs-on: ${{ matrix.os }}
+  hack3rc-build:
+    name: hack3rc (AOT) - transpilacja i kompilacja
+    runs-on: ubuntu-latest
+    needs: hackerc-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Pobierz stage0 jako hackerc
+        run: |
+          STAGE0="$(grep -E '^\s*->\s*using\s*=>' Bit.hk | head -n1 | sed -E 's/.*=>\s*0\.([0-9]+).*/\1/')"
+          curl -fsSL -o stage0-hackerc "https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v0.$((STAGE0 - 1))/hackerc"
+          chmod +x stage0-hackerc
+      - name: transpilacja + cargo build hack3rc
+        run: |
+          ./stage0-hackerc build hack3rc/cmd/main.hcs -o /tmp/hack3rc-crate --crate-name hack3rc
+          cd /tmp/hack3rc-crate && cargo build --release
+      - name: Testy hack3rc
+        run: bash hack3rc/tests/run.sh /tmp/hack3rc-crate/target/release/hack3rc
+
+  os-targets:
+    name: "use <os:...> - cargo check dla celow (${{ matrix.target }})"
+    runs-on: ubuntu-latest
+    needs: hackerc-tests
+    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-pc-windows-gnu
+          - aarch64-linux-android
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: virus
-      - name: cargo build (workspace)
-        working-directory: virus
-        run: cargo build --workspace --all-targets
-      - name: cargo test (workspace)
-        working-directory: virus
-        run: cargo test --workspace
-      - name: cargo clippy
-        working-directory: virus
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: cargo fmt --check
-        working-directory: virus
-        run: cargo fmt --all -- --check
+          targets: ${{ matrix.target }}
+      - name: Pobierz stage0
+        run: |
+          STAGE0="$(grep -E '^\s*->\s*using\s*=>' Bit.hk | head -n1 | sed -E 's/.*=>\s*0\.([0-9]+).*/\1/')"
+          curl -fsSL -o stage0-hackerc "https://github.com/HackerOS-Linux-System/HackerScript/releases/download/v0.$((STAGE0 - 1))/hackerc"
+          chmod +x stage0-hackerc
+      - name: transpilacja docs/hello-world i cargo check --target
+        run: |
+          ./stage0-hackerc build docs/hello-world/cmd/main.hcs -o /tmp/hw-out
+          cd /tmp/hw-out && cargo check --target ${{ matrix.target }}
