@@ -520,3 +520,9 @@ Zrobione i sprawdzone w tej rundzie: patrz `CHANGELOG.md` (wersje 0.5, escapowan
 patch portu Hacker Lang, nowe workflowy, testy, brakujące dokumenty). Lista rzeczy nadal otwartych jest
 na końcu `CHANGELOG.md` i zastępuje starsze listy "Nadal otwarte" powyżej tam, gdzie są sprzeczne.
 Uwaga: sekcje 1 (brak ParseError / numerów linii) i duplikat wpisu `get <work:...>` są historyczne.
+
+## Aktualizacja 0.6 (2026-10-22)
+
+Zrobione: `use <os:...>` + `target_os()` + `std:os` (`docs/OS.md`), cache budowania i szybsza transpilacja
+(`docs/PERFORMANCE.md`), nowe CI, `tests/` i `hack3rc/tests/`, wersja 0.6 wszędzie. Pełna lista zmian i
+rzeczy nadal otwartych: `CHANGELOG.md` (sekcja „Nadal otwarte” zastępuje sprzeczne starsze listy powyżej).
