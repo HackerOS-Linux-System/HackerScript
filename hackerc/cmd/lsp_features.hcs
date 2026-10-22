@@ -164,6 +164,9 @@ fun lsp_builtin_doc(word: Str) -> Str [
     if word == "now_ms" [
         end "now_ms() -> Int - czas w ms od epoki Unix"
     ]
+    if word == "target_os" [
+        end "target_os() -> Str - system docelowy programu: linux | windows | macos | ios | android"
+    ]
     if word == "sha256_hex" [
         end "sha256_hex(text: Str) -> Str"
     ]
@@ -249,7 +252,7 @@ fun lsp_completion_json(source: Str) -> Str [
         items.push(lsp_completion_item(kws[i].clone(), 14, "slowo kluczowe"))
         i = i + 1
     ]
-    let bs: List<Str> = ["log", "elog", "dict", "set", "some", "none", "ok", "err", "read_file", "write_file", "run_command", "now_ms", "sha256_hex", "env_var", "http_get"]
+    let bs: List<Str> = ["log", "elog", "dict", "set", "some", "none", "ok", "err", "read_file", "write_file", "run_command", "now_ms", "target_os", "sha256_hex", "env_var", "http_get"]
     let bi = 0
     while bi < bs.len() [
         items.push(lsp_completion_item(bs[bi].clone(), 3, lsp_builtin_doc(bs[bi].clone())))
