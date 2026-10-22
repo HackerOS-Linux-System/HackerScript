@@ -1,4 +1,4 @@
-# Gramatyka HackerScript (EBNF) — 0.4
+# Gramatyka HackerScript (EBNF) — 0.6
 
 Ten plik jest formalnym uzupełnieniem `docs/SYNTAX.md` (który zostaje
 nadal jako ręcznie pisana mapa/samouczek — w razie rozbieżności
@@ -191,7 +191,7 @@ str_char       = ? dowolny znak poza '"' , albo sekwencja ucieczki
 
 ## Znane rozbieżności gramatyki formalnej vs. `parser.hcs`
 
-Ta gramatyka opisuje **docelową** składnię 0.4. Zgodnie z
+Ta gramatyka opisuje **docelową** składnię 0.6. Zgodnie z
 `docs/ROADMAP.md` (sekcja 1), parser bootstrapu ma dziś dwa realne
 odstępstwa od powyższego:
 
