@@ -1389,6 +1389,31 @@ fun transpile_program_with_extra(prog: Program, direct_blocks: List<Str>, native
             header.push("        let __hks_kt_stdlib = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(\"kotlin_classes\").join(\"kotlin-stdlib.jar\"))).map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| \"kotlin_classes/kotlin-stdlib.jar\".to_string());")
             header.push("        let __hks_cp_dir = format!(\"{}:{}\", __hks_cp_dir, __hks_kt_stdlib);")
         ]
+        !!! 0.6 - zewnetrzne jary z `get <java:...>`/`get <kotlin:...>` TRAFIAJA
+        !!! TERAZ takze na classpath w RUNTIME (wczesniej byly tylko przy
+        !!! kompilacji, mimo opisu w docs/JAVA.md). Dla kazdego wpisu dopisujemy
+        !!! DWA kandydaty: sciezke dokladnie jak w zrodle oraz `java_classes/<nazwa
+        !!! pliku>` obok binarki (tam `bit build` kopiuje jary). JVM po cichu
+        !!! ignoruje nieistniejace wpisy classpath, wiec nadmiarowy kandydat nie szkodzi.
+        let jcp_i = 0
+        while jcp_i < gen.java_classpath_entries.len() [
+            let jcp_ent: Str = gen.java_classpath_entries[jcp_i].clone()
+            let jcp_base: Str = jcp_ent.clone()
+            let jcp_k = jcp_ent.len() - 1
+            while jcp_k >= 0 [
+                if jcp_ent.char_at(jcp_k) == "/" [
+                    jcp_base = jcp_ent.slice(jcp_k + 1, jcp_ent.len())
+                    jcp_k = -1
+                ] else [
+                    jcp_k = jcp_k - 1
+                ]
+            ]
+            let jcp_lit_ent = hks_rust_str_lit(jcp_ent.clone())
+            let jcp_lit_base = hks_rust_str_lit(jcp_base)
+            header.push("        let __hks_cp_dir = format!(\"{}:{}\", __hks_cp_dir, " + jcp_lit_ent + ");")
+            header.push("        let __hks_cp_dir = format!(\"{}:{}\", __hks_cp_dir, std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(\"java_classes\").join(" + jcp_lit_base + "))).map(|p| p.to_string_lossy().to_string()).unwrap_or_default());")
+            jcp_i = jcp_i + 1
+        ]
         header.push("        let __hks_cp_opt = format!(\"-Djava.class.path={}\", __hks_cp_dir);")
         header.push("        let __hks_args = jni::InitArgsBuilder::new().option(&__hks_cp_opt).build().expect(\"nieprawidlowe argumenty inicjalizacji embedded JVM\");")
         header.push("        jni::JavaVM::new(__hks_args).expect(\"nie udalo sie wystartowac embedded JVM - czy JRE/JDK (libjvm.so) jest dostepne w tym srodowisku?\")")
@@ -1535,4 +1560,23 @@ fun main() [
     let result = transpile_source_full(src, "<demo>", "module", extra)
     log("needs_pyo3:", result.needs_pyo3)
     log("dlugosc wygenerowanego Rusta:", result.rust_code.len())
+]
+
+!!! 0.6 - literal napisu Rust (z cudzyslowami) dla sciezki wstawianej do
+!!! wygenerowanego kodu: ucieka `\\` i `"`.
+fun hks_rust_str_lit(t: Str) -> Str [
+    let out = "\""
+    let i = 0
+    while i < t.len() [
+        let c = t.char_at(i)
+        if c == "\\" [
+            out = out + "\\\\"
+        ] elif c == "\"" [
+            out = out + "\\\""
+        ] else [
+            out = out + c
+        ]
+        i = i + 1
+    ]
+    end out + "\""
 ]
