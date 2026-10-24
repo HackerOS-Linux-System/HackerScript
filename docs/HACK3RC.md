@@ -79,7 +79,8 @@ kompilator C tego celu: domyślnie `<arch>-linux-gnu-gcc` (pakiety
 
 **Zweryfikowane** (kompilacja + uruchomienie całego zestawu testów pod QEMU):
 x86_64 (natywnie), aarch64, riscv64, s390x (big-endian) — 31 testów na
-każdej (wersja produkcyjna, `lto=fat`). **Tylko obiekt** (sprawdzony nagłówek pliku, bez
+każdej (wersja produkcyjna, `lto=fat`). *Wynik z wcześniejszej, większej wersji zestawu;
+w tej rundzie ponownie sprawdzono tylko x86_64 na zestawie z `hack3rc/tests/` (7 testów).* **Tylko obiekt** (sprawdzony nagłówek pliku, bez
 linkowania ani uruchomienia): macOS `x86_64-apple-darwin`/`aarch64-apple-darwin`
 (Mach-O) i Windows `x86_64-pc-windows-msvc` (COFF); dla nich pełny `exe`
 wymaga własnego `--cc` i nie był testowany (runtime C zakłada POSIX/libc).
@@ -215,15 +216,21 @@ Układ obiektów: struct = pola w kolejnych 8-bajtowych slotach; enum/Option =
 ## Testy
 
 ```
-hack3rc/tests/run.sh [ścieżka-do-hack3rc]   # kompiluje każdy tests/*.hcs, porównuje z *.out (także z HKS_GC_STRESS=1)
+hack3rc/tests/run.sh [ścieżka-do-hack3rc]   # albo HACK3RC=...
 ```
 
-`TESTS`: programy z oczekiwanym wyjściem i kodem wyjścia, warianty `nazwa+gc`
-(GC przy każdej alokacji) i testy błędów kompilacji (`err_*`). Oczekiwane
-wyjścia programów wspólnych z `hackerc` zostały **wygenerowane referencyjnym
-`hackerc`** (transpilacja do Rusta), więc test sprawdza zgodność bajt po
-bajcie. Z trzecim argumentem (`aarch64`, `riscv64`, `s390x`) cały zestaw jest
-kompilowany i uruchamiany dla tej architektury (pod QEMU).
+`hack3rc/tests/cases/*.hcs` — programy uruchamiane przez `hack3rc <plik> --run`;
+wyjście musi zgadzać się bajt po bajcie z `<nazwa>.out`. Oczekiwane wyjścia
+**wygenerowano referencyjnym `hackerc`** (transpilacja do Rusta), więc to test
+różnicowy obu kompilatorów. `hack3rc/tests/errors/*.hcs` — programy, dla których
+`hack3rc --check` musi zgłosić błąd z kodem podanym w pierwszej linii
+(`!! expect: H0301`). Zmienna `HKS_GC_STRESS=1` jest dziedziczona przez uruchamiane
+programy (odśmiecanie przy każdej alokacji); zestaw przechodzi także w tym trybie.
+
+Poprzednia, większa wersja tej sekcji opisywała warianty `nazwa+gc`, testy `err_*`
+i trzeci argument z architekturą (uruchamianie pod QEMU). Tego mechanizmu
+`run.sh` w tym repozytorium **nie ma** — cross-architekturowe uruchomienia trzeba
+robić ręcznie (`--target <arch> --run`).
 
 ## Wydajność (pomiary jednej, hałaśliwej maszyny — nie benchmark)
 
@@ -262,7 +269,8 @@ przy `Err` zwraca z funkcji ten sam `Err`, w przeciwnym razie daje `T`. Na `Opti
 zwracajacej `Option<_>` przy `None` zwraca `none()`. Bledy: H0414/H0415 (konstruktor bez typu / zly typ),
 H0054/H0055/H0056 (`?` poza pasujaca funkcja / niezgodny typ bledu), H0474 (nieznana metoda Result).
 
-Testy: `hack3rc/tests/cases/result_try`, `result_struct` (payload strukturalny, 20000 iteracji;
-sprawdzone tez z `HKS_GC_STRESS=1`).
+Testy: `hack3rc/tests/` (uruchamiane przez `hack3rc/tests/run.sh`; w tym `result_option` -
+test roznicowy z `hackerc`). Wczesniejsze testy obciazeniowe (payload strukturalny, 20000
+iteracji, `HKS_GC_STRESS=1`) nie sa czescia tego repozytorium.
 
 Nadal nieobslugiwane: `Dict`, interpolacja stringow, async/kanaly, `get`/`include`, `native`.
