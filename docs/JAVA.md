@@ -6,7 +6,8 @@ osadzonej JVM (`hks_get_jvm()`, crate `jni` 0.21 z cechą `invocation`, zależno
 build-dependency).
 
 * `get <java:sciezka.jar>` dopisuje jar do classpath: przy kompilacji (`javac -cp`) i w
-  runtime (`-Djava.class.path`). To **ścieżka do pliku**, nie nazwa biblioteki systemowej, i
+  runtime (`-Djava.class.path`; runtime od 0.6 - wczesniej wpis trafial tylko na classpath
+  kompilacji, patrz `docs/KOTLIN.md`). To **ścieżka do pliku**, nie nazwa biblioteki systemowej, i
   samo `get` nie tworzy żadnych sygnatur - do wywołań służy wyłącznie `native {java}`.
 * Wpisy classpath mogą się powtarzać; `bit build` je odduplikowuje.
 * Kotlin używa tego samego mechanizmu (patrz `KOTLIN.md`): ten sam bajtkod, inny kompilator.
