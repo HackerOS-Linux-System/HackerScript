@@ -1,0 +1,33 @@
+use <mode:website>
+
+!!! Przyklad bloku `style { }` (docs/WEBSITE.md, sekcja "Style"):
+!!! CSS bez osobnego pliku, wewnatrz klamry w stringach i komentarzach, @media
+!!! oraz kilka blokow `style` w jednym pliku.
+
+style {
+    :root { --akcent: #38c8ff; --tlo: #08040d; }
+    /* komentarz z klamra } nie zamyka bloku */
+    body  { margin: 0; background: var(--tlo); color: white; font-family: sans-serif; }
+    .karta { padding: 24px; border: 1px solid #333; border-radius: 12px; }
+    .karta:hover { border-color: var(--akcent); }
+    .karta::after { content: "}"; opacity: 0.4; }
+}
+
+style {
+    @media (max-width: 760px) { .karta { padding: 12px; } }
+}
+
+fun on_click() [
+    dom_text(dom_get("licznik"), "kliknieto")
+]
+
+fun main() [
+    page_title("website-style")
+    let root = app_root()
+    let k = child(root, "div", "Czesc ze stylem z pliku .hcs")
+    dom_attr(k, "class", "karta")
+    let btn = child(k, "button", "Kliknij")
+    let out = child(k, "p", "")
+    dom_attr(out, "id", "licznik")
+    dom_on(btn, "click", on_click)
+]
