@@ -105,3 +105,62 @@ fun run_capture_input(program: Str, args: List<Str>, input: Str) -> Result<CmdOu
     ]
     end err("nie udalo sie uruchomic '" + program + "': " + why)
 ]
+
+!! ---------------------------------------------------------------------
+!! 0.6: strumieniowanie wyjscia procesu.
+!! ---------------------------------------------------------------------
+
+!! Jak `run_capture`, ale wyjscie procesu jest PRZEKAZYWANE NA ZYWO na
+!! stdout/stderr programu (jak `tee`) W TRAKCIE jego dzialania - przy
+!! dlugich poleceniach (`cargo build`, `make`) widac postep, a po
+!! zakonczeniu dostajemy tez pelny zapis w `CmdOutput`. stdin procesu
+!! jest zamkniety. Err tylko gdy nie udalo sie uruchomic procesu.
+fun run_tee(program: Str, args: List<Str>) -> Result<CmdOutput, Str> [
+    let started = false
+    let code = 0
+    let so = ""
+    let se = ""
+    let why = ""
+    native {Rust} [
+        use std::io::{Read, Write};
+        use std::process::{Command, Stdio};
+        fn pump<R: Read + Send + 'static>(mut src: R, to_err: bool) -> std::thread::JoinHandle<Vec<u8>> {
+            std::thread::spawn(move || {
+                let mut acc: Vec<u8> = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    match src.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if to_err {
+                                let _ = std::io::stderr().write_all(&buf[..n]);
+                            } else {
+                                let _ = std::io::stdout().write_all(&buf[..n]);
+                                let _ = std::io::stdout().flush();
+                            }
+                            acc.extend_from_slice(&buf[..n]);
+                        }
+                    }
+                }
+                acc
+            })
+        }
+        match Command::new(&program).args(args.iter()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+            Ok(mut child) => {
+                let h_out = pump(child.stdout.take().unwrap(), false);
+                let h_err = pump(child.stderr.take().unwrap(), true);
+                match child.wait() {
+                    Ok(st) => { started = true; code = st.code().unwrap_or(-1) as i64; }
+                    Err(e) => { why = format!("{}", e); }
+                }
+                so = String::from_utf8_lossy(&h_out.join().unwrap_or_default()).to_string();
+                se = String::from_utf8_lossy(&h_err.join().unwrap_or_default()).to_string();
+            }
+            Err(e) => { why = format!("{}", e); }
+        }
+    ]
+    if started [
+        end ok(CmdOutput(code, so, se))
+    ]
+    end err("nie udalo sie uruchomic '" + program + "': " + why)
+]
