@@ -341,8 +341,22 @@ impl Parser [
             !!! dzis jako stage0) DAJE prawdziwy blad skladni (ParseError).
             self.push_error("'get <selfhost:...>' jest zablokowane - uzyj 'include <plik>' zamiast tego", self.cur().line, self.cur().col, 1)
         ]
-        self.expect(Colon, none())
-        let name = self.read_angle_segment()
+        !!! `get <mold>` / `get <mold::1.2>` - BEZ `zrodlo:`. Zrodlo to wtedy
+        !!! "auto": `Discovery::normalize_last_file` (project.hcs) przepisuje je
+        !!! na "hlib" (gdy istnieje `.hlib`) albo "bit" (gdy jest biblioteka
+        !!! bit) ZARAZ po sparsowaniu pliku, wiec dalsze fazy (codegen,
+        !!! nazwy modulow) widza tylko prawdziwe zrodlo.
+        let name = ""
+        if self.check(Colon, none()) [
+            self.advance()
+            name = self.read_angle_segment()
+        ] else [
+            name = source
+            source = "auto"
+            if name == "" [
+                self.push_error("'get <>' - oczekiwano nazwy biblioteki, np. 'get <mold>'", self.cur().line, self.cur().col, 1)
+            ]
+        ]
         let version: Option<Str> = none()
         if self.check(DColon, none()) [
             self.advance()
