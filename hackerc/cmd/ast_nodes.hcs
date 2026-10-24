@@ -150,3 +150,27 @@ fun main() [
     let prog = Program([f])
     log("instrukcje w programie:", prog.body.len())
 ]
+
+!!! (0.6) `for k, v in dict.items() [ ... ]` - `ForStmt` ma jedna nazwe
+!!! zmiennej (`Str`), wiec dwie zmienne sa zapisane jako `"k, v"`
+!!! (bez zmiany ksztaltu AST - 12 miejsc dopasowania `ForStmt` zostaje
+!!! bez zmian). Ta funkcja rozbija taka nazwe na liste zmiennych:
+!!! `"i"` -> `["i"]`, `"k, v"` -> `["k", "v"]`.
+fun for_var_names(var: Str) -> List<Str> [
+    let out: List<Str> = []
+    let cur = ""
+    let i = 0
+    let n = var.len()
+    while i < n [
+        let c = var.char_at(i)
+        if c == "," [
+            out.push(cur.clone())
+            cur = ""
+        ] elif c != " " [
+            cur = cur + c
+        ]
+        i = i + 1
+    ]
+    out.push(cur.clone())
+    end out
+]
