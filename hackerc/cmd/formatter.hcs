@@ -673,6 +673,20 @@ fun fmt_string_lit(value: Str) -> Str [
             out = out + "\\\\"
         ] elif c == "\"" [
             out = out + "\\\""
+        ] elif c == "\n" [
+            !! 0.6 (naprawa): lekser dekoduje `\n \t \r \e \0` na prawdziwe znaki,
+            !! a formatter wypisywal je SUROWO - `hackerc fmt` zamienial `"a\nb"`
+            !! w literal z prawdziwym znakiem nowej linii (zmiana znaczenia/psucie
+            !! kodu). Teraz kodujemy je z powrotem (idempotentnie).
+            out = out + "\\n"
+        ] elif c == "\t" [
+            out = out + "\\t"
+        ] elif c == "\r" [
+            out = out + "\\r"
+        ] elif c == "\e" [
+            out = out + "\\e"
+        ] elif c == "\0" [
+            out = out + "\\0"
         ] else [
             out = out + c
         ]
