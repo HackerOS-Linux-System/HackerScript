@@ -575,7 +575,7 @@ fun find_substr(s: Str, needle: Str) -> Int [
 !!! `<przodek>/<czlonek>/lib`, zaczynajac od `base_dir`) +
 !!! `work_module_file_path` (`<korzen>/<czlonek>/lib/<plik lub
 !!! "mod">.hcs`) - patrz definicje obu przy `find_libs_root` powyzej.
-!!! Przyklad: `playground/lib/mod.hcs` z `include <work:hackerc::
+!!! Przyklad: `playground/cmd/main.hcs` z `include <work:hackerc::
 !!! ast_nodes>` dostaje PRAWDZIWY `hackerc/cmd/ast_nodes.hcs`
 !!! wkompilowany do WLASNEGO crate'a playground (jeden binarny plik
 !!! wynikowy/`.wasm`, zero duplikacji zrodla) - tak jak `mod` w Rust
