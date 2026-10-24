@@ -209,7 +209,7 @@ podmoduł) z rozwiązywaniem ścieżki `get <work:...>` (względem korzenia
 workspace, nie bieżącego katalogu).
 
 ```
-!! playground/lib/mod.hcs:
+!! playground/cmd/main.hcs:
 include <work:hackerc::ast_nodes>   !! => hackerc/cmd/ast_nodes.hcs, scalony bez prefiksu
 include <work:hackerc::lexer>
 include <work:hackerc::parser>
@@ -234,7 +234,7 @@ nigdy nie kolidować z `get`). To jest właśnie **prawdziwe statyczne
 linkowanie**: kod `hackerc`a (parser, typecheck, diagnostyki...) trafia
 skompilowany **wprost do crate'a** `playground` (patrz sekcja
 "`@wasm_export`" niżej) — zero kopiowania plików, zero duplikowania
-źródła między `hackerc/cmd/` a `playground/lib/` — dokładnie jak
+źródła między `hackerc/cmd/` a `playground/cmd/` — dokładnie jak
 wtedy, gdy `mod` w Rust wskazuje na plik spoza własnego katalogu
 (`#[path = "..."]`), tylko bez potrzeby takiej adnotacji.
 
@@ -287,7 +287,7 @@ się twardym błędem CLI, to ograniczenie całego ekosystemu
 błędem krytycznym: surowy `.wasm` (bez glue) i tak trafia do
 `cache/build/`, z ostrzeżeniem jak go dokończyć ręcznie.
 
-Zobacz `playground/` (`playground/lib/mod.hcs` + `playground/web/`) -
+Zobacz `playground/` (`playground/cmd/main.hcs` + `playground/web/`) -
 działający przykład: `check_source` oznaczone `@wasm_export`, budowane
 z `bit build --wasm` uruchomionym w `playground/`.
 
