@@ -1,10 +1,10 @@
 # `lsp` — Language Server dla HackerScript
 
-Status: **projekt (Faza 1 — specyfikacja)**, jeszcze nie
-zaimplementowane w kodzie. Ten dokument opisuje kształt, w jakim
-`lsp` zostanie dodane jako podkomenda zarówno `hackerc lsp`, jak i
-`bit lsp` w kolejnej rundzie pracy (Faza 2, patrz
-`docs/ROADMAP.md`).
+Status: **zaimplementowane w `hackerc lsp`** (diagnostyka, hover, definition,
+completion, formatowanie, a od 0.6 także rename, references, documentSymbol —
+patrz sekcje niżej). Dokument zaczyna się od pierwotnej specyfikacji
+(Faza 1), którą zachowano jako opis założeń. `bit lsp` należy do `bit`
+(poza tym repozytorium). Lista otwartych braków: `CHANGELOG.md`.
 
 ## Dlaczego w dwóch miejscach
 
@@ -106,9 +106,11 @@ opcjonalnym `pub `) od jednego z tych słów kluczowych + nazwy.
 - **hover** — sygnatura `fun` (bez `[`) albo pełne ciało `struct`/`enum`
   (do `]`, max 30 linii); dla wbudowanych (`log`, `dict`, `now_ms`, ...)
   krótki opis; dla słów kluczowych — nazwa.
-- **definition** — pierwsza deklaracja o pasującej nazwie w OTWARTYM
-  dokumencie (brak wsparcia wielu plików / zakresów — jeśli dwie funkcje
-  w różnych `impl` mają tę samą nazwę, trafia pierwsza).
+- **definition** — pierwsza deklaracja o pasującej nazwie w otwartym
+  dokumencie; od 0.6, gdy jej tam nie ma, także w plikach dołączonych przez
+  `include <nazwa>` leżących obok (czytanych z dysku). Brak wsparcia zakresów
+  — jeśli dwie funkcje w różnych `impl` mają tę samą nazwę, trafia pierwsza;
+  `get <work:...>` i `std` nie są przeszukiwane.
 - **completion** — słowa kluczowe + wbudowane + wszystkie deklaracje z
   dokumentu, bez filtrowania po prefiksie (klient filtruje sam, zgodnie
   ze standardowym zachowaniem LSP).
@@ -121,3 +123,27 @@ i wbudowane `log`.
 
 **Nieprzetestowane w prawdziwym edytorze** (VS Code/Neovim) — tylko
 protokół JSON-RPC bezpośrednio.
+
+## 0.6 — rename, references, documentSymbol
+
+Status: **zaimplementowane, sprawdzone surowym JSON-RPC po stdio**
+(`tests/lsp/lsp_test.py`, uruchamiany przez `tests/run.sh`).
+
+Implementacja nadal skanuje tekst (`lsp_features.hcs`): słowo pod kursorem
+jest dopasowywane jako CAŁE słowo w każdej linii, z pominięciem literałów
+napisów i komentarzy `!!`/`!!!`.
+
+- **rename** — `WorkspaceEdit` z `changes` dla otwartego dokumentu. Zwraca
+  `null`, gdy pod kursorem nie ma słowa albo nowa nazwa nie jest poprawnym
+  identyfikatorem (w tym gdy jest słowem kluczowym). **Bez analizy zasięgu:**
+  dwie niezależne zmienne o tej samej nazwie w różnych funkcjach zostaną
+  zmienione razem. Nie dotyka innych plików.
+- **references** — lista `Location` wszystkich wystąpień słowa w dokumencie.
+- **documentSymbol** — płaski spis `fun`/`struct`/`enum`/`const` (Function=12,
+  Struct=23, Enum=10, Constant=14); zmienne `let` są pomijane.
+
+Przy `initialize` serwer deklaruje `renameProvider`, `referencesProvider` i
+`documentSymbolProvider`. Wcześniejsze wzmianki o `rename` jako „zrobionym w
+0.5” były nieścisłe: w kodzie tej metody wtedy nie było.
+
+**Nieprzetestowane w prawdziwym edytorze** — tak jak reszta serwera.
