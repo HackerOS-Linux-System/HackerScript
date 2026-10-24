@@ -12,7 +12,7 @@ niewielkiego fragmentu kodu, ktory nigdy nie bedzie wymagal wydajnosci.
 
 [cols="1,3"]
 |===
-| Status | *Bootstrap osiagniety + FFI 0.3 + workspace 0.4 + 0.5 + 0.6 (`use <os:...>`, cache budowania, ~6x szybsza transpilacja; 0.5: escape'y `\xHH`/`\u{...}`, JSON `\uXXXX`, zapis TOML, LSP `rename`)* - `hackerc`
+| Status | *Bootstrap osiagniety + FFI 0.3 + workspace 0.4 + 0.5 + 0.6 (`use <os:...>`, cache budowania, ~6x szybsza transpilacja; 0.5: escape'y `\xHH`/`\u{...}`, JSON `\uXXXX`; 0.6: `Dict.items()`, `log()` dla struct/enum, LSP `rename`/`references`/`documentSymbol`, `toml_stringify`, nowe testy)* - `hackerc`
 (transpilator) i `hack3rc` (kompilator AOT) sa dzis w calosci
 napisane w samym HackerScript (`.hcs`), nie w Pythonie/Rust jak w
 wersji `0.0.1`. Menedzerem pakietow i narzedziem budowania jest
@@ -80,15 +80,17 @@ HackerScript/
     project.hcs             wielo-plikowe skladanie projektu, Cargo.toml
     formatter.hcs            formater kodu .hcs
     diagnostics.hcs          renderowanie bledow w stylu rustc (podkreslona linia)
-    main.hcs                 CLI: build/check/lint/fmt (kolorowe, z paskiem postepu) - do 0.3: cli.hcs
+    main.hcs                 CLI: build/check/lint/fmt/lsp/hlib/js/website (kolorowe, z paskiem postepu)
     playground.hcs           demo/checker uzywany przez playground WASM
+    lsp.hcs, lsp_features.hcs   Language Server (hover, definition, completion, rename, references, symbole)
+    javascript_backend.hcs, js_runtime.hcs, kotlin_backend.hcs   backendy JS i Kotlin
   hack3rc/cmd/         kompilator AOT (Cranelift), W CALOSCI w HackerScript
   Bit.hk                  workspace (czlonkowie: hackerc, hack3rc, libs/core, libs/std)
   libs/
     core/lib/memory/        4 alokatory: arena, chained_arena, stack_allocator, pool_allocator
     std/lib/                fs, io, string, math, path, json, toml, hk, env,
-                             process, http, term (KOLORY + PASEK POSTEPU - nowe),
-                             result, cybersecurity/ (constant_time_eq, shannon_entropy)
+                             process, http, term (kolory + pasek postepu), os,
+                             result, cybersecurity/ (constant_time, encoding, entropy)
   playground/             checker HackerScript skompilowany do WASM (przegladarka, 0.4)
     cmd/main.hcs            statycznie linkuje hackerc przez get<work:...>, @wasm_export check_source
     web/                    index.html + main.js - dzialajaca strona w stylu Rust Playground
@@ -97,14 +99,26 @@ HackerScript/
     hello-world/            minimalny dzialajacy przyklad (.hk + .hcs)
     module-demo/            przyklad systemu modulow (get <core:...>)
     showcase/               ogromny, jednoplikowy przeglad jezyka (0.3/0.4)
+    website-style/          blok style { } w trybie use <mode:website>
     ffi-demo/               samodzielny przyklad FFI 0.3 (extern/region/c/cpp)
     SYNTAX.md                 pelny opis skladni (w tym get <work:...>, 0.4)
     OS.md                     use <os:...> + target_os() (0.6)
     PERFORMANCE.md            wydajnosc transpilacji + cache budowania (0.6)
     BIT.md                    kontrakt bit <-> hackerc
-    ROADMAP.md                 co jeszcze brakuje (szczegolowo, per-plik)
-  tests/                  testy hackerc (run.sh + cases/); hack3rc/tests/ - testy hack3rc
-  CHANGELOG.md            zmiany per wersja
+    HACK3RC.md                kompilator AOT (Cranelift)
+    FAST_DIRECT.md            direct {backend} - 19 backendow
+    LSP.md                    Language Server (hackerc lsp)
+    MULTI_VERSION.md          using <wersja> per plik
+    JAVA.md / KOTLIN.md / GO.md   FFI do JVM i Go
+    JAVASCRIPT.md / WEBSITE.md    backend JavaScript i tryb strony
+    HLIB_FORMAT.md            archiwa .hlib
+    GRAMMAR.md                gramatyka
+    WORK_INCLUDE_FIX.md       naprawa duplikacji modulow include <work:...>
+    ROADMAP.md                 historia + aktualny stan; lista otwartych punktow: CHANGELOG.md
+  tests/                  testy hackerc: run.sh, cases/, errors/, js/, net/, lsp/, check_links.sh
+  hack3rc/tests/          testy hack3rc: run.sh, cases/ (roznicowe z hackerc), errors/
+  CHANGELOG.md            zmiany per wersja + aktualna lista otwartych punktow
+  SESSION_LOG.md          dziennik pracy (mapa odwolan 'Tura N' z kodu)
   scripts/                install.sh/remove.sh (HackerOS) + skrypty .hl
   .github/workflows/      CI (buduje I URUCHAMIA wygenerowany crate) + Release
 ----
@@ -253,7 +267,7 @@ Pelny opis skladni: `docs/SYNTAX.md`, sekcja "FFI:
 extern/region/c/cpp".
 
 | `0.4`
-| *Ta wersja. Workspace + porzadki + WASM.* Szesc zmian:
+| *Workspace + porzadki + WASM.* Szesc zmian:
 `get <work:czlonek[::plik]>` i `include <work:czlonek[::plik]>` -
 ogolny import/statyczne linkowanie DOWOLNEGO czlonka
 `[workspace] -> members` (nie tylko `core`/`std`), analog Rustowego
@@ -276,13 +290,20 @@ teraz `v0.4`. Pelny opis: `docs/SYNTAX.md` (sekcje "`get <work:...>`",
 "`include <work:...>`", "`@wasm_export`") i `docs/ROADMAP.md` (sekcja
 "Zrobione w 0.4").
 
+| `0.5`
+| *Wewnetrzna.* Escape'y w napisach i JSON `\\uXXXX`, backend JavaScript, tryb strony, FFI Go/Java/Kotlin,
+`direct {backend}`, pierwszy LSP, kompilator AOT `hack3rc`. Opis per sesja: `docs/ROADMAP.md`.
+
 | `0.6`
 a|
-*Wydajnosc i cele.* `use <os:linux|windows|macos|ios|android>` (guard `compile_error!`,
+*Ta wersja. Wydajnosc i cele.* `use <os:linux|windows|macos|ios|android>` (guard `compile_error!`,
 wskazowka `target` dla `bit`, `target_os()`, `std:os`); transpilacja ~6x szybsza
 (bez gleboki klonow sygnatur, `push_str` zamiast `format!`, prefiltr leksera); cache budowania
 (`.hks-cache`) i zapis plikow tylko przy zmianie; nowe CI (stage0 -> hackerc -> hack3rc), `tests/`,
-`hack3rc/tests/`. Szczegoly: `CHANGELOG.md`, `docs/OS.md`, `docs/PERFORMANCE.md`.
+`hack3rc/tests/`. Ta runda: `Dict.items()` (`for k, v in d.items()`), `log()` dla struct/enum, `toml_stringify` i `[[tablice]]` w TOML,
+`http_download`/`http_get_lines`, `run_tee`, LSP `rename`/`references`/`documentSymbol` i `definition` miedzy plikami,
+naprawy: `get <extern:...>`, `hackerc fmt` i literaly napisow, `for x in lista`, classpath Javy w runtime.
+Szczegoly i lista otwartych punktow: `CHANGELOG.md`, `docs/OS.md`, `docs/PERFORMANCE.md`.
 |===
 
 == Status projektu
