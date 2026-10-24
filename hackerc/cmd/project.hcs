@@ -849,6 +849,68 @@ impl Discovery [
         ]
     ]
 
+    !!! `get <nazwa>` (bez `zrodlo:`) - patrz `parse_get_import`. Przepisuje
+    !!! ostatnio dodany plik: kazdy `GetImportStmt("auto", ...)` dostaje
+    !!! prawdziwe zrodlo - "hlib" gdy `find_hlib_file_path` cos znajdzie,
+    !!! w przeciwnym razie "bit" gdy jest biblioteka bit o tej nazwie.
+    !!! Gdy nie ma NICZEGO, zrodlem zostaje "hlib" (ta sama sciezka bledu co
+    !!! jawne `get <hlib:x>`, z lista sprawdzonych katalogow) plus jedno
+    !!! ostrzezenie wspominajace OBA zrodla. Robione od razu po
+    !!! `parse_and_add`, zanim ktokolwiek policzy `flat_module_name` - dzieki
+    !!! temu codegen i discovery zawsze widza te sama nazwe modulu.
+    fun normalize_last_file(self, base_dir: Str, libs_root: Option<Str>, bit_root: Option<Str>) [
+        let idx = self.files.len() - 1
+        let prog = self.files[idx].program.clone()
+        let new_body: List<Stmt> = []
+        let changed = false
+        let i = 0
+        let n = prog.body.len()
+        while i < n [
+            let s = prog.body[i].clone()
+            match s.clone() [
+                GetImportStmt(isource, iname, iversion, idetails) -> [
+                    if isource == "auto" [
+                        let chosen = "hlib"
+                        let hlib_path = find_hlib_file_path(iname.clone(), iversion.clone(), base_dir.clone(), bit_root.clone(), libs_root.clone())
+                        match hlib_path [
+                            Some(_hp) -> [
+                                chosen = "hlib"
+                            ]
+                            None -> [
+                                let have_bit = false
+                                match bit_root.clone() [
+                                    Some(vr) -> [
+                                        if file_readable(bit_module_file_path(vr, iname.clone(), iversion.clone())) [
+                                            have_bit = true
+                                        ]
+                                    ]
+                                    None -> [
+                                    ]
+                                ]
+                                if have_bit [
+                                    chosen = "bit"
+                                ] else [
+                                    self.warnings.push("get <" + iname.clone() + "> - nie znaleziono ani .hlib, ani biblioteki bit o tej nazwie (uruchom `bit install " + iname.clone() + "` albo zbuduj `hlibs/" + iname.clone() + ".hlib`)")
+                                ]
+                            ]
+                        ]
+                        new_body.push(GetImportStmt(chosen, iname, iversion, idetails))
+                        changed = true
+                    ] else [
+                        new_body.push(s)
+                    ]
+                ]
+                _ -> [
+                    new_body.push(s)
+                ]
+            ]
+            i = i + 1
+        ]
+        if changed [
+            self.files[idx].program = Program(new_body)
+        ]
+    ]
+
     !!! Faza 1 (discovery): parsuje `entry` + rekurencyjnie kazdy
     !!! zaimportowany modul `std`/`core`/`selfhost`/`bit`/`work` - BFS
     !!! po `GetImportStmt`. Parytet z `_resolve_project_files`.
@@ -864,6 +926,7 @@ impl Discovery [
         if not added [
             end
         ]
+        self.normalize_last_file(path_parent(entry.clone()), libs_root.clone(), bit_root.clone())
 
         let queue: List<QueueItem> = []
         let entry_prog = self.files[0].program.clone()
@@ -964,6 +1027,7 @@ impl Discovery [
                                 ]
                                 let ok = self.parse_and_add(mod_file.clone(), flat, isource, next_wm.clone())
                                 if ok [
+                                    self.normalize_last_file(path_parent(mod_file.clone()), libs_root.clone(), bit_root.clone())
                                     let last_prog = self.files[self.files.len() - 1].program.clone()
                                     collect_module_imports(last_prog, path_parent(mod_file), queue, next_wm)
                                 ]
@@ -1013,6 +1077,7 @@ impl Discovery [
                                 let next_wm_inc = extract_work_member(effective_path.clone())
                                 let ok = self.parse_and_add(mod_file.clone(), flat, "include", next_wm_inc.clone())
                                 if ok [
+                                    self.normalize_last_file(path_parent(mod_file.clone()), libs_root.clone(), bit_root.clone())
                                     let last_prog = self.files[self.files.len() - 1].program.clone()
                                     collect_module_imports(last_prog, path_parent(mod_file), queue, next_wm_inc)
                                 ]
