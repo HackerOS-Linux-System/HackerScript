@@ -2800,6 +2800,21 @@ impl CodeGen [
                 ]
             ]
         ]
+        !!! (0.6) `.items()` na `Dict<K, V>` - pary `(K, V)` do `for k, v in
+        !!! d.items() [ ... ]` (HackerScript nie ma typu krotki, wiec `.items()`
+        !!! ma sens WYLACZNIE jako zrodlo petli z dwiema zmiennymi).
+        !!! Kolejnosc jak w `HashMap` (nieokreslona) - tak samo jak `keys()`.
+        if shape.is_method_call and shape.method_name == "items" and args.len() == 0 [
+            match shape.target_type.clone() [
+                Some(tt2c) -> [
+                    if tt2c.name == "Dict" [
+                        end "(" + shape.target_rendered + ".iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>())"
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
         if shape.is_method_call [
             match shape.target_type.clone() [
                 Some(tt3) -> [
@@ -3961,7 +3976,27 @@ impl CodeGen [
                 self.emit("}")
             ]
             ForStmt(var, iterable, body) -> [
-                self.emit("for " + var + " in " + self.gen_expr(iterable) + " {")
+                let fvars = for_var_names(var.clone())
+                let rust_var = var.clone()
+                if fvars.len() == 2 [
+                    rust_var = "(" + fvars[0].clone() + ", " + fvars[1].clone() + ")"
+                ]
+                let iter_text = self.gen_expr(iterable.clone())
+                !! 0.6 (naprawa): `for x in xs` po liscie-IDENTYFIKATORZE. Bez tego
+                !! `xs` jako parametr (`&Vec<T>`) dawal `x: &T` (np. `Some(x)` nie
+                !! kompilowalo sie, E0308), a lokalna `xs` byla PRZENOSZONA do petli
+                !! (uzycie po petli = E0382). `.iter().cloned()` daje elementy na
+                !! wlasnosc bez klonowania calej listy.
+                if fvars.len() == 1 [
+                    match iterable.clone() [
+                        IdentExpr(iter_name) -> [
+                            iter_text = iter_text + ".iter().cloned()"
+                        ]
+                        _ -> [
+                        ]
+                    ]
+                ]
+                self.emit("for " + rust_var + " in " + iter_text + " {")
                 self.indent = self.indent + 1
                 self.gen_stmts(body)
                 self.indent = self.indent - 1
@@ -4129,6 +4164,48 @@ fun compute_no_default_structs(sigs: Signatures, boxed_fields: Dict<Str, Str>) -
 ]
 
 impl CodeGen [
+    !!! (0.6) Naglowek generyczny z ograniczeniem `Debug` na kazdym parametrze:
+    !!! `<T: std::fmt::Debug, U: std::fmt::Debug>` - uzywany WYLACZNIE przez
+    !!! `emit_display_impl` (ponizej). Pusta lista parametrow daje pusty napis.
+    fun generic_head_debug(self, type_params: List<Str>) -> Str [
+        if type_params.len() == 0 [
+            end ""
+        ]
+        let out = "<"
+        let i = 0
+        let n = type_params.len()
+        while i < n [
+            if i > 0 [
+                out = out + ", "
+            ]
+            out = out + type_params[i].clone() + ": std::fmt::Debug"
+            i = i + 1
+        ]
+        out = out + ">"
+        end out
+    ]
+
+    !!! (0.6) `log()` dla struct/enum. `log(x)` generuje `println!("{}", x)`,
+    !!! wiec KAZDY typ uzytkownika musi implementowac `Display`. Zamiast
+    !!! zgadywac typy argumentow (kompilator nie zna ich zawsze), kazdy
+    !!! `struct`/`enum` dostaje `impl Display`, ktory deleguje do `Debug`
+    !!! (`Point { x: 3, y: 4 }`, `Some(5)`...). `{:#}` daje wersje
+    !!! wielolinijkowa (`{:#?}`). Odpowiednik `Display`/`Debug` z ROADMAP.
+    fun emit_display_impl(self, name: Str, type_params: List<Str>) [
+        let impl_head = self.generic_head_debug(type_params.clone())
+        let ty_head = self.generic_head(type_params)
+        self.emit("impl" + impl_head + " std::fmt::Display for " + name + ty_head + " {")
+        self.indent = self.indent + 1
+        self.emit("fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {")
+        self.indent = self.indent + 1
+        self.emit("if f.alternate() { write!(f, \"{:#?}\", self) } else { write!(f, \"{:?}\", self) }")
+        self.indent = self.indent - 1
+        self.emit("}")
+        self.indent = self.indent - 1
+        self.emit("}")
+        self.emit("")
+    ]
+
     fun generic_head(self, type_params: List<Str>) -> Str [
         if type_params.len() == 0 [
             end ""
@@ -4278,6 +4355,7 @@ impl CodeGen [
         self.indent = self.indent - 1
         self.emit("}")
         self.emit("")
+        self.emit_display_impl(name.clone(), type_params.clone())
         self.current_type_params = []
     ]
 
@@ -4308,7 +4386,7 @@ impl CodeGen [
 
     fun gen_enum(self, name: Str, variants: List<EnumVariant>, type_params: List<Str>) [
         self.current_type_params = type_params.clone()
-        let gen_head = self.generic_head(type_params)
+        let gen_head = self.generic_head(type_params.clone())
         self.emit("#[derive(Debug, Clone, PartialEq)]")
         self.emit("pub enum " + name.clone() + gen_head + " {")
         self.indent = self.indent + 1
@@ -4336,6 +4414,7 @@ impl CodeGen [
         self.indent = self.indent - 1
         self.emit("}")
         self.emit("")
+        self.emit_display_impl(name.clone(), type_params.clone())
         self.current_type_params = []
     ]
 
