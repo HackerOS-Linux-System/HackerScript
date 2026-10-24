@@ -23,7 +23,7 @@ get <std:string> import <str_contains::str_trim::str_starts_with>
 !!! blad E0003 (ten sam typ pomylki, ktory ZMIANA 0.3 wyzej naprawila
 !!! juz raz dla "npm"/"jsr").
 fun is_known_get_source(s: Str) -> Bool [
-    end s == "pypi" or s == "crates" or s == "std" or s == "core" or s == "selfhost" or s == "bit" or s == "npm" or s == "jsr" or s == "extern" or s == "c" or s == "cpp" or s == "java" or s == "kotlin" or s == "go" or s == "bit" or s == "hlib" or s == "work"
+    end s == "pypi" or s == "crates" or s == "std" or s == "core" or s == "selfhost" or s == "bit" or s == "npm" or s == "jsr" or s == "extern" or s == "c" or s == "cpp" or s == "java" or s == "kotlin" or s == "go" or s == "bit" or s == "hlib" or s == "work" or s == "auto"
 ]
 
 fun is_builtin_func(name: Str) -> Bool [
@@ -478,7 +478,7 @@ impl Checker [
     !!! mimo ze funkcja juz je akceptowala; teraz + "work").
     fun check_get(self, source: Str, name: Str) [
         if not is_known_get_source(source) [
-            self.diags.push(Diagnostic("error", "E0003", "nieznane zrodlo '" + source + "' w 'get <" + source + ":" + name + ">' (dozwolone: bit, c, core, cpp, crates, extern, go, hlib, java, jsr, kotlin, npm, pypi, selfhost, std, work)", find_line_of(self.lines.clone(), "get <" + source.clone() + ":"), 0, 1, ""))
+            self.diags.push(Diagnostic("error", "E0003", "nieznane zrodlo '" + source + "' w 'get <" + source + ":" + name + ">' (dozwolone: bit, c, core, cpp, crates, extern, go, hlib, java, jsr, kotlin, npm, pypi, selfhost, std, work; albo samo `get <nazwa>`)", find_line_of(self.lines.clone(), "get <" + source.clone() + ":"), 0, 1, ""))
         ]
     ]
 
