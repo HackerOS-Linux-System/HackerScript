@@ -1,0 +1,12 @@
+[package]
+-> name        => website-style
+-> version     => 0.6
+-> description => Przyklad bloku style { } w trybie use <mode:website>: CSS prosto w pliku .hcs (klamry w stringach i komentarzach, @media, kilka blokow).
+-> lang        => HackerScript
+-> using       => 0.6
+
+[layout]
+-> cmd => cmd
+
+[default-build]
+-> profile => release
