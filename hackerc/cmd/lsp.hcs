@@ -279,7 +279,7 @@ fun lsp_send_result(id_json: Str, result_json: Str) [
 !!! `publishDiagnostics`, nie pull-owego `textDocument/diagnostic` z
 !!! LSP 3.17 - prostszy model, wystarczajacy dla Etapu 2a).
 fun lsp_capabilities_json() -> Str [
-    end "{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true,\"documentFormattingProvider\":true,\"definitionProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\"]}},\"serverInfo\":{\"name\":\"hackerc-lsp\",\"version\":\"0.4\"}}"
+    end "{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true,\"documentFormattingProvider\":true,\"definitionProvider\":true,\"referencesProvider\":true,\"renameProvider\":true,\"documentSymbolProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\"]}},\"serverInfo\":{\"name\":\"hackerc-lsp\",\"version\":\"0.6\"}}"
 ]
 
 !!! Tura 10 - pomocnicy do zadan pozycyjnych (hover/definition/
@@ -536,7 +536,7 @@ fun lsp_run() [
                                             lsp_send_result(id_json, "null")
                                         ]
                                     ]
-                                ] elif method == "textDocument/hover" or method == "textDocument/definition" or method == "textDocument/completion" [
+                                ] elif method == "textDocument/hover" or method == "textDocument/definition" or method == "textDocument/completion" or method == "textDocument/rename" or method == "textDocument/references" or method == "textDocument/documentSymbol" [
                                     !! Etap 2b/2c (Tura 10, docs/LSP.md) - zadania pozycyjne. Nieznany
                                     !! dokument -> `null` (poprawna odpowiedz LSP, nie blad).
                                     let req_uri = lsp_params_uri(params.clone())
@@ -557,7 +557,27 @@ fun lsp_run() [
                                     ] elif method == "textDocument/hover" [
                                         lsp_send_result(id_json, lsp_hover_json(req_src, req_line, req_char))
                                     ] elif method == "textDocument/definition" [
-                                        lsp_send_result(id_json, lsp_definition_json(req_uri, req_src, req_line, req_char))
+                                        lsp_send_result(id_json, lsp_definition_multi_json(req_uri, req_src, req_line, req_char))
+                                    ] elif method == "textDocument/references" [
+                                        lsp_send_result(id_json, lsp_references_json(req_uri, req_src, req_line, req_char))
+                                    ] elif method == "textDocument/documentSymbol" [
+                                        lsp_send_result(id_json, lsp_document_symbols_json(req_src))
+                                    ] elif method == "textDocument/rename" [
+                                        let new_name = ""
+                                        match json_obj_get(params.clone(), "newName") [
+                                            Some(nv) -> [
+                                                match json_as_str(nv) [
+                                                    Some(ns) -> [
+                                                        new_name = ns
+                                                    ]
+                                                    None -> [
+                                                    ]
+                                                ]
+                                            ]
+                                            None -> [
+                                            ]
+                                        ]
+                                        lsp_send_result(id_json, lsp_rename_json(req_uri, req_src, req_line, req_char, new_name))
                                     ] else [
                                         lsp_send_result(id_json, lsp_completion_json(req_src))
                                     ]
