@@ -86,5 +86,5 @@ przeglądarki.
 Programy wspólne dla obu backendów dały identyczne wyjście pod `hackerc`
 (Rust) i pod Node: `control`, `recursion`, `logic`, `scope`, `strings`
 oraz `structs`, `enums`, `lists`, `options` (struct/impl/enum/match/
-listy/Dict/Option/Result/`?`). Testy: `hackerc/tests/javascript/`.
+listy/Dict/Option/Result/`?`). Testy: `tests/js/` (uruchamiane przez `tests/run.sh`).
 Programy z `Int` > 2^53 (`arith`, `algos`) różnią się celowo — patrz wyżej.
