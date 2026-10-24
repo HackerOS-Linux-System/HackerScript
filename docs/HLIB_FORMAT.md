@@ -93,6 +93,8 @@ Every language's compiler supports importing a `.hlib` directly (`use "hlib -> n
 
 Only non-generic function exports can be bound this way (`generic: true` exports need the `ast` path — there is no fixed-width call signature to generate for them). If neither path applies, the import fails with a clear error rather than silently doing nothing.
 
+**Source-agnostic form.** In HackerScript `get <mold>` (or `get <mold::1.2.0>`) needs no `source:` prefix. Right after a file is parsed, the project resolver rewrites it to `hlib` when a `.hlib` is found and otherwise to `bit` when a `bit` library of that name exists; if neither exists you get one warning naming both sources. `get <hlib:mold>` keeps working as the explicit form.
+
 ## 7. ABI stability — read this before assuming a `.so` is portable across languages
 
 A compiled `.so`'s *symbol names* are consistent (plain, unmangled — H# and HackerScript both emit plain C-visible symbols for `pub`/exported functions), but each language's **calling convention for that symbol** is not automatically the same:
