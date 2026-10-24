@@ -317,6 +317,10 @@ impl Formatter [
             ]
             GetImportStmt(source, name, version, details) -> [
                 let head = "get <" + source.clone() + ":" + name.clone()
+                if source == "auto" [
+                    !! `get <mold>` - zrodlo "auto" nie istnieje w tekscie programu
+                    head = "get <" + name.clone()
+                ]
                 match version.clone() [
                     Some(v) -> [
                         head = head + "::" + v
