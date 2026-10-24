@@ -347,6 +347,9 @@ impl JsGen [
         if m == "values" and n == 0 [
             end "Array.from(" + t + ".values())"
         ]
+        if m == "items" and n == 0 [
+            end "Array.from(" + t + ".entries())"
+        ]
         if m == "to_string" and n == 0 [
             end "String(" + t + ")"
         ]
@@ -661,6 +664,19 @@ impl JsGen [
 
     fun for_stmt(self, var: Str, iterable: Expr, body: List<Stmt>) [
         let jv = js_ident(var.clone())
+        let fvars = for_var_names(var.clone())
+        if fvars.len() == 2 [
+            !! (0.6) `for k, v in d.items()` -> `for (const [k, v] of Array.from(d.entries()))`
+            self.push_scope()
+            self.declare_name(fvars[0].clone())
+            self.declare_name(fvars[1].clone())
+            let pair_text = self.expr(iterable.clone())
+            self.emit("for (const [" + js_ident(fvars[0].clone()) + ", " + js_ident(fvars[1].clone()) + "] of " + pair_text + ") {")
+            self.block(body.clone())
+            self.pop_scope()
+            self.emit("}")
+            end
+        ]
         let it_name = ""
         let it_args: List<Expr> = []
         match iterable.clone() [
@@ -824,7 +840,7 @@ impl JsGen [
                 self.emit_struct(nm.clone(), fields.clone())
             ]
             EnumDecl(nm, vs, ds) -> [
-                self.emit("class " + js_ident(nm.clone()) + " { constructor(t, v) { this.$ = t; this.v = v; } }")
+                self.emit("class " + js_ident(nm.clone()) + " { constructor(t, v) { this.$ = t; this.v = v; } [Symbol.for('nodejs.util.inspect.custom')](d, o, insp) { return this.v.length ? this.$ + '(' + this.v.map(x => insp(x, o)).join(', ') + ')' : this.$; } }")
             ]
             ImplDecl(nm, ms, ds) -> [
                 self.emit_impl(nm.clone(), ms.clone())
