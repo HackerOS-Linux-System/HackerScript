@@ -45,10 +45,10 @@ Program testowy z `native {kotlin} [ println(...); listOf(1,2,3,4,5).sum() ]`:
 - `find_kotlin_stdlib_jar` uzywa `readlink -f` (dziala na Linux; BSD
   `readlink` na macOS nie ma `-f` - wtedy czytelny blad zamiast cichej
   awarii w runtime).
-- Runtime classpath dla `get <java:...>`/`get <kotlin:...>` (zewnetrzne
-  jary poza `kotlin-stdlib.jar`) ma TEN SAM, PRE-ISTNIEJACY gap co
-  `native {java}` - `java_cp_entries` sa uzywane TYLKO przy kompilacji
-  (`javac -cp`/`kotlinc -cp`), NIE sa dopisywane do runtime classpath w
-  `hks_get_jvm()`. Nie jest to nowy problem wprowadzony w tej sesji -
-  dotyczy rowniez istniejacego `native {java}`. `kotlin-stdlib.jar` NIE
-  ma tego problemu (jest dopisywany jawnie, bo jest zawsze wymagany).
+- Runtime classpath dla `get <java:...>`/`get <kotlin:...>` - **naprawione w
+  0.6**: wygenerowany Rust dopisuje teraz kazdy wpis do `-Djava.class.path`
+  (dwa kandydaci: sciezka dokladnie jak w zrodle oraz `java_classes/<nazwa
+  pliku>` obok binarki; JVM ignoruje nieistniejace wpisy). Zweryfikowane
+  transpilacja i `cargo check`, NIE uruchomieniem z JVM. Zeby drugi kandydat
+  mial efekt, `bit build` musi kopiowac jary do `java_classes/` (kod `bit`,
+  poza tym repozytorium).
