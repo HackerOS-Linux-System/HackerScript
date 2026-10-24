@@ -1,5 +1,5 @@
 get <std:string> import <str_trim::str_split::str_ends_with>
-get <std:json> import <JsonValue::JsonEntry::json_is_digit::json_digit_value>
+get <std:json> import <JsonValue::JsonEntry::json_is_digit::json_digit_value::json_escape_string>
 
 !! Jedna para klucz-wartosc odczytana z linii `klucz = wartosc`.
 struct TomlKV [
@@ -20,7 +20,16 @@ fun toml_parse(s: Str) -> Result<JsonValue, Str> [
         let raw_line = lines[i].clone()
         let line = str_trim(toml_strip_comment(raw_line))
         if line.len() > 0 [
-            if line.char_at(0) == "[" [
+            if line.char_at(0) == "[" and line.len() > 1 and line.char_at(1) == "[" [
+                !! 0.6: `[[nazwa]]` - tablica tabel; kazdy naglowek dopisuje NOWY
+                !! element, a kolejne klucze/podtabele trafiaja do ostatniego.
+                if not str_ends_with(line, "]]") [
+                    end err("toml: brak zamykajacego ']]' w naglowku tablicy tabel")
+                ]
+                let sec2 = toml_parse_section_header(line.slice(1, line.len() - 1))?
+                current_path = sec2
+                root = toml_push_table(root, current_path.clone())
+            ] elif line.char_at(0) == "[" [
                 let sec = toml_parse_section_header(line)?
                 current_path = sec
                 let existing = toml_find_or_empty(root.clone(), current_path.clone())
@@ -390,7 +399,61 @@ fun toml_find_or_empty(root: JsonValue, path: List<Str>) -> JsonValue [
     ]
     let entries = toml_get_object_entries(root)
     let child = toml_find_in_object(entries, path[0].clone())
-    end toml_find_or_empty(child, toml_tail(path))
+    end toml_find_or_empty(toml_last_table_or_self(child), toml_tail(path))
+]
+
+!! 0.6: elementy listy z JsonValue::JsonArray (pusta lista gdy to nie tablica).
+fun toml_array_items(v: JsonValue) -> List<JsonValue> [
+    match v [
+        JsonArray(items) -> [
+            end items.clone()
+        ]
+        _ -> [
+        ]
+    ]
+    let none_items: List<JsonValue> = []
+    end none_items
+]
+
+!! 0.6: dla tablicy tabel (`[[x]]`) zwraca OSTATNI element (TOML: odwolanie
+!! `[x.y]` / klucze po `[[x]]` dotycza ostatniego elementu); inaczej `v`.
+fun toml_last_table_or_self(v: JsonValue) -> JsonValue [
+    if toml_kind(v.clone()) == 6 [
+        let items = toml_array_items(v.clone())
+        end items[items.len() - 1].clone()
+    ]
+    end v.clone()
+]
+
+!! 0.6: ta sama lista z ostatnim elementem zastapionym przez `last`.
+fun toml_replace_last(items: List<JsonValue>, last: JsonValue) -> List<JsonValue> [
+    let out: List<JsonValue> = []
+    let i = 0
+    while i < items.len() - 1 [
+        out.push(items[i].clone())
+        i = i + 1
+    ]
+    out.push(last)
+    end out
+]
+
+!! 0.6: `[[sciezka]]` - dopisuje pusty obiekt na koniec tablicy tabel pod
+!! `path` (tworzac tablice/rodzicow gdy ich brak).
+fun toml_push_table(root: JsonValue, path: List<Str>) -> JsonValue [
+    let entries = toml_get_object_entries(root)
+    let head = path[0].clone()
+    let child = toml_find_in_object(entries.clone(), head.clone())
+    if path.len() == 1 [
+        let items = toml_array_items(child)
+        items.push(JsonObject([]))
+        end JsonObject(toml_set_in_object(entries, head, JsonArray(items)))
+    ]
+    if toml_kind(child.clone()) == 6 [
+        let arr = toml_array_items(child.clone())
+        let pushed = toml_push_table(arr[arr.len() - 1].clone(), toml_tail(path))
+        end JsonObject(toml_set_in_object(entries, head, JsonArray(toml_replace_last(arr, pushed))))
+    ]
+    end JsonObject(toml_set_in_object(entries, head, toml_push_table(child, toml_tail(path))))
 ]
 
 !! `path` bez pierwszego segmentu.
@@ -455,6 +518,200 @@ fun toml_set_path(root: JsonValue, path: List<Str>, value: JsonValue) -> JsonVal
         end JsonObject(toml_set_in_object(entries, head, value.clone()))
     ]
     let existing_child = toml_find_in_object(entries.clone(), head.clone())
+    if toml_kind(existing_child.clone()) == 6 [
+        !! 0.6: krok przez tablice tabel `[[x]]` -> modyfikujemy OSTATNI element.
+        let arr = toml_array_items(existing_child.clone())
+        let updated_last = toml_set_path(arr[arr.len() - 1].clone(), toml_tail(path), value.clone())
+        end JsonObject(toml_set_in_object(entries, head, JsonArray(toml_replace_last(arr, updated_last))))
+    ]
     let updated_child = toml_set_path(existing_child, toml_tail(path), value.clone())
     end JsonObject(toml_set_in_object(entries, head, updated_child))
+]
+
+!! ---------------------------------------------------------------------
+!! 0.6: serializacja `JsonValue` -> tekst TOML (odwrotnosc `toml_parse`).
+!! ---------------------------------------------------------------------
+
+!! Rodzaj wartosci dla serializera: 0 null, 1 bool, 2 liczba, 3 napis,
+!! 4 tablica zwyklych wartosci, 5 tabela (obiekt), 6 tablica tabel
+!! (niepusta tablica, w ktorej KAZDY element jest obiektem -> `[[nazwa]]`).
+fun toml_kind(v: JsonValue) -> Int [
+    match v [
+        JsonNull -> [
+            end 0
+        ]
+        JsonBool(b) -> [
+            end 1
+        ]
+        JsonNumber(n) -> [
+            end 2
+        ]
+        JsonString(t) -> [
+            end 3
+        ]
+        JsonArray(items) -> [
+            if items.len() == 0 [
+                end 4
+            ]
+            let all_tables = true
+            let i = 0
+            while i < items.len() [
+                if toml_kind(items[i].clone()) != 5 [
+                    all_tables = false
+                ]
+                i = i + 1
+            ]
+            if all_tables [
+                end 6
+            ]
+            end 4
+        ]
+        JsonObject(entries) -> [
+            end 5
+        ]
+    ]
+    end 0
+]
+
+!! Klucz "goly" (A-Za-z0-9_-) zapisujemy bez cudzyslowow, reszta w `"..."`.
+fun toml_format_key(k: Str) -> Str [
+    if k.len() == 0 [
+        end "\"\""
+    ]
+    let i = 0
+    while i < k.len() [
+        let c = k.char_at(i)
+        let ok = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_" or c == "-"
+        if not ok [
+            end json_escape_string(k)
+        ]
+        i = i + 1
+    ]
+    end k
+]
+
+!! Wartosc w jednej linii (skalary, tablice, tabele inline `{ a = 1 }`).
+!! `JsonNull` nie istnieje w TOML - w tablicach jest pomijany.
+fun toml_inline_value(v: JsonValue) -> Str [
+    match v [
+        JsonNull -> [
+            end "\"\""
+        ]
+        JsonBool(b) -> [
+            if b.clone() [
+                end "true"
+            ]
+            end "false"
+        ]
+        JsonNumber(n) -> [
+            end n as Str
+        ]
+        JsonString(t) -> [
+            end json_escape_string(t)
+        ]
+        JsonArray(items) -> [
+            let out = "["
+            let count = 0
+            let i = 0
+            while i < items.len() [
+                if toml_kind(items[i].clone()) != 0 [
+                    if count > 0 [
+                        out = out + ", "
+                    ]
+                    out = out + toml_inline_value(items[i].clone())
+                    count = count + 1
+                ]
+                i = i + 1
+            ]
+            end out + "]"
+        ]
+        JsonObject(entries) -> [
+            let out = "{ "
+            let count = 0
+            let i = 0
+            while i < entries.len() [
+                let e = entries[i].clone()
+                if toml_kind(e.value.clone()) != 0 [
+                    if count > 0 [
+                        out = out + ", "
+                    ]
+                    out = out + toml_format_key(e.key.clone()) + " = " + toml_inline_value(e.value.clone())
+                    count = count + 1
+                ]
+                i = i + 1
+            ]
+            if count == 0 [
+                end "{}"
+            ]
+            end out + " }"
+        ]
+    ]
+    end ""
+]
+
+fun toml_header(path: List<Str>) -> Str [
+    let out = ""
+    let i = 0
+    while i < path.len() [
+        if i > 0 [
+            out = out + "."
+        ]
+        out = out + toml_format_key(path[i].clone())
+        i = i + 1
+    ]
+    end out
+]
+
+!! Tekst jednej tabeli: najpierw pary `klucz = wartosc` (TOML wymaga
+!! skalarow PRZED podtabelami), potem `[sciezka]` / `[[sciezka]]`.
+fun toml_table_text(entries: List<JsonEntry>, path: List<Str>) -> Str [
+    let head = ""
+    let i = 0
+    while i < entries.len() [
+        let e = entries[i].clone()
+        let kind = toml_kind(e.value.clone())
+        if kind == 1 or kind == 2 or kind == 3 or kind == 4 [
+            head = head + toml_format_key(e.key.clone()) + " = " + toml_inline_value(e.value.clone()) + "\n"
+        ]
+        i = i + 1
+    ]
+    let tail = ""
+    let j = 0
+    while j < entries.len() [
+        let e2 = entries[j].clone()
+        let kind2 = toml_kind(e2.value.clone())
+        let sub_path = toml_append(path.clone(), e2.key.clone())
+        if kind2 == 5 [
+            tail = tail + "\n[" + toml_header(sub_path.clone()) + "]\n" + toml_table_text(toml_get_object_entries(e2.value.clone()), sub_path.clone())
+        ] elif kind2 == 6 [
+            match e2.value.clone() [
+                JsonArray(tables) -> [
+                    let t = 0
+                    while t < tables.len() [
+                        tail = tail + "\n[[" + toml_header(sub_path.clone()) + "]]\n" + toml_table_text(toml_get_object_entries(tables[t].clone()), sub_path.clone())
+                        t = t + 1
+                    ]
+                ]
+                _ -> [
+                ]
+            ]
+        ]
+        j = j + 1
+    ]
+    end head + tail
+]
+
+!! Zamienia drzewo `JsonValue` (korzen MUSI byc `JsonObject`) na tekst
+!! TOML. `toml_parse(toml_stringify(x))` odtwarza `x` (poza `JsonNull`,
+!! ktorego TOML nie ma - jest pomijany). Err gdy korzen nie jest obiektem.
+fun toml_stringify(root: JsonValue) -> Result<Str, Str> [
+    if toml_kind(root.clone()) != 5 [
+        end err("toml_stringify: korzen musi byc obiektem (JsonObject)")
+    ]
+    let no_path: List<Str> = []
+    let text = toml_table_text(toml_get_object_entries(root), no_path)
+    if text.len() > 0 and text.char_at(0) == "\n" [
+        text = text.slice(1, text.len())
+    ]
+    end ok(text)
 ]
