@@ -1,5 +1,34 @@
 # Roadmap / znane braki HackerScript
 
+> ## Stan 0.6 — aktualna sekcja (czytaj najpierw)
+>
+> Poniższy plik jest **chronologicznym dziennikiem**: starsze sekcje opisują
+> stan z dnia ich powstania i część ich twierdzeń jest dziś nieaktualna.
+> Autorytatywna, bieżąca lista otwartych punktów jest w `CHANGELOG.md`
+> (sekcja „Nadal otwarte”). Mapa odwołań „Tura N” z komentarzy w kodzie:
+> `SESSION_LOG.md`.
+>
+> **Zamknięte w 0.6 (wcześniej wymieniane niżej jako braki):**
+> `Dict.items()` w `for k, v in ...` (bez typu krotki); `log()` dla
+> struct/enum; serializacja TOML (`toml_stringify`) i tablice tabel `[[x]]`;
+> LSP `rename`/`references`/`documentSymbol` oraz `definition` w plikach z
+> `include`; zewnętrzne jary na runtime classpath Javy/Kotlina; strumieniowe
+> pobieranie w `std:http`; `run_tee` w `std:process`; brakujące pliki
+> `CHANGELOG.md`, `SESSION_LOG.md`, `docs/BIT.md`, `docs/WORK_INCLUDE_FIX.md`,
+> `tests/`, `hack3rc/tests/`, `playground/web/`, `docs/website-style/`.
+>
+> **Starsze punkty, które okazały się nieaktualne:** `std:term` ma już
+> `term_stdout_is_tty` i `term_set_raw`; `std:process` ma `run_capture`;
+> `std:cybersecurity` ma SHA-256/HMAC. (Brakuje tylko automatycznego
+> przywracania trybu surowego terminala — język nie ma RAII/closures.)
+>
+> **Nadal otwarte (skrót; pełna lista w `CHANGELOG.md`):** pozycje
+> linia/kolumna w AST; generyczne struktury z adnotacją typu (`Wrapper<Int>`);
+> typ krotki; podział `codegen.hcs`/`project.hcs`; `hack3rc` bez `Dict`,
+> interpolacji, async, `native`, `log()` struktury; statyczne `fast direct`;
+> `native {JavaScript}`; LSP oparty na AST; luki po stronie `bit`.
+
+
 Ten plik jest cytowany z dziesiątek komentarzy `!!!` w całym kodzie
 (`hackerc/cmd/*.hcs`, `hack3rc/cmd/*.hcs`, `libs/*/lib/mod.hcs`,
 `README.adoc`, `docs/SYNTAX.md`) jako "pełna, szczera lista braków" —
@@ -34,7 +63,7 @@ braku czasu, i gdzie kolejna runda pracy przyniesie najwięcej.
   manifeście pozwalająca odejść od konwencji `cmd/main.hcs` — a w
   praktyce (`hackerc/Bit.hk`: `-> entry => cli.hcs`, bez `cmd/`)
   wskazywała na plik, który **nigdy nie istniał** (prawdziwa ścieżka
-  to zawsze była `hackerc/cmd/cli.hcs`), więc `bit build` na
+  to zawsze była hackerc/cmd/cli.hcs - plik historyczny, dziś `cmd/main.hcs`), więc `bit build` na
   korzeniu workspace po cichu pomijał `hackerc` jako rzekomą
   "bibliotekę bez entry point". Naprawa: plik przemianowany na
   `hackerc/cmd/main.hcs` (jedyna dopuszczalna nazwa od 0.4), pole
@@ -115,7 +144,7 @@ braku czasu, i gdzie kolejna runda pracy przyniesie najwięcej.
 
 ## 2. Uproszczenia per-plik w kompilatorze
 
-`codegen.hcs`, `typeinfer.hcs`, `project.hcs`, `cli.hcs` (dziś
+`codegen.hcs`, `typeinfer.hcs`, `project.hcs`, cli.hcs (dziś
 `main.hcs`), `formatter.hcs`, `parser.hcs` — każdy ma odziedziczone
 uproszczenia z wersji pythonowej sprzed self-hostingu, częściowo tylko
 nadrobione podczas bootstrapu.
@@ -175,10 +204,10 @@ i `docs/FAST_DIRECT.md`):
    dla dzisiejszych potrzeb (`bit`, patrz `docs/BIT.md`), brakuje
    odczytu rozmiaru terminala i trybu raw (potrzebne pod interaktywne
    `bit repair`/przyszłe `lsp` logi debug).
-4. `libs/std/lib/toml.hcs` — brak zapisu (tylko odczyt) — `Bit.hk`
-   dziś edytowany przez `bit install`/`remove` na poziomie tekstu,
-   nie przez ten moduł; docelowo `install.hcs`/`remove.hcs` powinny
-   przejść na `toml.hcs` do zapisu, gdy ten zyska serializację.
+4. `libs/std/lib/toml.hcs` — (0.6: ZROBIONE) ma już serializację
+   (`toml_stringify`) i tablice tabel `[[x]]`. `Bit.hk` jest jednak nadal
+   edytowany przez `bit install`/`remove` na poziomie tekstu (to kod
+   `bit`, poza tym repozytorium) - przejście na `toml.hcs` zależy od `bit`.
 5. `libs/std/lib/cybersecurity/entropy.hcs` — dziś tylko entropia
    Shannona; brak innych podstawowych prymitywów (hashowanie,
    stałoczasowe porównanie) używanych w przykładach z `docs/showcase`.
@@ -476,7 +505,7 @@ arytmetyka calkowita).
 * **`use <lang:javascript>`** (docs/JAVASCRIPT.md): backend
   `hackerc/cmd/javascript_backend.hcs` + runtime `js_runtime.hcs`;
   struct/enum/impl/match/Option/Result/`?`/async/await/spawn/kanały/Dict/
-  listy; podkomenda `hackerc js`; testy `hackerc/tests/javascript/`.
+  listy; podkomenda `hackerc js`; testy `tests/js/`.
 * **`use <mode:website>`** (docs/WEBSITE.md): `hackerc build`/`hackerc
   website` generuje `index.html` + `app.js` z mostkiem DOM (zdarzenia,
   `http_get`, `localStorage`…); zweryfikowane w jsdom.
