@@ -323,6 +323,14 @@ impl Parser [
         self.expect(Keyword, some("get"))
         self.expect(LAngle, none())
         let source = self.read_angle_segment()
+        !! 0.6 (naprawa): lekser dopisuje `_` do zarezerwowanych slow Rusta
+        !! (`extern` -> `extern_`), wiec `get <extern:m>` nie rozpoznawalo
+        !! zrodla (E0003 "nieznane zrodlo 'extern_'") - docs/showcase i
+        !! docs/ffi-demo nie przechodzily `check`. Zrodlo to nazwa, nie
+        !! identyfikator Rusta - cofamy przyrostek.
+        if source == "extern_" [
+            source = "extern"
+        ]
         if source == "selfhost" [
             !!! `get <selfhost:...>` jest zablokowane (na wyrazne
             !!! zyczenie uzytkownika) - uzyj `include <plik>` zamiast
@@ -352,7 +360,12 @@ impl Parser [
         if source == "extern" and self.check(Keyword, some("use")) [
             self.advance()
             self.expect(LAngle, none())
-            version = some(self.read_angle_segment())
+            let link_mode = self.read_angle_segment()
+            if link_mode == "static_" [
+                !! (0.6) j.w.: `static` to slowo zarezerwowane Rusta -> `static_`.
+                link_mode = "static"
+            ]
+            version = some(link_mode)
             self.expect(RAngle, none())
         ]
 
@@ -551,6 +564,13 @@ impl Parser [
     fun parse_for(self) -> Stmt [
         self.expect(Keyword, some("for"))
         let var = self.expect(Ident, none()).value
+        if self.check(Comma, none()) [
+            !! (0.6) `for k, v in dict.items()` - dwie zmienne, zapisane w
+            !! `ForStmt` jako jedna nazwa `"k, v"` (patrz `for_var_names`).
+            self.advance()
+            let second = self.expect(Ident, none()).value
+            var = var + ", " + second
+        ]
         self.expect(Keyword, some("in"))
         let iterable = self.parse_expr()
         let body = self.parse_block()
@@ -696,7 +716,7 @@ impl Parser [
                 self.advance()
                 self.skip_newlines()
             ] else [
-                !! NAPRAWIONE (wykryte przez `showcase.hcs` - `pub fun`
+                !! NAPRAWIONE (wykryte przez `docs/showcase/cmd/main.hcs` - `pub fun`
                 !! w `impl` konczylo sie kaskada "nieoczekiwany token")
                 !! - w przeciwienstwie do najwyzszego poziomu (patrz
                 !! obsluga "pub" w `parse_statement()`), ta petla
