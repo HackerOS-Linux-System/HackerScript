@@ -4842,6 +4842,12 @@ impl CodeGen [
             ]
             end
         ]
+        if source == "auto" [
+            !! Nierozwiazany `get <nazwa>` (normalnie przepisywany na hlib/bit
+            !! w Discovery zaraz po parsowaniu) - zostaw slad zamiast cichej dziury.
+            self.emit("// get <" + name + "> - nierozwiazane zrodlo (ani .hlib, ani biblioteka bit)")
+            end
+        ]
         if source == "crates" [
             !!! Nazwa paczki Cargo (`name`) moze zawierac `-` (np.
             !!! `ed25519-dalek`) - w Cargo.toml to poprawne, ale Rust
