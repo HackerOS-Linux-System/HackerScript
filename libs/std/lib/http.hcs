@@ -99,3 +99,113 @@ fun http_status(url: Str) -> Int [
     ]
     end code
 ]
+
+!! ---------------------------------------------------------------------
+!! 0.6: strumieniowanie i dodatkowe metody. Zbudowane na `ureq` 2.
+!! ---------------------------------------------------------------------
+
+!! Pobiera `url` PROSTO DO PLIKU `path`, strumieniowo (bez wczytywania
+!! calego ciala do pamieci - bezpieczne dla duzych plikow, takze
+!! binarnych, w odroznieniu od `http_get`, ktore wymaga UTF-8).
+!! Ok(liczba zapisanych bajtow). Kod spoza 2xx -> Err("HTTP <kod>").
+fun http_download(url: Str, path: Str) -> Result<Int, Str> [
+    let good = false
+    let written = 0
+    let why = ""
+    native {Rust} [
+        match ureq::get(&url).call() {
+            Ok(resp) => {
+                let mut reader = resp.into_reader();
+                match std::fs::File::create(&path) {
+                    Ok(mut f) => match std::io::copy(&mut reader, &mut f) {
+                        Ok(n) => { good = true; written = n as i64; }
+                        Err(e) => { why = format!("zapis do '{}': {}", path, e); }
+                    },
+                    Err(e) => { why = format!("nie mozna utworzyc '{}': {}", path, e); }
+                }
+            }
+            Err(ureq::Error::Status(code, _)) => { why = format!("HTTP {}", code); }
+            Err(e) => { why = format!("{}", e); }
+        }
+    ]
+    if good [
+        end ok(written)
+    ]
+    end err("pobieranie " + url + " nie powiodlo sie: " + why)
+]
+
+!! GET zwracajacy ciolo jako liste LINII, czytanych strumieniowo
+!! (`BufRead::lines`). Przydatne dla duzych odpowiedzi tekstowych
+!! (NDJSON, logi, CSV) - nie buduje jednego wielkiego Stringa.
+fun http_get_lines(url: Str) -> Result<List<Str>, Str> [
+    let good = false
+    let why = ""
+    let lines: List<Str> = []
+    native {Rust} [
+        use std::io::BufRead;
+        match ureq::get(&url).call() {
+            Ok(resp) => {
+                let reader = std::io::BufReader::new(resp.into_reader());
+                good = true;
+                for l in reader.lines() {
+                    match l {
+                        Ok(t) => { lines.push(t); }
+                        Err(e) => { good = false; why = format!("odczyt: {}", e); break; }
+                    }
+                }
+            }
+            Err(ureq::Error::Status(code, _)) => { why = format!("HTTP {}", code); }
+            Err(e) => { why = format!("{}", e); }
+        }
+    ]
+    if good [
+        end ok(lines)
+    ]
+    end err("GET " + url + " nie powiodl sie: " + why)
+]
+
+!! PUT z cialem tekstowym (`Content-Type: text/plain; charset=utf-8`).
+fun http_put(url: Str, body: Str) -> Result<Str, Str> [
+    let good = false
+    let out = ""
+    native {Rust} [
+        match ureq::put(&url).set("Content-Type", "text/plain; charset=utf-8").send_string(&body) {
+            Ok(resp) => match resp.into_string() {
+                Ok(s) => { good = true; out = s; }
+                Err(e) => { out = format!("odpowiedz nie jest poprawnym UTF-8: {}", e); }
+            },
+            Err(ureq::Error::Status(code, resp)) => {
+                let text = resp.into_string().unwrap_or_default();
+                out = format!("HTTP {}: {}", code, text);
+            }
+            Err(e) => { out = format!("{}", e); }
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err("PUT " + url + " nie powiodl sie: " + out)
+]
+
+!! DELETE. Ok(cialo odpowiedzi, zwykle puste) przy 2xx.
+fun http_delete(url: Str) -> Result<Str, Str> [
+    let good = false
+    let out = ""
+    native {Rust} [
+        match ureq::delete(&url).call() {
+            Ok(resp) => match resp.into_string() {
+                Ok(s) => { good = true; out = s; }
+                Err(e) => { out = format!("odpowiedz nie jest poprawnym UTF-8: {}", e); }
+            },
+            Err(ureq::Error::Status(code, resp)) => {
+                let text = resp.into_string().unwrap_or_default();
+                out = format!("HTTP {}: {}", code, text);
+            }
+            Err(e) => { out = format!("{}", e); }
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err("DELETE " + url + " nie powiodl sie: " + out)
+]
