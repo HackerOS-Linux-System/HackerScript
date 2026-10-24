@@ -360,7 +360,12 @@ impl FnChecker [
             ]
             ForStmt(var, iterable, body) -> [
                 self.visit_expr(iterable)
-                self.declare_var(var, none())
+                let fvars = for_var_names(var.clone())
+                let fvi = 0
+                while fvi < fvars.len() [
+                    self.declare_var(fvars[fvi].clone(), none())
+                    fvi = fvi + 1
+                ]
                 self.visit_stmts(body)
             ]
             ReturnStmt(value) -> [
