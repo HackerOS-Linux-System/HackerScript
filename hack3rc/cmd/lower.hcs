@@ -1843,6 +1843,10 @@ impl Lw [
 
     !!! `for x in lista` -> petla while po indeksie (lista liczona raz).
     fun lower_for(self, var: Str, iter: Expr, body: List<Stmt>) -> Str [
+        if for_var_names(var.clone()).len() > 1 [
+            self.err_h("H0151", "'for k, v in ...' (Dict.items()) nie jest obslugiwane przez hack3rc - brak Dict; uzyj hackerc", "for ")
+            end ""
+        ]
         let l = self.lower_expr(iter.clone())
         if l.ty == "?" [
             end ""
