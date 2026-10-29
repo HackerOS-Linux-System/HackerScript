@@ -1,4 +1,4 @@
-get <std:string> import <str_trim::str_split::str_starts_with::str_ends_with::str_contains::str_index_of::str_repeat::str_is_space>
+get <std:string> import <str_trim::str_split::str_starts_with::str_ends_with::str_contains::str_index_of::str_repeat::str_is_space::str_join>
 get <std:json> import <JsonValue::JsonEntry::json_is_digit::json_digit_value>
 get <std:toml> import <toml_set_path::toml_find_or_empty>
 get <std:env> import <env_var_or>
@@ -784,4 +784,260 @@ fun hk_serialize_scalar(v: JsonValue) -> Str [
             end ""
         ]
     ]
+]
+
+!! ---------------------------------------------------------------------
+!! 0.6: edycja `.hk` Z ZACHOWANIEM FORMATU (komentarze, kolejnosc, wyrownanie).
+!! ---------------------------------------------------------------------
+!!
+!! `hk_parse` + `hk_serialize` gubia komentarze i uklad pliku, wiec nie
+!! nadaja sie do edycji recznie utrzymywanego `Bit.hk`. Funkcje nizej
+!! pracuja na LINIACH zrodla i zmieniaja tylko to, co trzeba - dzieki temu
+!! `bit install`/`bit remove` moga edytowac `[dependencies]` przez ten modul
+!! zamiast wlasnej obrobki tekstu. Dzialaja na kluczach pierwszego poziomu
+!! (`-> klucz => wartosc`) wskazanej sekcji; klucz dopasowywany jest tak,
+!! jak zostal zapisany (po zdjeciu cudzyslowow). `raw_value` to tekst
+!! wartosci DOKLADNIE jak w pliku (np. `git https://... v1`, `0.6`,
+!! `[a, b]`) - nie jest parsowany ani cytowany.
+
+!! Zakres sekcji w liniach zrodla: `header` = indeks linii `[sekcja]`,
+!! `stop` = indeks pierwszej linii NASTEPNEJ sekcji (albo liczba linii).
+struct HkSectionSpan [
+    found: Bool,
+    header: Int,
+    stop: Int
+]
+
+fun hk_find_section(lines: List<Str>, section: Str) -> HkSectionSpan [
+    let header = -1
+    let i = 0
+    let n = lines.len()
+    while i < n [
+        let t = str_trim(lines[i].clone())
+        if t.len() > 0 and t.char_at(0) == "[" [
+            match str_index_of(t, "]") [
+                Some(e) -> [
+                    let name = str_trim(t.slice(1, e))
+                    if header < 0 [
+                        if name == section [
+                            header = i
+                        ]
+                    ] else [
+                        end HkSectionSpan(true, header, i)
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        i = i + 1
+    ]
+    if header < 0 [
+        end HkSectionSpan(false, -1, -1)
+    ]
+    end HkSectionSpan(true, header, n)
+]
+
+!! Glebokosc strzalki linii (`->` = 1, `-->` = 2, ...); 0 gdy linia nie
+!! jest linia klucza (pusta, komentarz, naglowek sekcji).
+fun hk_line_depth(line: Str) -> Int [
+    let t = str_trim(line)
+    if t.len() == 0 or t.char_at(0) != "-" [
+        end 0
+    ]
+    match hk_parse_arrow_prefix(t, 0) [
+        Ok(p) -> [
+            end p.depth
+        ]
+        Err(_e) -> [
+            end 0
+        ]
+    ]
+]
+
+!! Klucz linii pierwszego poziomu (`-> klucz ...`) albo None.
+fun hk_line_key1(line: Str) -> Option<Str> [
+    let t = str_trim(line)
+    if hk_line_depth(t.clone()) != 1 [
+        end none()
+    ]
+    match hk_parse_arrow_prefix(t, 0) [
+        Err(_e) -> [
+            end none()
+        ]
+        Ok(p) -> [
+            match hk_parse_key(p.rest, 0) [
+                Err(_e2) -> [
+                    end none()
+                ]
+                Ok(k) -> [
+                    end some(k.key)
+                ]
+            ]
+        ]
+    ]
+]
+
+!! Klucz w formie do wpisania do pliku (z cudzyslowami, gdy ma spacje).
+fun hk_key_text(key: Str) -> Str [
+    if hk_needs_quotes(key.clone()) [
+        end "\"" + key + "\""
+    ]
+    end key
+]
+
+!! Indeks linii klucza pierwszego poziomu `key` w sekcji `span` albo -1.
+fun hk_find_key_line(lines: List<Str>, span: HkSectionSpan, key: Str) -> Int [
+    let i = span.header + 1
+    while i < span.stop [
+        match hk_line_key1(lines[i].clone()) [
+            Some(k) -> [
+                if k == key [
+                    end i
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        i = i + 1
+    ]
+    end -1
+]
+
+!! Czy w sekcji `section` istnieje klucz pierwszego poziomu `key`.
+fun hk_has_key(source: Str, section: Str, key: Str) -> Bool [
+    let lines = str_split(source, "\n")
+    let span = hk_find_section(lines.clone(), section)
+    if span.found == false [
+        end false
+    ]
+    end hk_find_key_line(lines, span, key) >= 0
+]
+
+!! Surowy tekst wartosci klucza (to, co po `=>`, przyciete) albo None.
+fun hk_get_raw(source: Str, section: Str, key: Str) -> Option<Str> [
+    let lines = str_split(source, "\n")
+    let span = hk_find_section(lines.clone(), section)
+    if span.found == false [
+        end none()
+    ]
+    let idx = hk_find_key_line(lines.clone(), span, key)
+    if idx < 0 [
+        end none()
+    ]
+    match str_index_of(lines[idx].clone(), "=>") [
+        Some(a) -> [
+            let line: Str = lines[idx].clone()
+            end some(str_trim(line.slice(a + 2, line.len())))
+        ]
+        None -> [
+            end none()
+        ]
+    ]
+]
+
+!! Ustawia `key => raw_value` w sekcji `section`:
+!!  * klucz istnieje  -> zmienia TYLKO wartosc (wciecie, wyrownanie i tekst
+!!                       przed `=>` zostaja);
+!!  * klucza brak     -> dopisuje linie `-> klucz => wartosc` na koncu sekcji;
+!!  * sekcji brak     -> dopisuje cala sekcje na koncu pliku.
+!! Err dla wartosci/klucza z nowa linia albo gdy istniejacy klucz jest
+!! tabela (ma dzieci `-->`, nie ma `=>`).
+fun hk_set_value(source: Str, section: Str, key: Str, raw_value: Str) -> Result<Str, Str> [
+    if str_contains(key.clone(), "\n") or str_contains(raw_value.clone(), "\n") [
+        end err("klucz i wartosc nie moga zawierac nowej linii")
+    ]
+    if key.len() == 0 [
+        end err("pusty klucz")
+    ]
+    let lines = str_split(source, "\n")
+    let span = hk_find_section(lines.clone(), section.clone())
+    let new_line = "-> " + hk_key_text(key.clone()) + " => " + str_trim(raw_value.clone())
+    if span.found == false [
+        let base = source
+        if base.len() > 0 and str_ends_with(base.clone(), "\n") == false [
+            base = base + "\n"
+        ]
+        if base.len() > 0 and str_ends_with(base.clone(), "\n\n") == false [
+            base = base + "\n"
+        ]
+        end ok(base + "[" + section + "]\n" + new_line + "\n")
+    ]
+    let found_idx = hk_find_key_line(lines.clone(), span.clone(), key.clone())
+    let out: List<Str> = []
+    if found_idx >= 0 [
+        let old: Str = lines[found_idx].clone()
+        match str_index_of(old.clone(), "=>") [
+            None -> [
+                end err("klucz '" + key + "' jest tabela (ma dzieci), nie wartoscia")
+            ]
+            Some(a) -> [
+                let j = 0
+                while j < lines.len() [
+                    if j == found_idx [
+                        out.push(old.slice(0, a + 2) + " " + str_trim(raw_value.clone()))
+                    ] else [
+                        out.push(lines[j].clone())
+                    ]
+                    j = j + 1
+                ]
+                end ok(str_join(out, "\n"))
+            ]
+        ]
+    ]
+    let last_content = span.header
+    let i = span.header + 1
+    while i < span.stop [
+        if str_trim(lines[i].clone()).len() > 0 [
+            last_content = i
+        ]
+        i = i + 1
+    ]
+    let j2 = 0
+    while j2 < lines.len() [
+        out.push(lines[j2].clone())
+        if j2 == last_content [
+            out.push(new_line.clone())
+        ]
+        j2 = j2 + 1
+    ]
+    end ok(str_join(out, "\n"))
+]
+
+!! Usuwa klucz `key` z sekcji `section` razem z jego dziecmi (`-->`...).
+!! Komentarze i reszta pliku zostaja. Err, gdy sekcji albo klucza nie ma.
+fun hk_remove_key(source: Str, section: Str, key: Str) -> Result<Str, Str> [
+    let lines = str_split(source, "\n")
+    let span = hk_find_section(lines.clone(), section.clone())
+    if span.found == false [
+        end err("brak sekcji [" + section + "]")
+    ]
+    let idx = hk_find_key_line(lines.clone(), span.clone(), key.clone())
+    if idx < 0 [
+        end err("brak klucza '" + key + "' w sekcji [" + section + "]")
+    ]
+    let stop = idx + 1
+    while stop < span.stop and hk_line_depth(lines[stop].clone()) > 1 [
+        stop = stop + 1
+    ]
+    let out: List<Str> = []
+    let j = 0
+    while j < lines.len() [
+        if j < idx or j >= stop [
+            out.push(lines[j].clone())
+        ]
+        j = j + 1
+    ]
+    end ok(str_join(out, "\n"))
+]
+
+!! Wygodne skroty dla `[dependencies]` (to, czego potrzebuje `bit install`/
+!! `bit remove`): `spec` to tekst wartosci jak w pliku, np.
+!! `git https://github.com/x/y v1` albo `0.3`.
+fun hk_add_dependency(source: Str, name: Str, spec: Str) -> Result<Str, Str> [
+    end hk_set_value(source, "dependencies", name, spec)
+]
+
+fun hk_remove_dependency(source: Str, name: Str) -> Result<Str, Str> [
+    end hk_remove_key(source, "dependencies", name)
 ]
