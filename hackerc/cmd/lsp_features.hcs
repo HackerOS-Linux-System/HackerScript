@@ -1,10 +1,10 @@
 include <diagnostics>
 include <lexer>
 get <std:json> import <json_escape_string>
-get <std:string> import <str_trim::str_starts_with::str_join>
+get <std:string> import <str_trim::str_starts_with::str_join::str_split::str_ends_with::str_contains::str_index_of>
 get <std:io> import <read_file_or::file_readable>
 
-!!! LSP Etap 2b/2c (Tura 10, patrz docs/LSP.md) - hover, definition,
+!!! LSP Etap 2b/2c (patrz docs/LSP.md) - hover, definition,
 !!! completion. Implementacja OPARTA NA TEKSCIE (skan linii dokumentu),
 !!! NIE na AST - AST nie ma pozycji (patrz ROADMAP, "numery linii w
 !!! AST"), wiec definicje szukamy jako pierwsza linie zaczynajaca sie od
@@ -115,6 +115,468 @@ fun lsp_line_or_empty(lines: List<Str>, idx: Int) -> Str [
     end ""
 ]
 
+
+!!! ---------------------------------------------------------------------
+!!! 0.6: ZAKRESY (strukturalny skan tekstu, nadal NIE AST - AST nie ma pozycji).
+!!! ---------------------------------------------------------------------
+!!! Zakres to blok `fun ... [ ... ]` albo `impl Typ [ ... ]`: naglowek konczy sie
+!!! `[`, a blok konczy pierwsza linia zaczynajaca sie od `]` w TYM SAMYM wcieciu
+!!! (kod sformatowany przez `hackerc fmt` spelnia to zawsze). Dzieki temu:
+!!!  * zmienna lokalna/parametr (`let x`, `for x in`, `Some(x) ->`, parametr
+!!!    funkcji) jest szukana, zmieniana i znajdowana TYLKO w swojej funkcji;
+!!!  * metoda `obiekt.nazwa` jest przypisywana do typu odbiorcy: `self` -> typ
+!!!    z otaczajacego `impl`, zmienna -> typ z `let v = Typ(...)`, `let v: Typ`
+!!!    albo z parametru `v: Typ`. Przy nieznanym typie odbiorcy dzialamy jak
+!!!    dawniej (wszystkie metody o tej nazwie).
+!!! Ograniczenia: brak wnioskowania typow (zwrot funkcji, pola, listy), wzorce
+!!! zagniezdzone w `match` (`Some(Foo(x))`) nie sa rozpoznawane jako deklaracje.
+
+struct LspScope [
+    kind: Str,
+    name: Str,
+    start: Int,
+    stop: Int
+]
+
+struct LspOccs [
+    lines: List<Int>,
+    cols: List<Int>
+]
+
+fun lsp_strip_prefixes(t: Str) -> Str [
+    let r: Str = t
+    if str_starts_with(r.clone(), "pub ") [
+        r = r.slice(4, r.len())
+    ]
+    if str_starts_with(r.clone(), "async ") [
+        r = r.slice(6, r.len())
+    ]
+    end r
+]
+
+!!! (rodzaj, nazwa) dla linii naglowka `fun`/`impl` zakonczonej `[`.
+fun lsp_scope_header(line_text: Str) -> Option<DeclInfo> [
+    let t: Str = str_trim(line_text)
+    if t.len() == 0 or str_ends_with(t.clone(), "[") == false [
+        end none()
+    ]
+    let r: Str = lsp_strip_prefixes(t)
+    if str_starts_with(r.clone(), "fun ") [
+        let nm: Str = lsp_ident_prefix(r.slice(4, r.len()))
+        if nm.len() > 0 [
+            end some(DeclInfo(0, 0, "fun", nm))
+        ]
+    ]
+    if str_starts_with(r.clone(), "impl ") [
+        let nm2: Str = lsp_ident_prefix(r.slice(5, r.len()))
+        if nm2.len() > 0 [
+            end some(DeclInfo(0, 0, "impl", nm2))
+        ]
+    ]
+    end none()
+]
+
+fun lsp_scopes(lines: List<Str>) -> List<LspScope> [
+    let out: List<LspScope> = []
+    let n = lines.len()
+    let i = 0
+    while i < n [
+        match lsp_scope_header(lines[i].clone()) [
+            Some(h) -> [
+                let ind = lsp_leading_spaces(lines[i].clone())
+                let stop = n - 1
+                let found = false
+                let j = i + 1
+                while j < n and found == false [
+                    let lj: Str = lines[j].clone()
+                    if lsp_leading_spaces(lj.clone()) == ind and str_starts_with(str_trim(lj.clone()), "]") [
+                        stop = j
+                        found = true
+                    ]
+                    j = j + 1
+                ]
+                out.push(LspScope(h.kind.clone(), h.name.clone(), i, stop))
+            ]
+            None -> [
+            ]
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+!!! Indeks NAJWEZSZEGO zakresu danego rodzaju zawierajacego `line` (albo -1).
+fun lsp_scope_idx_at(scopes: List<LspScope>, line: Int, kind: Str) -> Int [
+    let best = -1
+    let best_size = 1000000000
+    let k = 0
+    while k < scopes.len() [
+        let s = scopes[k].clone()
+        if s.kind == kind and s.start <= line and line <= s.stop and (s.stop - s.start) < best_size [
+            best = k
+            best_size = s.stop - s.start
+        ]
+        k = k + 1
+    ]
+    end best
+]
+
+!!! Nazwy w pierwszej parze nawiasow `( ... )` tekstu: czesci rozdzielone `,`,
+!!! z kazdej bierzemy prefiks identyfikatora (`a: Int` -> `a`).
+fun lsp_names_in_parens(text: Str) -> List<Str> [
+    let out: List<Str> = []
+    match str_index_of(text.clone(), "(") [
+        Some(a) -> [
+            let depth = 0
+            let i = a
+            let stop = -1
+            while i < text.len() and stop < 0 [
+                let c = text.char_at(i)
+                if c == "(" [
+                    depth = depth + 1
+                ] elif c == ")" [
+                    depth = depth - 1
+                    if depth == 0 [
+                        stop = i
+                    ]
+                ]
+                i = i + 1
+            ]
+            if stop < 0 [
+                stop = text.len()
+            ]
+            let inner: Str = text.slice(a + 1, stop)
+            let parts = str_split(inner, ",")
+            let k = 0
+            while k < parts.len() [
+                let nm: Str = lsp_ident_prefix(str_trim(parts[k].clone()))
+                if nm.len() > 0 [
+                    out.push(nm)
+                ]
+                k = k + 1
+            ]
+        ]
+        None -> [
+        ]
+    ]
+    end out
+]
+
+fun lsp_list_has_str(items: List<Str>, x: Str) -> Bool [
+    let i = 0
+    while i < items.len() [
+        if items[i] == x [
+            end true
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+!!! Czy linia WEWNATRZ funkcji deklaruje zmienna lokalna `word`:
+!!! `let word`, `for word in`, `for k, word in`, wzorzec `Wariant(word) -> [`.
+fun lsp_line_declares(line_text: Str, word: Str) -> Bool [
+    let t: Str = str_trim(line_text)
+    if str_starts_with(t.clone(), "let ") [
+        end lsp_ident_prefix(t.slice(4, t.len())) == word
+    ]
+    if str_starts_with(t.clone(), "for ") [
+        let rest: Str = t.slice(4, t.len())
+        match str_index_of(rest.clone(), " in ") [
+            Some(ix) -> [
+                let names = str_split(rest.slice(0, ix), ",")
+                let k = 0
+                while k < names.len() [
+                    if str_trim(names[k].clone()) == word [
+                        end true
+                    ]
+                    k = k + 1
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        end false
+    ]
+    if str_ends_with(t.clone(), "[") and str_contains(t.clone(), "->") and str_contains(t.clone(), "(") [
+        match str_index_of(t.clone(), "->") [
+            Some(ar) -> [
+                end lsp_list_has_str(lsp_names_in_parens(t.slice(0, ar)), word)
+            ]
+            None -> [
+            ]
+        ]
+    ]
+    end false
+]
+
+!!! Linia deklaracji zmiennej lokalnej/parametru `word` w funkcji `sc` albo -1.
+fun lsp_local_decl_line(lines: List<Str>, sc: LspScope, word: Str) -> Int [
+    let header: Str = lsp_strip_prefixes(str_trim(lines[sc.start].clone()))
+    if lsp_list_has_str(lsp_names_in_parens(header), word) [
+        end sc.start
+    ]
+    let i = sc.start + 1
+    while i <= sc.stop and i < lines.len() [
+        if lsp_line_declares(lines[i].clone(), word) [
+            end i
+        ]
+        i = i + 1
+    ]
+    end -1
+]
+
+fun lsp_word_start(line_text: Str, character: Int) -> Int [
+    let pos = character
+    if pos > line_text.len() [
+        pos = line_text.len()
+    ]
+    let start = pos
+    while start > 0 and lsp_is_ident_char(line_text.char_at(start - 1)) [
+        start = start - 1
+    ]
+    end start
+]
+
+!!! Identyfikator odbiorcy w `odbiorca.slowo` (slowo zaczyna sie w kolumnie
+!!! `start`); "" gdy slowo nie jest poprzedzone kropka.
+fun lsp_receiver_before(line_text: Str, start: Int) -> Str [
+    if start < 1 or line_text.char_at(start - 1) != "." [
+        end ""
+    ]
+    let e = start - 1
+    let b = e
+    while b > 0 and lsp_is_ident_char(line_text.char_at(b - 1)) [
+        b = b - 1
+    ]
+    end line_text.slice(b, e)
+]
+
+!!! Typ zmiennej `var` widocznej w linii `line`: `self` -> typ z `impl`; inaczej
+!!! parametr `var: Typ`, `let var: Typ` albo `let var = Typ(...)` w tej funkcji.
+fun lsp_var_type(lines: List<Str>, scopes: List<LspScope>, line: Int, var: Str) -> Str [
+    if var == "self" [
+        let ii = lsp_scope_idx_at(scopes.clone(), line, "impl")
+        if ii >= 0 [
+            end scopes[ii].name.clone()
+        ]
+        end ""
+    ]
+    let lo = 0
+    let hi = lines.len() - 1
+    let fi = lsp_scope_idx_at(scopes.clone(), line, "fun")
+    if fi >= 0 [
+        lo = scopes[fi].start
+        hi = scopes[fi].stop
+    ]
+    let i = lo
+    while i <= hi and i < lines.len() [
+        let t: Str = lsp_strip_prefixes(str_trim(lines[i].clone()))
+        if i == lo and fi >= 0 and str_starts_with(t.clone(), "fun ") [
+            match str_index_of(t.clone(), "(") [
+                Some(a) -> [
+                    let parts = str_split(t.slice(a + 1, t.len()), ",")
+                    let k = 0
+                    while k < parts.len() [
+                        let part: Str = str_trim(parts[k].clone())
+                        if lsp_ident_prefix(part.clone()) == var [
+                            match str_index_of(part.clone(), ":") [
+                                Some(c) -> [
+                                    end lsp_ident_prefix(str_trim(part.slice(c + 1, part.len())))
+                                ]
+                                None -> [
+                                ]
+                            ]
+                        ]
+                        k = k + 1
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        if str_starts_with(t.clone(), "let ") and lsp_ident_prefix(t.slice(4, t.len())) == var [
+            let after: Str = t.slice(4 + var.len(), t.len())
+            let a2: Str = str_trim(after)
+            if str_starts_with(a2.clone(), ":") [
+                end lsp_ident_prefix(str_trim(a2.slice(1, a2.len())))
+            ]
+            if str_starts_with(a2.clone(), "=") [
+                let ctor: Str = lsp_ident_prefix(str_trim(a2.slice(1, a2.len())))
+                if ctor.len() > 0 and ctor.char_at(0) >= "A" and ctor.char_at(0) <= "Z" [
+                    end ctor
+                ]
+            ]
+        ]
+        i = i + 1
+    ]
+    end ""
+]
+
+!!! Typ docelowy metody pod kursorem: nazwa `impl`, w ktorym jest deklaracja
+!!! `fun slowo`, albo typ odbiorcy `odbiorca.slowo`; "" gdy nieznany / to nie metoda.
+fun lsp_member_owner(lines: List<Str>, scopes: List<LspScope>, line: Int, character: Int, word: Str) -> Str [
+    let text: Str = lsp_line_or_empty(lines.clone(), line)
+    let recv: Str = lsp_receiver_before(text.clone(), lsp_word_start(text.clone(), character))
+    if recv != "" [
+        end lsp_var_type(lines.clone(), scopes.clone(), line, recv)
+    ]
+    let fi = lsp_scope_idx_at(scopes.clone(), line, "fun")
+    if fi >= 0 and scopes[fi].start == line and scopes[fi].name == word [
+        let ii = lsp_scope_idx_at(scopes.clone(), line, "impl")
+        if ii >= 0 [
+            end scopes[ii].name.clone()
+        ]
+    ]
+    end ""
+]
+
+!!! Czy kursor stoi na elemencie czlonkowskim (po kropce) albo na deklaracji metody.
+fun lsp_is_member_position(lines: List<Str>, scopes: List<LspScope>, line: Int, character: Int, word: Str) -> Bool [
+    let text: Str = lsp_line_or_empty(lines.clone(), line)
+    if lsp_receiver_before(text.clone(), lsp_word_start(text.clone(), character)) != "" [
+        end true
+    ]
+    let fi = lsp_scope_idx_at(scopes.clone(), line, "fun")
+    if fi >= 0 and scopes[fi].start == line and scopes[fi].name == word and lsp_scope_idx_at(scopes.clone(), line, "impl") >= 0 [
+        end true
+    ]
+    end false
+]
+
+!!! Wszystkie wystapienia slowa pod kursorem z uwzglednieniem zakresow.
+fun lsp_collect_occurrences(lines: List<Str>, line: Int, character: Int) -> LspOccs [
+    let occ = LspOccs([], [])
+    let word = lsp_word_at(lsp_line_or_empty(lines.clone(), line), character)
+    if word == "" [
+        end occ
+    ]
+    let scopes = lsp_scopes(lines.clone())
+    let member = lsp_is_member_position(lines.clone(), scopes.clone(), line, character, word.clone())
+    let owner: Str = ""
+    let cursor_fun = lsp_scope_idx_at(scopes.clone(), line, "fun")
+    let local_range = false
+    if member [
+        owner = lsp_member_owner(lines.clone(), scopes.clone(), line, character, word.clone())
+    ] elif cursor_fun >= 0 [
+        if lsp_local_decl_line(lines.clone(), scopes[cursor_fun].clone(), word.clone()) >= 0 [
+            local_range = true
+        ]
+    ]
+    let i = 0
+    while i < lines.len() [
+        let text: Str = lines[i].clone()
+        let cols = lsp_word_cols(text.clone(), word.clone())
+        let fi = lsp_scope_idx_at(scopes.clone(), i, "fun")
+        let k = 0
+        while k < cols.len() [
+            let c = cols[k]
+            let recv: Str = lsp_receiver_before(text.clone(), c)
+            let keep = false
+            if member [
+                if recv != "" [
+                    if owner == "" [
+                        keep = true
+                    ] elif lsp_var_type(lines.clone(), scopes.clone(), i, recv.clone()) == owner [
+                        keep = true
+                    ]
+                ] elif fi >= 0 and scopes[fi].start == i and scopes[fi].name == word [
+                    let ii = lsp_scope_idx_at(scopes.clone(), i, "impl")
+                    if ii >= 0 and (owner == "" or scopes[ii].name == owner) [
+                        keep = true
+                    ]
+                ]
+            ] elif recv == "" [
+                if local_range [
+                    if fi == cursor_fun [
+                        keep = true
+                    ]
+                ] else [
+                    keep = true
+                    if fi >= 0 and fi != cursor_fun [
+                        if lsp_local_decl_line(lines.clone(), scopes[fi].clone(), word.clone()) >= 0 [
+                            keep = false
+                        ]
+                    ]
+                ]
+            ]
+            if keep [
+                occ.lines.push(i)
+                occ.cols.push(c)
+            ]
+            k = k + 1
+        ]
+        i = i + 1
+    ]
+    end occ
+]
+
+!!! Deklaracja symbolu pod kursorem z uwzglednieniem zakresow (None -> uzyj
+!!! starego wyszukiwania globalnego).
+fun lsp_resolve_decl(lines: List<Str>, line: Int, character: Int) -> Option<DeclInfo> [
+    let word = lsp_word_at(lsp_line_or_empty(lines.clone(), line), character)
+    if word == "" [
+        end none()
+    ]
+    let scopes = lsp_scopes(lines.clone())
+    if lsp_is_member_position(lines.clone(), scopes.clone(), line, character, word.clone()) [
+        let owner = lsp_member_owner(lines.clone(), scopes.clone(), line, character, word.clone())
+        let k = 0
+        let fallback = -1
+        while k < scopes.len() [
+            let s = scopes[k].clone()
+            if s.kind == "fun" and s.name == word [
+                let ii = lsp_scope_idx_at(scopes.clone(), s.start, "impl")
+                if ii >= 0 [
+                    if owner != "" and scopes[ii].name == owner [
+                        end some(DeclInfo(s.start, lsp_word_cols(lines[s.start].clone(), word.clone())[0], "fun", word.clone()))
+                    ]
+                    if fallback < 0 [
+                        fallback = s.start
+                    ]
+                ]
+            ]
+            k = k + 1
+        ]
+        if owner == "" and fallback >= 0 [
+            end some(DeclInfo(fallback, lsp_word_cols(lines[fallback].clone(), word.clone())[0], "fun", word.clone()))
+        ]
+        end none()
+    ]
+    let fi = lsp_scope_idx_at(scopes.clone(), line, "fun")
+    if fi >= 0 [
+        let dl = lsp_local_decl_line(lines.clone(), scopes[fi].clone(), word.clone())
+        if dl >= 0 [
+            let cs = lsp_word_cols(lines[dl].clone(), word.clone())
+            if cs.len() > 0 [
+                let col0 = cs[0]
+                if dl == scopes[fi].start and cs.len() > 1 [
+                    col0 = cs[1]
+                ]
+                end some(DeclInfo(dl, col0, "local", word.clone()))
+            ]
+        ]
+    ]
+    !!! globalnie: tylko deklaracje NA POZIOMIE PLIKU (wciecie 0) - zmienna lokalna z innej funkcji
+    !!! nie jest definicja nazwy uzytej gdzie indziej.
+    let i = 0
+    while i < lines.len() [
+        if lsp_leading_spaces(lines[i].clone()) == 0 [
+            match lsp_decl_on_line(lines[i].clone()) [
+                Some(d) -> [
+                    if d.name == word [
+                        end some(DeclInfo(i, d.col, d.kind.clone(), d.name.clone()))
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        i = i + 1
+    ]
+    end none()
+]
+
 !!! textDocument/definition -> Location albo `null`.
 fun lsp_definition_json(uri: Str, source: Str, line: Int, character: Int) -> Str [
     let lines = split_lines(source)
@@ -122,7 +584,8 @@ fun lsp_definition_json(uri: Str, source: Str, line: Int, character: Int) -> Str
     if word == "" [
         end "null"
     ]
-    match lsp_find_decl(lines.clone(), word.clone()) [
+    let resolved = lsp_resolve_decl(lines.clone(), line, character)
+    match resolved [
         Some(d) -> [
             let sl = d.line as Str
             let sc = d.col as Str
@@ -220,7 +683,8 @@ fun lsp_hover_json(source: Str, line: Int, character: Int) -> Str [
         end "null"
     ]
     let text = ""
-    match lsp_find_decl(lines.clone(), word.clone()) [
+    let hover_decl = lsp_resolve_decl(lines.clone(), line, character)
+    match hover_decl [
         Some(d) -> [
             text = "```hackerscript\n" + lsp_decl_hover_text(lines.clone(), d) + "\n```"
         ]
@@ -365,8 +829,8 @@ fun lsp_valid_new_name(name: Str) -> Bool [
 !!! textDocument/rename -> WorkspaceEdit (`changes` dla otwartego
 !!! dokumentu) albo `null` (brak slowa pod kursorem / niepoprawna nowa
 !!! nazwa). Zmienia wszystkie wystapienia CALEGO slowa poza napisami i
-!!! komentarzami. Bez analizy zasiegu: dwie rozne zmienne o tej samej
-!!! nazwie w roznych funkcjach zostana zmienione RAZEM.
+!!! komentarzami. (0.6) Z analiza zasiegu - patrz `lsp_collect_occurrences`:
+!!! zmienna lokalna/parametr tylko w swojej funkcji, metoda wg typu odbiorcy.
 fun lsp_rename_json(uri: Str, source: Str, line: Int, character: Int, new_name: Str) -> Str [
     let lines = split_lines(source)
     let word = lsp_word_at(lsp_line_or_empty(lines.clone(), line), character)
@@ -375,18 +839,14 @@ fun lsp_rename_json(uri: Str, source: Str, line: Int, character: Int, new_name: 
     ]
     let edits = ""
     let count = 0
+    let occ = lsp_collect_occurrences(lines.clone(), line, character)
     let i = 0
-    while i < lines.len() [
-        let cols = lsp_word_cols(lines[i].clone(), word.clone())
-        let k = 0
-        while k < cols.len() [
-            if count > 0 [
-                edits = edits + ","
-            ]
-            edits = edits + "{\"range\":" + lsp_range_json(i, cols[k], cols[k] + word.len()) + ",\"newText\":" + json_escape_string(new_name.clone()) + "}"
-            count = count + 1
-            k = k + 1
+    while i < occ.lines.len() [
+        if count > 0 [
+            edits = edits + ","
         ]
+        edits = edits + "{\"range\":" + lsp_range_json(occ.lines[i], occ.cols[i], occ.cols[i] + word.len()) + ",\"newText\":" + json_escape_string(new_name.clone()) + "}"
+        count = count + 1
         i = i + 1
     ]
     if count == 0 [
@@ -404,18 +864,14 @@ fun lsp_references_json(uri: Str, source: Str, line: Int, character: Int) -> Str
     ]
     let out = ""
     let count = 0
+    let occ = lsp_collect_occurrences(lines.clone(), line, character)
     let i = 0
-    while i < lines.len() [
-        let cols = lsp_word_cols(lines[i].clone(), word.clone())
-        let k = 0
-        while k < cols.len() [
-            if count > 0 [
-                out = out + ","
-            ]
-            out = out + "{\"uri\":" + json_escape_string(uri.clone()) + ",\"range\":" + lsp_range_json(i, cols[k], cols[k] + word.len()) + "}"
-            count = count + 1
-            k = k + 1
+    while i < occ.lines.len() [
+        if count > 0 [
+            out = out + ","
         ]
+        out = out + "{\"uri\":" + json_escape_string(uri.clone()) + ",\"range\":" + lsp_range_json(occ.lines[i], occ.cols[i], occ.cols[i] + word.len()) + "}"
+        count = count + 1
         i = i + 1
     ]
     end "[" + out + "]"
