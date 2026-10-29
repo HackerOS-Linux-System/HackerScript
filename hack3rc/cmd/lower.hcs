@@ -325,6 +325,17 @@ fun always_returns(body: List<Stmt>) -> Bool [
 ]
 
 !!! Nazwa wywolywanej funkcji, gdy callee to goly identyfikator ("" w p.p.).
+fun is_number_lit(e: Expr) -> Bool [
+    match e [
+        NumberLit(_n) -> [
+            end true
+        ]
+        _ -> [
+            end false
+        ]
+    ]
+]
+
 fun callee_ident(e: Expr) -> Str [
     match e [
         IdentExpr(n) -> [
@@ -398,10 +409,13 @@ struct Lw [
     m_keys: List<Str>,
     m_params: List<Str>,
     m_rets: List<Str>,
+    m_assoc: List<Bool>,
     descs: List<Str>,
     data_decls: List<Str>,
     ext_syms: List<Str>,
     ext_decls: List<Str>,
+    def_keys: List<Str>,
+    def_exprs: List<Expr>,
     diags: List<Diagnostic>,
     lines: List<Str>,
     filename: Str,
@@ -1184,6 +1198,11 @@ impl Lw [
         if name == "" [
             match callee.clone() [
                 Attr(target, m) -> [
+                    !!! 0.6: `Typ.nazwa(args)` - funkcja asocjacyjna (Typ nie jest zmienna).
+                    let tn0 = callee_ident(target.clone())
+                    if tn0 != "" and self.lookup(tn0.clone()) < 0 and self.is_type_name(tn0.clone()) [
+                        end self.lower_assoc_call(tn0.clone(), m.clone(), args.clone())
+                    ]
                     end self.lower_method(target.clone(), m.clone(), args.clone())
                 ]
                 _ -> [
@@ -1245,11 +1264,42 @@ impl Lw [
             self.need_ext(sym.clone(), ptags.clone(), ret.clone())
         ]
         let want = split_types(params)
-        let r3: Str = self.lower_args("funkcja '" + name + "'", args.clone(), want.clone(), name + "(")
+        !!! 0.6: brakujace argumenty koncowe uzupelniane wartosciami domyslnymi.
+        let full_args: List<Expr> = args.clone()
+        if fidx >= 0 [
+            while full_args.len() < want.len() [
+                let dk = self.find_in(self.def_keys.clone(), name + "#" + (full_args.len() as Str))
+                if dk < 0 [
+                    break
+                ]
+                full_args.push(self.def_exprs[dk].clone())
+            ]
+        ]
+        let r3: Str = self.lower_args("funkcja '" + name + "'", full_args.clone(), want.clone(), name + "(")
         if r3 == "!" [
             end self.bad()
         ]
         end Ex("(call " + sym + r3 + ")", ret)
+    ]
+
+    !!! 0.6: wywolanie funkcji asocjacyjnej `Typ.nazwa(args)`.
+    fun lower_assoc_call(self, tn: Str, m: Str, args: List<Expr>) -> Ex [
+        let key = tn + "::" + m
+        let midx = self.find_in(self.m_keys.clone(), key.clone())
+        if midx < 0 [
+            self.err_h("H0476", "typ " + tn + " nie ma funkcji asocjacyjnej '" + m + "'", tn + "." + m + "(")
+            end self.bad()
+        ]
+        if self.m_assoc[midx] == false [
+            self.err_h("H0477", "'" + m + "' jest metoda (ma self) - wolaj ja na wartosci: wartosc." + m + "(...)", tn + "." + m + "(")
+            end self.bad()
+        ]
+        let want = split_types(self.m_params[midx].clone())
+        let r: Str = self.lower_args("funkcja " + key, args.clone(), want.clone(), tn + "." + m + "(")
+        if r == "!" [
+            end self.bad()
+        ]
+        end Ex("(call hks_m_" + tn + "_" + m + r + ")", self.m_rets[midx].clone())
     ]
 
     !!! Metody: listy, napisy, Option i typy uzytkownika (`impl`).
@@ -1341,6 +1391,10 @@ impl Lw [
                 self.err_h("H0472", "typ " + tn + " nie ma metody '" + m + "'", hint.clone())
                 end self.bad()
             ]
+            if self.m_assoc[midx] [
+                self.err_h("H0478", "'" + m + "' jest funkcja asocjacyjna (bez self) - wolaj ja jako " + tn + "." + m + "(...)", hint.clone())
+                end self.bad()
+            ]
             let want = split_types(self.m_params[midx].clone())
             let r: Str = self.lower_args("metoda " + key, args.clone(), want.clone(), hint.clone())
             if r == "!" [
@@ -1390,12 +1444,22 @@ impl Lw [
             end Ex("(call hks_list_reverse " + o.ir + ")", "u")
         ]
         if m == "sort" and args.len() == 0 [
-            if elem != "i" [
-                self.err_h("H0475", "List::sort w hack3rc dziala tylko dla List<Int>", hint.clone())
+            !!! 0.6: List<Int>, List<Float> (NaN na koncu) i List<Str> (bajtowo, jak
+            !!! `Vec<String>::sort` w hackerc). Inne typy elementow -> H0475.
+            let sort_sym = ""
+            if elem == "i" [
+                sort_sym = "hks_list_sort_i"
+            ] elif elem == "f" [
+                sort_sym = "hks_list_sort_f"
+            ] elif elem == "s" [
+                sort_sym = "hks_list_sort_s"
+            ]
+            if sort_sym == "" [
+                self.err_h("H0475", "List::sort w hack3rc dziala dla List<Int>, List<Float> i List<Str>", hint.clone())
                 end self.bad()
             ]
-            self.need_ext("hks_list_sort_i", "p", "u")
-            end Ex("(call hks_list_sort_i " + o.ir + ")", "u")
+            self.need_ext(sort_sym.clone(), "p", "u")
+            end Ex("(call " + sort_sym + " " + o.ir + ")", "u")
         ]
         if m == "contains" [
             if elem != "i" and elem != "s" and elem != "b" [
@@ -2074,7 +2138,7 @@ impl Lw [
 
 !!! Punkt wejscia frontendu: zbiera typy i sygnatury, sprawdza i generuje IR.
 fun lower_program(prog: Program, lines: List<Str>, filename: Str) -> LowerResult [
-    let lw = Lw([], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], lines, filename, "", "u", 0, 0)
+    let lw = Lw([], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], lines, filename, "", "u", 0, 0)
     let body = prog.body
     let i = 0
     !!! Przebieg 1: nazwy typow (struct/enum), zeby pola mogly sie do siebie odwolywac.
@@ -2175,12 +2239,41 @@ fun lower_program(prog: Program, lines: List<Str>, filename: Str) -> LowerResult
                             lw.err_h("H0200", "parametr '" + p.name + "' wymaga typu", p.name.clone())
                         ]
                     ]
+                    !!! 0.6: wartosc domyslna parametru FUNKCJI (nie metody) - tylko LITERAL
+                    !!! (liczba, napis, bool, liczba ujemna), podstawiany w miejscu wywolania,
+                    !!! i tylko na koncu listy parametrow (jak w hackerc/Pythonie).
                     match p.default_expr [
-                        Some(_d) -> [
-                            lw.err("H0201", "wartosci domyslne parametrow nie sa obslugiwane w hack3rc")
+                        Some(d) -> [
+                            let lit_ok = false
+                            match d.clone() [
+                                NumberLit(_n) -> [
+                                    lit_ok = true
+                                ]
+                                StringLit(_s, _doc) -> [
+                                    lit_ok = true
+                                ]
+                                BoolLit(_b) -> [
+                                    lit_ok = true
+                                ]
+                                UnaryOp(uop, uarg) -> [
+                                    if uop == "-" and is_number_lit(uarg.clone()) [
+                                        lit_ok = true
+                                    ]
+                                ]
+                                _ -> [
+                                    let unused5 = 0
+                                ]
+                            ]
+                            if lit_ok == false [
+                                lw.err_h("H0201", "wartosc domyslna parametru '" + p.name + "' musi byc literalem (liczba, napis, bool)", p.name.clone())
+                            ]
+                            lw.def_keys.push(name + "#" + (k as Str))
+                            lw.def_exprs.push(d.clone())
                         ]
                         None -> [
-                            let unused3 = 0
+                            if k > 0 and lw.find_in(lw.def_keys.clone(), name + "#" + ((k - 1) as Str)) >= 0 [
+                                lw.err_h("H0205", "parametr '" + p.name + "' bez wartosci domyslnej po parametrze z wartoscia domyslna", p.name.clone())
+                            ]
                         ]
                     ]
                     ptags.push(tag)
@@ -2219,11 +2312,14 @@ fun lower_program(prog: Program, lines: List<Str>, filename: Str) -> LowerResult
                             if lw.find_in(lw.m_keys.clone(), key.clone()) >= 0 [
                                 lw.err("H0321", "metoda '" + key + "' zdefiniowana wiecej niz raz")
                             ]
-                            if mparams.len() == 0 or mparams[0].name != "self" [
-                                lw.err_h("H0322", "metoda '" + mname + "' musi miec 'self' jako pierwszy parametr (funkcje asocjacyjne nie sa obslugiwane)", "fun " + mname + "(")
-                            ]
+                            !!! 0.6: funkcja asocjacyjna = brak `self` jako pierwszego parametru;
+                            !!! wolana jako `Typ.nazwa(args)`.
+                            let is_assoc = mparams.len() == 0 or mparams[0].name != "self"
                             let mtags: List<Str> = []
                             let mk = 1
+                            if is_assoc [
+                                mk = 0
+                            ]
                             while mk < mparams.len() [
                                 let mp = mparams[mk].clone()
                                 let mtag = "?"
@@ -2250,6 +2346,7 @@ fun lower_program(prog: Program, lines: List<Str>, filename: Str) -> LowerResult
                             lw.m_keys.push(key)
                             lw.m_params.push(str_join(mtags, ";"))
                             lw.m_rets.push(mrtag)
+                            lw.m_assoc.push(is_assoc)
                             lw.cur_fn = ""
                         ]
                         _ -> [
@@ -2345,6 +2442,17 @@ fun lower_program(prog: Program, lines: List<Str>, filename: Str) -> LowerResult
                                     r5 = r5 + 1
                                 ]
                                 fns = fns + "\n" + lw.lower_fn_body("hks_m_" + tname5 + "_" + mname5, lw.m_rets[midx5].clone(), pn5, pt5, mbody5.clone(), tname5 + "." + mname5)
+                            ] elif midx5 >= 0 and lw.m_assoc[midx5] [
+                                let pn6: List<Str> = []
+                                let pt6: List<Str> = []
+                                let rest6 = split_types(lw.m_params[midx5].clone())
+                                let r6 = 0
+                                while r6 < mparams5.len() [
+                                    pn6.push(mparams5[r6].name.clone())
+                                    pt6.push(rest6[r6].clone())
+                                    r6 = r6 + 1
+                                ]
+                                fns = fns + "\n" + lw.lower_fn_body("hks_m_" + tname5 + "_" + mname5, lw.m_rets[midx5].clone(), pn6, pt6, mbody5.clone(), tname5 + "." + mname5)
                             ]
                         ]
                         _ -> [
