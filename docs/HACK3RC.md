@@ -14,7 +14,7 @@ plików `.rs`/`.c` w repozytorium):
 | `hack3rc/cmd/lower.hcs` | analiza semantyczna + typy + lowering AST → IR (czysty HackerScript) |
 | `hack3rc/cmd/backend.hcs` | backend Cranelift: IR → plik obiektowy |
 | `hack3rc/cmd/runtime.hcs` | runtime (tekst C linkowany z programem): I/O, napisy, listy, **odśmiecacz pamięci** |
-| `hack3rc/tests/` | testy (`run.sh`, `cases/*.hcs` + `*.out`) |
+| `docs/hack3rc-examples/` | przykłady z oczekiwanym wyjściem (`*.hcs` + `*.out`), uruchamiane przez `scripts/verify.sh` |
 
 Frontend (lexer, parser, AST, diagnostyki) jest **współdzielony z `hackerc`**
 (`include <work:hackerc::...>`), więc `hack3rc` czyta dokładnie ten sam język.
@@ -77,21 +77,28 @@ kompilator C tego celu: domyślnie `<arch>-linux-gnu-gcc` (pakiety
 --target=...`, `zig cc -target ...`); `--run` używa `qemu-<arch> -L
 /usr/<arch>-linux-gnu` albo `--runner`.
 
-**Zweryfikowane** (kompilacja + uruchomienie całego zestawu testów pod QEMU):
-x86_64 (natywnie), aarch64, riscv64, s390x (big-endian) — 31 testów na
-każdej (wersja produkcyjna, `lto=fat`). *Wynik z wcześniejszej, większej wersji zestawu;
-w tej rundzie ponownie sprawdzono tylko x86_64 na zestawie z `hack3rc/tests/` (7 testów).* **Tylko obiekt** (sprawdzony nagłówek pliku, bez
-linkowania ani uruchomienia): macOS `x86_64-apple-darwin`/`aarch64-apple-darwin`
-(Mach-O) i Windows `x86_64-pc-windows-msvc` (COFF); dla nich pełny `exe`
-wymaga własnego `--cc` i nie był testowany (runtime C zakłada POSIX/libc).
+**Stan weryfikacji (uczciwie).** W tym repozytorium automatycznie
+sprawdzany jest tylko x86_64 (natywnie) na przykładach z
+`docs/hack3rc-examples/` (`scripts/verify.sh`, krok w CI). Wcześniejsze
+uruchomienia pod QEMU — aarch64, riscv64, s390x (big-endian) — dotyczyły
+większego, nieistniejącego tu zestawu testów i **nie zostały powtórzone**
+w tej wersji; traktuj je jako niezweryfikowane. **Tylko obiekt** (sprawdzony
+nagłówek pliku, bez linkowania ani uruchomienia): macOS
+`x86_64-apple-darwin`/`aarch64-apple-darwin` (Mach-O) i Windows
+`x86_64-pc-windows-msvc` (COFF). Obiekty te są emitowane, ale **nie są
+linkowane**: pełny `exe` wymaga własnego `--cc` i nie był testowany (runtime
+C zakłada POSIX/libc).
 
 ## Zakres języka
 
 Zasada: **program przyjęty przez `hack3rc` jest też poprawnym programem
-HackerScript** i daje to samo wyjście pod `hackerc`. Czego `hackerc` nie
+HackerScript** i daje to samo wyjście pod `hackerc`. **Wyjątek (sprawdzone):**
+metody `Str` `.to_upper()` i `.contains(...)` są przyjmowane przez `hack3rc`,
+ale `hackerc` generuje dla nich Rust, który się nie kompiluje — w przenosnym
+kodzie używaj funkcji z `std:string`. Czego `hackerc` nie
 przyjmuje (np. przypisanie do parametru), tego nie przyjmie też `hack3rc`.
 
-Typy: `Int` (i64), `Float` (f64), `Bool`, `Str`, `List<T>`, `Option<T>`,
+Typy: `Int` (i64), `Float` (f64), `Bool`, `Str`, `List<T>`, `Option<T>`, `Result<T, E>`,
 własne `struct` i `enum` (także rekurencyjne).
 
 Obsługiwane:
@@ -99,7 +106,11 @@ Obsługiwane:
 - funkcje (typowane parametry i wynik, rekurencja, `fun main()` bez wartości)
 - `struct` (konstruktor `Nazwa(a, b)`, pola, w tym zagnieżdżone), `enum` z
   polami (warianty wołane jak funkcje: `Circle(2.0)`, `Empty`), `impl` z
-  metodami (`self` pierwszy; **bez** funkcji asocjacyjnych i `get` jako nazwy)
+  metodami (`self` pierwszy) **i funkcjami asocjacyjnymi** (0.6: metoda bez `self`, wołana
+  `Typ.nazwa(args)`; nazwa `new` jest zajęta przez konstruktor; `get` nie może być nazwą)
+- wartości domyślne parametrów **funkcji** (0.6): `fun f(a: Int, b: Int = 5)` — tylko literał
+  (liczba, napis, bool, liczba ujemna), tylko na końcu listy (H0201/H0205), podstawiane
+  w miejscu wywołania; `hackerc` robi to samo (typecheck + codegen)
 - `match` na `enum` i `Option` (instrukcja; wiązanie pól, `_`, kontrola
   wyczerpywania — brak wariantu to błąd)
 - listy: literał, `xs[i]` (odczyt/zapis, także `xs[i].pole += x`,
@@ -120,10 +131,14 @@ Obsługiwane:
 - wbudowane: `sqrt sin cos tan exp ln floor ceil fabs`, `pow`, `abs`,
   `read_int()`, `exit(Int)`
 
-Nieobsługiwane (czytelny błąd `H0xxx`, nie crash): `Dict`, `Result` i `?`,
-`for` po czymkolwiek poza listą, funkcje asocjacyjne,
-interpolacja, `get`/`include`, `native`/`direct`, async/kanały, domyślne
-wartości parametrów.
+`Result<T, E>` i operator `?` są obsługiwane (sekcja „Result<T, E> i operator `?`” niżej).
+
+Nieobsługiwane (czytelny błąd `H0xxx`, nie crash): `Dict` (także `for k, v in
+d.items()`, H0151), `for` po czymkolwiek poza listą, interpolacja napisów,
+`get`/`include`, `native`/`direct`, async/kanały, wartości domyślne parametrów METOD,
+`log()` dla struct/enum. `sort` działa dla `List<Int>`, `List<Float>` (NaN na końcu;
+w `hackerc` `Vec<f64>::sort` się nie kompiluje) i `List<Str>` (bajtowo). Pełna lista otwartych
+punktów: `docs/ROADMAP.md`.
 
 ### Semantyka i różnice względem `hackerc`
 
@@ -213,23 +228,18 @@ Układ obiektów: struct = pola w kolejnych 8-bajtowych slotach; enum/Option =
 `[tag][pola...]` (tag = indeks wariantu; Option: `None`=0, `Some`=1); lista
 = `{len, cap, data*}`. `--emit ir` pokazuje IR programu.
 
-## Testy
+## Weryfikacja
 
 ```
-hack3rc/tests/run.sh [ścieżka-do-hack3rc]   # albo HACK3RC=...
+HACKERC=... HACK3RC=<ścieżka-do-hack3rc> bash scripts/verify.sh   # krok 3
 ```
 
-`hack3rc/tests/cases/*.hcs` — programy uruchamiane przez `hack3rc <plik> --run`;
-wyjście musi zgadzać się bajt po bajcie z `<nazwa>.out`. Oczekiwane wyjścia
-**wygenerowano referencyjnym `hackerc`** (transpilacja do Rusta), więc to test
-różnicowy obu kompilatorów. `hack3rc/tests/errors/*.hcs` — programy, dla których
-`hack3rc --check` musi zgłosić błąd z kodem podanym w pierwszej linii
-(`!! expect: H0301`). Zmienna `HKS_GC_STRESS=1` jest dziedziczona przez uruchamiane
-programy (odśmiecanie przy każdej alokacji); zestaw przechodzi także w tym trybie.
-
-Poprzednia, większa wersja tej sekcji opisywała warianty `nazwa+gc`, testy `err_*`
-i trzeci argument z architekturą (uruchamianie pod QEMU). Tego mechanizmu
-`run.sh` w tym repozytorium **nie ma** — cross-architekturowe uruchomienia trzeba
+Krok 3 `scripts/verify.sh` kompiluje każdy `docs/hack3rc-examples/*.hcs` przez
+`hack3rc <plik> --run` i porównuje wyjście bajt po bajcie z `<nazwa>.out`.
+Zestaw jest **mały** (kilka programów) i nie zastępuje testu różnicowego
+względem `hackerc`. Zmienna `HKS_GC_STRESS=1` jest dziedziczona przez
+uruchamiane programy (odśmiecanie przy każdej alokacji) — można ją ustawić
+ręcznie przy uruchamianiu skryptu. Cross-architekturowe uruchomienia trzeba
 robić ręcznie (`--target <arch> --run`).
 
 ## Wydajność (pomiary jednej, hałaśliwej maszyny — nie benchmark)
@@ -245,8 +255,8 @@ robić ręcznie (`--target <arch> --run`).
 
 - kompilator C (`cc`/cross-gcc/clang/zig cc) jest wymagany do linkowania
   i do kompilacji runtime'u; tylko cele 64-bitowe
-- brak `Dict`, `Result`/`?`, async, funkcji asocjacyjnych i interpolacji;
-  `for` tylko po listach; `sort` tylko dla `List<Int>`
+- brak `Dict`, async, interpolacji i domyślnych wartości parametrów metod;
+  `for` tylko po listach; `sort` tylko dla `List<Int>`, `List<Float>`, `List<Str>`
 - diagnostyki mają linię i kolumnę znalezione przeszukiwaniem tekstu
   (AST nie niesie pozycji) — przybliżenie
 - dostęp do list idzie przez wywołania runtime (bez wstawiania inline) —
@@ -269,8 +279,7 @@ przy `Err` zwraca z funkcji ten sam `Err`, w przeciwnym razie daje `T`. Na `Opti
 zwracajacej `Option<_>` przy `None` zwraca `none()`. Bledy: H0414/H0415 (konstruktor bez typu / zly typ),
 H0054/H0055/H0056 (`?` poza pasujaca funkcja / niezgodny typ bledu), H0474 (nieznana metoda Result).
 
-Testy: `hack3rc/tests/` (uruchamiane przez `hack3rc/tests/run.sh`; w tym `result_option` -
-test roznicowy z `hackerc`). Wczesniejsze testy obciazeniowe (payload strukturalny, 20000
-iteracji, `HKS_GC_STRESS=1`) nie sa czescia tego repozytorium.
+Przyklad: `docs/hack3rc-examples/result_option.hcs`. Wczesniejsze testy obciazeniowe (payload
+strukturalny, 20000 iteracji, `HKS_GC_STRESS=1`) nie sa czescia tego repozytorium.
 
 Nadal nieobslugiwane: `Dict`, interpolacja stringow, async/kanaly, `get`/`include`, `native`.
