@@ -1,0 +1,46 @@
+struct Point [
+    x: Int,
+    y: Int
+]
+
+impl Point [
+    fun origin() -> Point [
+        end Point(0, 0)
+    ]
+    fun create(x: Int, y: Int) -> Point [
+        end Point(x, y)
+    ]
+    fun sum(self) -> Int [
+        end self.x + self.y
+    ]
+]
+
+fun greet(name: Str, times: Int = 2, loud: Bool = false) -> Str [
+    let out = ""
+    let i = 0
+    while i < times [
+        out = out + name
+        i = i + 1
+    ]
+    if loud [
+        out = out + "!"
+    ]
+    end out
+]
+
+fun offset(base: Int, delta: Int = -5) -> Int [
+    end base + delta
+]
+
+fun main() [
+    log(greet("ab"))
+    log(greet("ab", 3))
+    log(greet("ab", 1, true))
+    log(offset(10), offset(10, 1))
+    let o = Point.origin()
+    let p = Point.create(3, 4)
+    log(o.sum(), p.sum())
+    let names: List<Str> = ["kot", "Ala", "pies", "ala", "Zebra"]
+    names.sort()
+    log(names[0], names[1], names[2], names[3], names[4])
+]
