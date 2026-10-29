@@ -46,7 +46,7 @@ fun run_command_combined_labeled(program: Str, args: List<Str>) -> Str [
     end "$ " + program.clone() + " " + str_join(args.clone(), " ") + "\n" + run_command_combined(program, args)
 ]
 
-!! ROZBUDOWA (ta runda, patrz docs/BIT.md - "bit lsp") - jak
+!! ROZBUDOWA ("bit lsp") - jak
 !! `run_command_inherit()` (builtin), ale zwraca `Bool` (kod wyjscia
 !! 0 = sukces) zamiast surowego kodu - wygodne dla wywolujacych, ktorych
 !! interesuje tylko "czy sie udalo", np. `exit(if ok { 0 } else { 1 })`
@@ -163,4 +163,303 @@ fun run_tee(program: Str, args: List<Str>) -> Result<CmdOutput, Str> [
         end ok(CmdOutput(code, so, se))
     ]
     end err("nie udalo sie uruchomic '" + program + "': " + why)
+]
+
+!! ---------------------------------------------------------------------
+!! 0.6: strumienie procesu (uchwyty) - czytanie wyjscia linia po linii
+!! NA ZYWO, zapis do stdin, odpytywanie i zabijanie procesu.
+!! ---------------------------------------------------------------------
+!!
+!! Model: `proc_spawn` startuje proces z trzema potokami i zwraca `Int` -
+!! UCHWYT (wspolny rejestr w procesie, bezpieczny miedzy watkami).
+!! stdout i stderr sa czytane przez osobne watki w tle i trafiaja do
+!! jednej kolejki, wiec `proc_read_line` zwraca linie w kolejnosci
+!! dotarcia i mowi, z ktorego strumienia pochodzi. Typowa petla:
+!!
+!!     let h = proc_spawn("ping", ["-c", "3", "127.0.0.1"])   !! (Result)
+!!     while proc_output_open(h) [
+!!         match proc_read_line(h, 200) [
+!!             Some(l) -> [ log(l.text) ]
+!!             None -> [ ]
+!!         ]
+!!     ]
+!!     let code = proc_wait(h)
+!!     proc_release(h)
+!!
+!! Uwagi: linie sa przycinane z konca `\n`/`\r`; bajty spoza UTF-8 sa
+!! zastepowane (lossy). Proces, ktorego wyjscie nie jest czytane, moze sie
+!! zablokowac po zapelnieniu potoku - czytaj do `proc_output_open == false`.
+
+native {Rust} [
+    use std::collections::{HashMap, VecDeque};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::process::{Child, ChildStdin, Command, Stdio};
+    use std::sync::{mpsc, Arc, Mutex, OnceLock};
+    use std::time::Duration;
+
+    pub struct HksProcEntry {
+        pub child: Child,
+        pub stdin: Option<ChildStdin>,
+        pub rx: mpsc::Receiver<(bool, String)>,
+        pub pending: VecDeque<(bool, String)>,
+        pub eof: bool,
+    }
+
+    pub struct HksProcRegistry {
+        pub next: i64,
+        pub procs: HashMap<i64, Arc<Mutex<HksProcEntry>>>,
+    }
+
+    pub fn hks_proc_registry() -> &'static Mutex<HksProcRegistry> {
+        static REG: OnceLock<Mutex<HksProcRegistry>> = OnceLock::new();
+        REG.get_or_init(|| Mutex::new(HksProcRegistry { next: 1, procs: HashMap::new() }))
+    }
+
+    pub fn hks_proc_get(handle: i64) -> Option<Arc<Mutex<HksProcEntry>>> {
+        hks_proc_registry().lock().unwrap().procs.get(&handle).cloned()
+    }
+
+    pub fn hks_proc_pump<R: Read + Send + 'static>(src: R, is_err: bool, tx: mpsc::Sender<(bool, String)>) {
+        std::thread::spawn(move || {
+            let mut rd = BufReader::new(src);
+            let mut buf: Vec<u8> = Vec::new();
+            loop {
+                buf.clear();
+                match rd.read_until(b'\n', &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        while buf.last() == Some(&b'\n') || buf.last() == Some(&b'\r') {
+                            buf.pop();
+                        }
+                        if tx.send((is_err, String::from_utf8_lossy(&buf).to_string())).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+]
+
+!! Jedna linia wyjscia procesu: `is_stderr` mowi, z ktorego strumienia.
+struct ProcLine [
+    is_stderr: Bool,
+    text: Str
+]
+
+!! Startuje `program` z `args` (BEZ powloki) z potokami na stdin/stdout/
+!! stderr i zwraca uchwyt (Int > 0). Err gdy nie udalo sie uruchomic.
+fun proc_spawn(program: Str, args: List<Str>) -> Result<Int, Str> [
+    let handle = 0
+    let why = ""
+    native {Rust} [
+        match Command::new(&program).args(args.iter()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+            Ok(mut child) => {
+                let (tx, rx) = mpsc::channel::<(bool, String)>();
+                if let Some(o) = child.stdout.take() { hks_proc_pump(o, false, tx.clone()); }
+                if let Some(e) = child.stderr.take() { hks_proc_pump(e, true, tx.clone()); }
+                drop(tx);
+                let stdin = child.stdin.take();
+                let entry = HksProcEntry { child, stdin, rx, pending: VecDeque::new(), eof: false };
+                let mut reg = hks_proc_registry().lock().unwrap();
+                let id = reg.next;
+                reg.next += 1;
+                reg.procs.insert(id, Arc::new(Mutex::new(entry)));
+                handle = id;
+            }
+            Err(e) => { why = format!("{}", e); }
+        }
+    ]
+    if handle > 0 [
+        end ok(handle)
+    ]
+    end err("nie udalo sie uruchomic '" + program + "': " + why)
+]
+
+!! Czeka do `timeout_ms` ms na kolejna linie wyjscia (ujemny timeout =
+!! czekaj bez limitu). `None` przy uplywie czasu, po koncu strumieni albo
+!! dla nieznanego uchwytu - rozroznij to przez `proc_output_open`.
+fun proc_read_line(handle: Int, timeout_ms: Int) -> Option<ProcLine> [
+    let got = false
+    let is_err = false
+    let text = ""
+    native {Rust} [
+        if let Some(arc) = hks_proc_get(handle) {
+            let mut e = arc.lock().unwrap();
+            if let Some((er, line)) = e.pending.pop_front() {
+                got = true; is_err = er; text = line;
+            } else if !e.eof {
+                let res = if timeout_ms < 0 {
+                    e.rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+                } else {
+                    e.rx.recv_timeout(Duration::from_millis(timeout_ms as u64))
+                };
+                match res {
+                    Ok((er, line)) => { got = true; is_err = er; text = line; }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => { e.eof = true; }
+                }
+            }
+        }
+    ]
+    if got [
+        end some(ProcLine(is_err, text))
+    ]
+    end none()
+]
+
+!! `true`, dopoki z uchwytu mozna jeszcze dostac linie (strumienie nie
+!! doszly do konca albo w kolejce zostaly nieodebrane linie). Uwaga: koniec
+!! strumieni wykrywany jest dopiero przez `proc_read_line`.
+fun proc_output_open(handle: Int) -> Bool [
+    let open = false
+    native {Rust} [
+        if let Some(arc) = hks_proc_get(handle) {
+            let e = arc.lock().unwrap();
+            open = !(e.eof && e.pending.is_empty());
+        }
+    ]
+    end open
+]
+
+!! Zapisuje `data` na stdin procesu i oprozna bufor. `false` gdy uchwyt
+!! nieznany, stdin zamkniety albo proces juz nie czyta.
+fun proc_write(handle: Int, data: Str) -> Bool [
+    let ok_write = false
+    native {Rust} [
+        if let Some(arc) = hks_proc_get(handle) {
+            let mut e = arc.lock().unwrap();
+            if let Some(si) = e.stdin.as_mut() {
+                ok_write = si.write_all(data.as_bytes()).is_ok() && si.flush().is_ok();
+            }
+        }
+    ]
+    end ok_write
+]
+
+!! Zamyka stdin procesu (sygnal EOF - np. dla `sort`, `cat`, `wc`).
+fun proc_close_stdin(handle: Int) -> Bool [
+    let found = false
+    native {Rust} [
+        if let Some(arc) = hks_proc_get(handle) {
+            let mut e = arc.lock().unwrap();
+            e.stdin = None;
+            found = true;
+        }
+    ]
+    end found
+]
+
+!! Nie blokuje: -2 = proces nadal dziala, -3 = nieznany uchwyt/blad,
+!! w pozostalych przypadkach kod wyjscia (-1 gdy zabity sygnalem).
+fun proc_try_wait(handle: Int) -> Int [
+    let code = -3
+    native {Rust} [
+        if let Some(arc) = hks_proc_get(handle) {
+            let mut e = arc.lock().unwrap();
+            code = match e.child.try_wait() {
+                Ok(Some(st)) => st.code().unwrap_or(-1) as i64,
+                Ok(None) => -2,
+                Err(_) => -3,
+            };
+        }
+    ]
+    end code
+]
+
+!! Czeka na zakonczenie procesu (stdin jest zamykany, zeby proces czekajacy
+!! na EOF nie zawisl) i zwraca kod wyjscia (-1 gdy zabity sygnalem,
+!! -3 gdy uchwyt nieznany). Nieodebrane linie pozostaja w kolejce.
+fun proc_wait(handle: Int) -> Int [
+    let code = -3
+    native {Rust} [
+        if let Some(arc) = hks_proc_get(handle) {
+            let mut e = arc.lock().unwrap();
+            e.stdin = None;
+            code = match e.child.wait() {
+                Ok(st) => st.code().unwrap_or(-1) as i64,
+                Err(_) => -3,
+            };
+        }
+    ]
+    end code
+]
+
+!! Zabija proces (SIGKILL / TerminateProcess). `false` gdy uchwyt nieznany
+!! albo proces juz sie zakonczyl.
+fun proc_kill(handle: Int) -> Bool [
+    let killed = false
+    native {Rust} [
+        if let Some(arc) = hks_proc_get(handle) {
+            let mut e = arc.lock().unwrap();
+            killed = e.child.kill().is_ok();
+        }
+    ]
+    end killed
+]
+
+!! PID systemowy procesu (0 dla nieznanego uchwytu).
+fun proc_pid(handle: Int) -> Int [
+    let pid = 0
+    native {Rust} [
+        if let Some(arc) = hks_proc_get(handle) {
+            let e = arc.lock().unwrap();
+            pid = e.child.id() as i64;
+        }
+    ]
+    end pid
+]
+
+!! Zwalnia uchwyt. Proces, ktory jeszcze dziala, jest zabijany i
+!! odbierany (bez zombie). `false` dla nieznanego uchwytu.
+fun proc_release(handle: Int) -> Bool [
+    let found = false
+    native {Rust} [
+        let removed = hks_proc_registry().lock().unwrap().procs.remove(&handle);
+        if let Some(arc) = removed {
+            let mut e = arc.lock().unwrap();
+            if let Ok(None) = e.child.try_wait() {
+                let _ = e.child.kill();
+            }
+            let _ = e.child.wait();
+            found = true;
+        }
+    ]
+    end found
+]
+
+!! Wygoda: uruchamia program, zbiera WSZYSTKIE linie wyjscia (stdout i
+!! stderr w kolejnosci dotarcia) i zwraca je razem z kodem wyjscia.
+!! `lines` to teksty linii; `from_stderr[i]` mowi, skad pochodzi `lines[i]`.
+struct ProcLines [
+    code: Int,
+    lines: List<Str>,
+    from_stderr: List<Bool>
+]
+
+fun run_lines(program: Str, args: List<Str>) -> Result<ProcLines, Str> [
+    let started = proc_spawn(program, args)
+    match started [
+        Err(e) -> [
+            end err(e)
+        ]
+        Ok(h) -> [
+            let lines: List<Str> = []
+            let flags: List<Bool> = []
+            proc_close_stdin(h)
+            while proc_output_open(h) [
+                match proc_read_line(h, 200) [
+                    Some(l) -> [
+                        lines.push(l.text)
+                        flags.push(l.is_stderr)
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            let code = proc_wait(h)
+            proc_release(h)
+            end ok(ProcLines(code, lines, flags))
+        ]
+    ]
 ]
