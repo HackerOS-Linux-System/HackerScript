@@ -282,7 +282,7 @@ fun lsp_capabilities_json() -> Str [
     end "{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true,\"documentFormattingProvider\":true,\"definitionProvider\":true,\"referencesProvider\":true,\"renameProvider\":true,\"documentSymbolProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\"]}},\"serverInfo\":{\"name\":\"hackerc-lsp\",\"version\":\"0.6\"}}"
 ]
 
-!!! Tura 10 - pomocnicy do zadan pozycyjnych (hover/definition/
+!!! Pomocnicy do zadan pozycyjnych (hover/definition/
 !!! completion): `params.textDocument.uri`, `params.position.line/
 !!! character`.
 fun lsp_params_uri(params: JsonValue) -> Str [
@@ -537,7 +537,7 @@ fun lsp_run() [
                                         ]
                                     ]
                                 ] elif method == "textDocument/hover" or method == "textDocument/definition" or method == "textDocument/completion" or method == "textDocument/rename" or method == "textDocument/references" or method == "textDocument/documentSymbol" [
-                                    !! Etap 2b/2c (Tura 10, docs/LSP.md) - zadania pozycyjne. Nieznany
+                                    !! Etap 2b/2c (docs/LSP.md) - zadania pozycyjne. Nieznany
                                     !! dokument -> `null` (poprawna odpowiedz LSP, nie blad).
                                     let req_uri = lsp_params_uri(params.clone())
                                     let req_src = ""
