@@ -1,6 +1,6 @@
 # `fast direct {backend} [ ... ]` — przyspieszony Python, statycznie linkowany
 
-Status: **zaimplementowane w wersji DYNAMICZNEJ (Tura 10) — statyczne linkowanie NIE jest zrobione** (patrz "Stan implementacji" na końcu). Rozszerza istniejące
+Status: **zaimplementowane w wersji DYNAMICZNEJ — statyczne linkowanie NIE jest zrobione** (patrz "Stan implementacji" na końcu). Rozszerza istniejące
 `direct [ ... ]` (patrz `docs/SYNTAX.md`) o wybór **backendu
 wykonania Pythona** zamiast domyślnego CPythona przez PyO3.
 
@@ -38,13 +38,13 @@ fast direct {numba} [
 ]
 ```
 
-`{backend}` to jeden z 19 identyfikatorów zdefiniowanych niżej.
+`{backend}` to jeden z 20 identyfikatorów zdefiniowanych niżej.
 Domyślny, "gołe" `fast direct [ ... ]` (bez `{backend}`) **nie
 istnieje** — backend jest zawsze obowiązkowy, żeby uniknąć niejawnego
 wyboru linkowanego wariantu (w przeciwieństwie do zwykłego `direct`,
 gdzie backend "systemowy CPython" jest jeden i nie ma dwuznaczności).
 
-## 19 backendów — kategorie i co każdy statycznie linkuje
+## 20 backendów — kategorie i co każdy statycznie linkuje
 
 | Backend | Kategoria | Co jest linkowane statycznie do binarki |
 |---|---|---|
@@ -130,7 +130,7 @@ zlinkowania** (`bit build`), a nie tylko jako pakiet instalowany w
 * `hackerc/cmd/parser.hcs` — nowy węzeł AST `FastDirectBlock(backend:
   Str, body: List<Stmt>)`, równoległy do istniejącego `DirectBlock`.
 * `hackerc/cmd/typecheck.hcs` — walidacja `{backend}` przeciw liście
-  19 znanych identyfikatorów (błąd E-kod analogiczny do E0003 dla
+  20 znanych identyfikatorów (błąd E-kod analogiczny do E0003 dla
   nieznanego źródła `get`).
 * `hackerc/cmd/codegen.hcs` — generuje inicjalizację odpowiedniego
   środowiska wykonania (PyO3 z PyPy jako `sys.executable` statycznie
@@ -165,9 +165,9 @@ kolejna:
    `ray`.
 
 
-## Stan implementacji (Tura 10) — co JEST, a czego NIE MA
+## Stan implementacji — co JEST, a czego NIE MA
 
-Wszystkie 19 identyfikatorów mają realny dispatch w
+Wszystkie 20 identyfikatorów mają realny dispatch w
 `hackerc/cmd/codegen.hcs` (`fast_direct_kind`/`gen_fast_direct`).
 Nieznany backend daje `compile_error!` z listą dozwolonych. **Nie ma
 statycznego linkowania interpretera** (PyPy/CPython/numpy nie są
@@ -181,13 +181,18 @@ DYNAMICZNIE, na tym, co jest zainstalowane w środowisku uruchomienia.
 | `compiled` | `cython`, `pythran` | blok zapisywany do pliku w katalogu tymczasowym, kompilowany W RUNTIME (`Cython.Build.Cythonize -i` / `pythran.run`), importowany pod unikalną nazwą modułu. Wymaga kompilatora C/C++ + pakietu w runtime. Pythran: dostępne są tylko funkcje z `#pythran export`; `main()` wywoływane, jeśli wyeksportowane |
 | `py` | `numpy`, `numba`, `polars`, `scipy`, `asyncio`, `uvloop`, `multiprocessing`, `jax`, `duckdb`, `cupy`, `vaex`, `numexpr`, `trio`, `aiohttp`, `granian`, `httpx`, `ray` | osadzony CPython (PyO3, jak `direct`) + kontrola importu z czytelnym błędem + preludium (`uvloop`: polityka pętli; `multiprocessing`: start method `fork`; `ray`: `ray.init`) |
 
-**Przetestowane realnie (kompilacja + uruchomienie):** `numpy`, `pypy`,
-`asyncio`, `uvloop`, `trio`, `multiprocessing`, `cython`, `pythran`,
-`httpx`. Kontrola braku modułu przetestowana na `numba`.
-**Nieprzetestowane** (brak pakietów/GPU w środowisku pracy — ta sama
-ścieżka `py` co powyższe, więc powinny działać, jeśli pakiet jest
-zainstalowany): `numba`, `polars`, `scipy`, `jax`, `duckdb`, `cupy`,
-`vaex`, `numexpr`, `aiohttp`, `granian`, `ray`.
+**Test dymny wszystkich backendów (`scripts/verify_fast_direct.sh`, Python 3.12 + PyO3):**
+program `fast direct {backend} [ print("ok") ]` jest budowany, uruchamiany i musi wypisać `ok`.
+
+| Wynik | Backendy |
+|---|---|
+| **OK** (17) | `numpy`, `polars`, `scipy`, `asyncio`, `uvloop`, `multiprocessing`, `jax`, `duckdb`, `numexpr`, `trio`, `aiohttp`, `granian`, `httpx`, `ray`, `numba`, `cython`, `pythran` (dla `pythran` blok musi być poprawnym modułem: `#pythran export main()` + `def main():`) |
+| **Niesprawdzone** (3) | `pypy` — brak binarki `pypy3` w środowisku testowym (w starszej rundzie uruchamiany ręcznie); `cupy` — wymaga GPU/CUDA; `vaex` — nie udało się zainstalować w środowisku testowym (brak miejsca na dysku w trakcie instalacji) |
+
+Razem 20 identyfikatorów backendów (wcześniejsze wersje tej dokumentacji podawały 19 — to był błąd rachunku).
+
+Uwaga: to jest test, że backend się uruchamia i wypisuje tekst — **nie** sprawdza poprawności ani
+wydajności obliczeń danego backendu.
 
 Nie zrobione względem specyfikacji wyżej: statyczne linkowanie,
 mosty Rust-native dla `polars`/`granian`/`duckdb` bez CPythona,
