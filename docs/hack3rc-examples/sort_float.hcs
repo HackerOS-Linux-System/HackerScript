@@ -1,0 +1,5 @@
+fun main() [
+    let xs: List<Float> = [3.5, -1.0, 2.25, 0.0]
+    xs.sort()
+    log(xs[0], xs[1], xs[2], xs[3])
+]
