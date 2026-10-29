@@ -85,7 +85,7 @@ impl Parser [
     !!! to zwykle po prostu dlugosc jego tekstu.
     fun push_error(self, message: Str, line: Int, col: Int, length: Int) [
         self.errors.push(Diagnostic("error", "E0100", message, line, col, max_int(1, length), ""))
-        log("[hackerc-self] parser: " + message + " w linii " + (line as Str) + ", kolumna " + (col as Str))
+        elog("[hackerc-self] parser: " + message + " w linii " + (line as Str) + ", kolumna " + (col as Str))
     ]
 
     !!! Bez prawdziwego `ParseError`/wyjatkow w tej wersji bootstrapu
