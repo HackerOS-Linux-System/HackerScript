@@ -1917,8 +1917,7 @@ struct CodeGen [
     needs_native_kotlin: Bool,
     native_kotlin_sources: Dict<Str, Str>,
     native_kotlin_order: List<Str>,
-    !! DODANE (ta runda, patrz SESSION_LOG.md "problem z
-    !! work:/nazewnictwem modulow") - gdy PLIK TRANSPILOWANY PRZEZ TEN
+    !! DODANE (nazewnictwo modulow work:) - gdy PLIK TRANSPILOWANY PRZEZ TEN
     !! `CodeGen` zostal sam zaladowany jako `include <work:member::...>`
     !! (albo transytywnie stad), `gen_include` (dla WLASNYCH,
     !! WEWNETRZNYCH `include <cos>` TEGO pliku) rozstrzyga `cos` w TEJ
@@ -1931,7 +1930,7 @@ struct CodeGen [
     !! WYGENEROWANYM Ruscie) rozjada sie z powrotem - to byl DOKLADNIE
     !! blad odkryty w tej sesji (`error[E0432]`/duplikaty modulow).
     work_member: Option<Str>,
-    !! DODANE (Tura 10, patrz docs/GO.md) - `native {go} [ ... ]`/`get <go:...>`.
+    !! DODANE (patrz docs/GO.md) - `native {go} [ ... ]`/`get <go:...>`.
     needs_native_go: Bool,
     native_go_sources: Dict<Str, Str>,
     native_go_order: List<Str>,
@@ -2300,12 +2299,24 @@ impl CodeGen [
         let params = fun_decl_params(f)
         let out = ""
         let i = 0
-        let n = args.len()
+        !!! 0.6: brakujace argumenty koncowe uzupelniane wartosciami domyslnymi parametrow.
+        let full_args: List<Expr> = args.clone()
+        while full_args.len() < params.len() [
+            match params[full_args.len()].default_expr.clone() [
+                Some(dflt) -> [
+                    full_args.push(dflt)
+                ]
+                None -> [
+                    break
+                ]
+            ]
+        ]
+        let n = full_args.len()
         while i < n [
             if i > 0 [
                 out = out + ", "
             ]
-            let rendered = self.gen_expr(args[i].clone())
+            let rendered = self.gen_expr(full_args[i].clone())
             if i < params.len() [
                 let p = params[i]
                 match p.type_ref.clone() [
@@ -2318,7 +2329,7 @@ impl CodeGen [
                                 rendered = "&" + rendered
                             ]
                         ] else [
-                            rendered = self.gen_owned_arg(args[i].clone())
+                            rendered = self.gen_owned_arg(full_args[i].clone())
                         ]
                     ]
                     None -> [
@@ -2594,7 +2605,7 @@ impl CodeGen [
             let args_expr2 = self.gen_expr(args[1])
             end "(|| -> String {\n        let __hks_cmd_out2 = match std::process::Command::new(&" + program_expr2 + ")\n            .args(" + args_expr2 + ")\n            .output() {\n            Ok(o) => o,\n            Err(e) => return e.to_string(),\n        };\n        let mut __hks_combined = String::from_utf8_lossy(&__hks_cmd_out2.stdout).to_string();\n        __hks_combined.push_str(&String::from_utf8_lossy(&__hks_cmd_out2.stderr));\n        __hks_combined\n    })()"
         ]
-        !! ROZBUDOWA (ta runda, patrz docs/BIT.md - "bit lsp") -
+        !! ROZBUDOWA ("bit lsp") -
         !! `run_command_inherit(program, argumenty) -> Int` -
         !! `Stdio::inherit()` na WSZYSTKICH trzech strumieniach dziecka
         !! (w odroznieniu od `run_command`/`run_command_combined`
@@ -2858,6 +2869,29 @@ impl CodeGen [
             ]
         ]
 
+        !!! 0.6: funkcja asocjacyjna `Typ.nazwa(args)` (metoda z `impl` BEZ `self`) ->
+        !!! `Typ::nazwa(args)`. Wczesniej powstawalo `Typ.nazwa(args)`, ktore rustc odrzuca
+        !!! (E0423). Rozpoznajemy po tym, ze cel to nazwa typu z `impl`-owa metoda o tej nazwie
+        !!! i nie jest to zmienna lokalna.
+        if shape.is_method_call and shape.target_rendered.len() > 0 [
+            match self.sigs.methods.fetch(shape.target_rendered.clone() + "::" + shape.method_name.clone()) [
+                Some(am) -> [
+                    let is_var = false
+                    match self.env_vars.fetch(shape.target_rendered.clone()) [
+                        Some(_ev) -> [
+                            is_var = true
+                        ]
+                        None -> [
+                        ]
+                    ]
+                    if is_var == false [
+                        end shape.target_rendered + "::" + shape.method_name + "(" + self.gen_args_list(args) + ")"
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
         if shape.is_method_call [
             end shape.target_rendered + "." + shape.method_name + "(" + self.gen_args_list(args) + ")"
         ]
@@ -3385,7 +3419,7 @@ impl CodeGen [
     ]
 
     !!! `fast direct {backend}(...)` - patrz docs/FAST_DIRECT.md.
-    !!! UCZCIWIE (Etap pilotazowy, tylko 2 z 19 backendow z tego
+    !!! UCZCIWIE (Etap pilotazowy, tylko 2 z 20 backendow z tego
     !!! dokumentu): prawdziwe statyczne linkowanie PyPy (albo
     !!! specjalizowanych silnikow typu `numba`/`jax`/...) NIE JEST tu
     !!! zaimplementowane - nie istnieje sprawdzona, dajaca sie tu
@@ -3420,8 +3454,8 @@ impl CodeGen [
             None -> [
             ]
         ]
-        !!! ROZBUDOWA (Tura 10, patrz docs/FAST_DIRECT.md "Stan
-        !!! implementacji") - WSZYSTKIE 19 backendow maja teraz realny
+        !!! ROZBUDOWA (patrz docs/FAST_DIRECT.md "Stan
+        !!! implementacji") - WSZYSTKIE 20 backendow maja teraz realny
         !!! dispatch (`fast_direct_kind`), ale UCZCIWIE: DYNAMICZNY, nie
         !!! statyczny (statyczne linkowanie PyPy/CPython/numpy do
         !!! binarki NIE jest zaimplementowane - patrz dokument).
@@ -3611,7 +3645,7 @@ impl CodeGen [
             self.emit("}")
             end
         ]
-        !!! DODANE (Tura 10, patrz docs/GO.md) - `native {go} [ ... ]`:
+        !!! DODANE (patrz docs/GO.md) - `native {go} [ ... ]`:
         !!! surowy tekst staje sie cialem funkcji Go `hks_native_go_N()`
         !!! z `//export` - WSZYSTKIE takie bloki projektu trafiaja do
         !!! JEDNEGO pliku `go/hks_go.go` (Go nie pozwala zlinkowac dwoch
@@ -3807,44 +3841,24 @@ impl CodeGen [
         self.emit("}")
     ]
 
-    !!! `$ polecenie $` - Zero-Cost Sandbox. Generuje
-    !!! `std::process::Command` z `pre_exec` (dziala w DZIECKU po
-    !!! `fork()`, przed `exec()`) wolajacym `libc::unshare()`:
-    !!! `CLONE_NEWNET` (izolacja sieci - proces widzi TYLKO `lo`) i
-    !!! `CLONE_NEWNS` (izolacja mount-namespace), po czym bind-remount
-    !!! `/` na read-only (`mount(MS_BIND)` + `mount(MS_REMOUNT|
-    !!! MS_BIND|MS_RDONLY)` - klasyczny trik, bez zadnych zewnetrznych
-    !!! narzedzi typu firejail/bwrap).
-    !!!
-    !!! NAPRAWA (ta runda) - patrz docs/ROADMAP.md sekcja 5. Poprzednia
-    !!! wersja: brak uprawnien (np. brak CAP_SYS_ADMIN) -> ostrzezenie
-    !!! NA STDERR + polecenie i tak sie wykonuje, BEZ IZOLACJI. To jest
-    !!! DOKLADNIE zly kompromis dla bloku, ktorego CALA racja bytu to
-    !!! izolacja ("Zero-Cost SANDBOX") - cichy (poza jedna linia na
-    !!! stderr, ktora latwo przeoczyc w CI/logach) spadek do "uruchom
-    !!! bez piaskownicy" jest gorszy niz jawny blad, bo kod wywolujacy
-    !!! `$ ... $` mogl polegac na izolacji sieci/fs jako na gwarancji
-    !!! bezpieczenstwa. Nowe zachowanie (fail-closed, jak w opisie
-    !!! roadmapy "twardo odmowic"): gdy `unshare(CLONE_NEWNET)` ALBO
-    !!! `unshare(CLONE_NEWNS)`+bind-remount-ro sie nie powiedzie,
-    !!! dziecko konczy sie NATYCHMIAST kodem 111 (nie wykonujac
-    !!! polecenia w ogole) - `libc::_exit` (nie `std::process::exit`,
-    !!! ktore NIE jest gwarantowane async-signal-safe w `pre_exec`,
-    !!! patrz komentarz przy `libc::write` nizej), po komunikacie na
-    !!! stderr tlumaczacym DOKLADNIE ktora izolacja zawiodla i ze
-    !!! polecenie NIE zostalo uruchomione (zamiast domyslac sie, ze
-    !!! cichy fallback bez izolacji byl "bezpieczna degradacja").
-    !!! Rodzic (`__hks_sandbox_cmd.status()`) widzi wiec albo sukces z
-    !!! PELNA izolacja, albo status ukonczenia 111 - nigdy "sukces bez
-    !!! izolacji" udajacy normalny wynik. Alternatywa (jawna zgoda
-    !!! wywolujacego na uruchomienie BEZ izolacji, gdy CAP_SYS_ADMIN
-    !!! naprawde jest niedostepne np. w kontenerze bez tej capability)
-    !!! zostaje zaprojektowana, ale NIE zaimplementowana w tej rundzie -
-    !!! patrz `docs/ROADMAP.md`, planowana skladnia
-    !!! `$ polecenie $ allow_unsandboxed` jako osobny wariant parsera/
-    !!! AST (`SandboxStmt` musialby dostac drugie pole `Bool`), zeby
-    !!! zgoda byla widoczna w KODZIE ZRODLOWYM `.hcs`, nie tylko w
-    !!! zachowaniu runtime.
+    !!! `$ polecenie $` - Zero-Cost Sandbox (patrz docs/SANDBOX.md).
+    !!! Polecenie jest uruchamiane przez `sh -c` w izolacji sieci (proces
+    !!! widzi tylko `lo`) i systemu plikow (`/` zamontowane tylko-do-odczytu).
+    !!! 0.6: izolacje probowane PO KOLEI (pierwsza, ktora sie uda):
+    !!!   1. `unshare(CLONE_NEWNET)` + `unshare(CLONE_NEWNS)` + bind-remount
+    !!!      `/` jako RO (wymaga CAP_SYS_ADMIN - jak w poprzednich wersjach);
+    !!!   2. to samo przez `CLONE_NEWUSER` (user namespace + mapowanie uid/gid)
+    !!!      - dziala BEZ roota i BEZ capabilities na wiekszosci dystrybucji;
+    !!!   3. `bwrap` (bubblewrap), jesli jest zainstalowany i dziala.
+    !!! Bledy izolacji sa wykrywane jako BLAD `spawn` (Err z `pre_exec`), a nie
+    !!! po kodzie wyjscia - polecenie, ktore samo zwraca 111, nie jest mylone z
+    !!! awaria piaskownicy i nie uruchomi sie dwa razy.
+    !!! Gdy zadna izolacja nie dziala: domyslnie (`HKS_SANDBOX` nieustawione
+    !!! albo `strict`) panic - polecenie NIE jest wykonywane (fail-closed).
+    !!! `HKS_SANDBOX=best-effort` pozwala JAWNIE uruchomic je bez izolacji
+    !!! (z ostrzezeniem na stderr), `HKS_SANDBOX=off` pomija izolacje w ogole.
+    !!! Znane ograniczenie: remount RO dotyczy tylko montowania `/`, osobne
+    !!! montowania (np. osobny `/home`) moga pozostac zapisywalne.
     fun gen_sandbox(self, idx_text: Str) [
         let raw = ""
         match self.sandbox_blocks.fetch(idx_text) [
@@ -3856,46 +3870,81 @@ impl CodeGen [
         ]
         self.needs_sandbox = true
         self.emit("{")
-        self.indent = self.indent + 1
-        self.emit("let mut __hks_sandbox_cmd = std::process::Command::new(\"sh\");")
-        self.emit("__hks_sandbox_cmd.arg(\"-c\").arg(" + python_raw_string(raw) + ");")
-        self.emit("unsafe {")
-        self.indent = self.indent + 1
-        self.emit("use std::os::unix::process::CommandExt;")
-        self.emit("__hks_sandbox_cmd.pre_exec(|| {")
-        self.indent = self.indent + 1
-        self.emit("if libc::unshare(libc::CLONE_NEWNET) != 0 {")
-        self.indent = self.indent + 1
-        self.emit("let __m = b\"[hackerc-sandbox] BLAD: brak uprawnien do izolacji sieci (CLONE_NEWNET, potrzebne CAP_SYS_ADMIN/CAP_NET_ADMIN) - polecenie NIE zostalo uruchomione (fail-closed, patrz docs/ROADMAP.md)\\n\";")
-        self.emit("libc::write(2, __m.as_ptr() as *const libc::c_void, __m.len());")
-        self.emit("libc::_exit(111);")
-        self.indent = self.indent - 1
-        self.emit("}")
-        self.emit("if libc::unshare(libc::CLONE_NEWNS) == 0 {")
-        self.indent = self.indent + 1
-        self.emit("let __root = std::ffi::CString::new(\"/\").unwrap();")
-        self.emit("libc::mount(__root.as_ptr(), __root.as_ptr(), std::ptr::null(), libc::MS_BIND | libc::MS_REC, std::ptr::null());")
-        self.emit("libc::mount(std::ptr::null(), __root.as_ptr(), std::ptr::null(), libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY, std::ptr::null());")
-        self.indent = self.indent - 1
-        self.emit("} else {")
-        self.indent = self.indent + 1
-        self.emit("let __m = b\"[hackerc-sandbox] BLAD: brak uprawnien do izolacji systemu plikow (CLONE_NEWNS, potrzebne CAP_SYS_ADMIN) - polecenie NIE zostalo uruchomione (fail-closed, patrz docs/ROADMAP.md)\\n\";")
-        self.emit("libc::write(2, __m.as_ptr() as *const libc::c_void, __m.len());")
-        self.emit("libc::_exit(111);")
-        self.indent = self.indent - 1
-        self.emit("}")
-        self.emit("Ok(())")
-        self.indent = self.indent - 1
-        self.emit("});")
-        self.indent = self.indent - 1
-        self.emit("}")
-        self.emit("let __hks_sandbox_status = __hks_sandbox_cmd.status().expect(\"$ ... $ (Zero-Cost Sandbox) blok: nie udalo sie uruchomic polecenia\");")
-        self.emit("if __hks_sandbox_status.code() == Some(111) {")
-        self.indent = self.indent + 1
-        self.emit("panic!(\"$ ... $ (Zero-Cost Sandbox) blok: przerwano - piaskownica (CLONE_NEWNET/CLONE_NEWNS) niedostepna w tym srodowisku, patrz komunikat powyzej\");")
-        self.indent = self.indent - 1
-        self.emit("}")
-        self.indent = self.indent - 1
+        self.emit("    let __hks_cmd: String = " + python_raw_string(raw) + ".to_string();")
+        self.emit("    let __hks_mode = std::env::var(\"HKS_SANDBOX\").unwrap_or_default().to_lowercase();")
+        self.emit("    let __hks_run = |__lvl: u8| -> std::io::Result<std::process::ExitStatus> {")
+        self.emit("        use std::os::unix::process::CommandExt;")
+        self.emit("        let mut __c = if __lvl == 3 {")
+        self.emit("            let mut __b = std::process::Command::new(\"bwrap\");")
+        self.emit("            __b.args([\"--unshare-net\", \"--ro-bind\", \"/\", \"/\", \"--dev\", \"/dev\", \"--proc\", \"/proc\", \"sh\", \"-c\"]).arg(&__hks_cmd);")
+        self.emit("            __b")
+        self.emit("        } else {")
+        self.emit("            let mut __s = std::process::Command::new(\"sh\");")
+        self.emit("            __s.arg(\"-c\").arg(&__hks_cmd);")
+        self.emit("            __s")
+        self.emit("        };")
+        self.emit("        if __lvl == 1 || __lvl == 2 {")
+        self.emit("            let __uid = unsafe { libc::geteuid() };")
+        self.emit("            let __gid = unsafe { libc::getegid() };")
+        self.emit("            let __uid_map = format!(\"{} {} 1\", __uid, __uid).into_bytes();")
+        self.emit("            let __gid_map = format!(\"{} {} 1\", __gid, __gid).into_bytes();")
+        self.emit("            unsafe {")
+        self.emit("                __c.pre_exec(move || {")
+        self.emit("                    unsafe fn __w(path: &[u8], data: &[u8]) -> bool {")
+        self.emit("                        let fd = libc::open(path.as_ptr() as *const libc::c_char, libc::O_WRONLY);")
+        self.emit("                        if fd < 0 { return false; }")
+        self.emit("                        let n = libc::write(fd, data.as_ptr() as *const libc::c_void, data.len());")
+        self.emit("                        libc::close(fd);")
+        self.emit("                        n == data.len() as isize")
+        self.emit("                    }")
+        self.emit("                    if __lvl == 1 {")
+        self.emit("                        if libc::unshare(libc::CLONE_NEWNET) != 0 || libc::unshare(libc::CLONE_NEWNS) != 0 {")
+        self.emit("                            return Err(std::io::Error::last_os_error());")
+        self.emit("                        }")
+        self.emit("                    } else {")
+        self.emit("                        if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNET | libc::CLONE_NEWNS) != 0 {")
+        self.emit("                            return Err(std::io::Error::last_os_error());")
+        self.emit("                        }")
+        self.emit("                        if !__w(b\"/proc/self/setgroups\\0\", b\"deny\") || !__w(b\"/proc/self/uid_map\\0\", &__uid_map) || !__w(b\"/proc/self/gid_map\\0\", &__gid_map) {")
+        self.emit("                            return Err(std::io::Error::last_os_error());")
+        self.emit("                        }")
+        self.emit("                    }")
+        self.emit("                    let __root = b\"/\\0\";")
+        self.emit("                    if libc::mount(__root.as_ptr() as *const libc::c_char, __root.as_ptr() as *const libc::c_char, std::ptr::null(), libc::MS_BIND | libc::MS_REC, std::ptr::null()) != 0")
+        self.emit("                        || libc::mount(std::ptr::null(), __root.as_ptr() as *const libc::c_char, std::ptr::null(), libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY, std::ptr::null()) != 0 {")
+        self.emit("                        return Err(std::io::Error::last_os_error());")
+        self.emit("                    }")
+        self.emit("                    Ok(())")
+        self.emit("                });")
+        self.emit("            }")
+        self.emit("        }")
+        self.emit("        __c.status()")
+        self.emit("    };")
+        self.emit("    let mut __hks_done = false;")
+        self.emit("    let mut __hks_errs: Vec<String> = Vec::new();")
+        self.emit("    if __hks_mode != \"off\" {")
+        self.emit("        for __lvl in [1u8, 2u8, 3u8] {")
+        self.emit("            if __lvl == 3 {")
+        self.emit("                let __ok = std::process::Command::new(\"bwrap\").args([\"--unshare-net\", \"--ro-bind\", \"/\", \"/\", \"true\"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false);")
+        self.emit("                if !__ok {")
+        self.emit("                    __hks_errs.push(\"bwrap: niedostepny albo nie dziala\".to_string());")
+        self.emit("                    continue;")
+        self.emit("                }")
+        self.emit("            }")
+        self.emit("            match __hks_run(__lvl) {")
+        self.emit("                Ok(_) => { __hks_done = true; break; }")
+        self.emit("                Err(e) => { __hks_errs.push(format!(\"metoda {}: {}\", __lvl, e)); }")
+        self.emit("            }")
+        self.emit("        }")
+        self.emit("    }")
+        self.emit("    if !__hks_done {")
+        self.emit("        if __hks_mode == \"off\" || __hks_mode == \"best-effort\" {")
+        self.emit("            eprintln!(\"[hackerc-sandbox] OSTRZEZENIE: uruchamiam polecenie BEZ izolacji (HKS_SANDBOX={}). Proby: {:?}\", __hks_mode, __hks_errs);")
+        self.emit("            std::process::Command::new(\"sh\").arg(\"-c\").arg(&__hks_cmd).status().expect(\"$ ... $ (Zero-Cost Sandbox) blok: nie udalo sie uruchomic polecenia\");")
+        self.emit("        } else {")
+        self.emit("            panic!(\"$ ... $ (Zero-Cost Sandbox) blok: izolacja niedostepna w tym srodowisku ({:?}) - polecenie NIE zostalo uruchomione (fail-closed). Mozesz jawnie zezwolic na uruchomienie bez izolacji: HKS_SANDBOX=best-effort. Patrz docs/SANDBOX.md\", __hks_errs);")
+        self.emit("        }")
+        self.emit("    }")
         self.emit("}")
     ]
 
@@ -4704,8 +4753,14 @@ impl CodeGen [
         self.declare_env("self", some(TypeRef(struct_name.clone(), none(), none())))
 
         let key_prefix = struct_name.clone() + "::" + name.clone() + "::"
+        !!! 0.6: metoda BEZ `self` jako pierwszego parametru to funkcja asocjacyjna
+        !!! (`Typ.nazwa(args)` -> `Typ::nazwa(args)`) - bez odbiornika. Nazwa `new` jest
+        !!! zajeta przez automatyczny konstruktor struktury (`Typ(a, b)` -> `Typ::new`).
+        let has_self = params.len() > 0 and params[0].name == "self"
         let params_str = "&self"
-        if self.method_mut_params.contains(key_prefix.clone() + "self") [
+        if has_self == false [
+            params_str = ""
+        ] elif self.method_mut_params.contains(key_prefix.clone() + "self") [
             params_str = "&mut self"
         ]
 
@@ -4741,6 +4796,10 @@ impl CodeGen [
                 ]
             ]
             i = i + 1
+        ]
+
+        if has_self == false and params_str.len() > 2 and params_str.char_at(0) == "," [
+            params_str = params_str.slice(2, params_str.len())
         ]
 
         let ret = ""
@@ -4795,8 +4854,7 @@ impl CodeGen [
     !!! Parytet z `gen_include()` (codegen.py) - `include <sciezka>`
     !!! zawsze glob-importuje (`use crate::module::*;`), bez `import
     !!! <details>` (patrz `IncludeStmt` w ast_nodes.hcs).
-    !!! NAPRAWA (ta runda, patrz SESSION_LOG.md "problem z
-    !!! work:/nazewnictwem modulow") - gdy TEN plik zostal zaladowany
+    !!! NAPRAWA (nazewnictwo modulow work:) - gdy TEN plik zostal zaladowany
     !!! jako `include <work:member::...>` (albo transytywnie stad -
     !!! patrz `self.work_member`, ustawiane przez `new_codegen`,
     !!! pochodzace z `DiscoveredFile.work_member` w project.hcs),
@@ -4937,7 +4995,7 @@ impl CodeGen [
         !! bo Kotlin i Java koncza w JEDNYM `java_classes/` na WSPOLNYM
         !! classpath (moga wolac nawzajem swoje klasy) - patrz
         !! `bit (build)`.
-        !! DODANE (Tura 10, patrz docs/GO.md) - `get <go:pakiet>` /
+        !! DODANE (patrz docs/GO.md) - `get <go:pakiet>` /
         !! `get <go:sciezka/modulu::wersja>`: import Go dla blokow
         !! `native {go}` (stdlib: `get <go:fmt>`; zewnetrzne moduly z
         !! wersja: `get <go:github.com/google/uuid::v1.6.0>`). Wpis
@@ -5420,7 +5478,7 @@ fun main() [
     ]
 ]
 
-!!! Tura 10 (patrz docs/FAST_DIRECT.md) - tablica 19 backendow `fast
+!!! (patrz docs/FAST_DIRECT.md) - tablica 20 backendow `fast
 !!! direct {backend}`. Rodzaje wykonania: "pypy" (podproces `pypy3`),
 !!! "compiled" (cython/pythran - kod kompilowany W RUNTIME do
 !!! rozszerzenia, potem importowany), "py" (osadzony CPython przez PyO3
