@@ -54,6 +54,30 @@ bez zmian (`document.title`, `window.location`, `Math.floor(x)`,
 `console.log`…). Stan trzymaj w zmiennych modułu (`let licznik = 0` na
 poziomie pliku) — funkcje obsługi zdarzeń mogą je zmieniać.
 
+## Routing (0.6)
+
+Routing po `#hash` (działa także z `file://`, bez serwera): ścieżka `#/o-nas`
+wywołuje zarejestrowaną funkcję i podmienia zawartość strony.
+
+| Funkcja | Działanie |
+|---|---|
+| `route("/sciezka", funkcja)` | rejestruje handler (podany **po nazwie**, może być `async`); segment `:nazwa` łapie parametr, np. `"/user/:id"` |
+| `route_not_found(funkcja)` | handler dla nieznanej ścieżki (domyślnie wypisuje `404: ścieżka`) |
+| `route_param(nazwa)` → `Option<Str>` | parametr z ostatnio dopasowanej ścieżki |
+| `route_current()` → `Str` | bieżąca ścieżka (bez `?zapytania`) |
+| `route_outlet()` | element, do którego renderują handlery: `#route-outlet`, a gdy go nie ma — `#app` |
+| `navigate("/sciezka")` | zmienia `location.hash` |
+
+Przy każdej zmianie ścieżki router **czyści** `route_outlet()` i woła handler. Wspólny
+układ (menu, stopka) zrób w `main()` poza elementem `#route-outlet`. Router startuje
+automatycznie po zakończeniu `main()` (także `async fun main()`), tylko gdy
+zarejestrowano co najmniej jedną trasę. Przykład: `docs/website-routing/app.hcs`.
+
+Czego NIE ma: routingu po zwykłych ścieżkach (`/o-nas` bez `#`; wymagałoby serwera lub
+`history.pushState` z konfiguracją hosta), renderowania po stronie serwera (SSR)
+i zagnieżdżonych tras. Routing sprawdzono w **jsdom** (`scripts/verify_website.sh`),
+nie w prawdziwej przeglądarce.
+
 ## Style: blok `style { ... }`
 
 Stronę stylujesz **bez osobnego pliku `.css`** — blokiem `style { ... }` prosto w `.hcs`.
@@ -110,7 +134,7 @@ przeglądarce ani na urządzeniach mobilnych.
 
 ## Ograniczenia
 
-- tylko `index.html` + `app.js` (brak routingu, SSR); jedna strona na plik wejściowy
+- tylko `index.html` + `app.js` (routing tylko po `#hash`, patrz wyżej; brak SSR); jedna strona na plik wejściowy
   (wiele podstron = wiele wejść `hackerc build`, każde do własnego katalogu `-o`);
   styl przez blok `style { ... }`, `page_css(...)`/`dom_style(...)` albo własny `<link>`
   dopisany do wygenerowanego `index.html`
