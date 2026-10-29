@@ -2,7 +2,11 @@
 !!
 !! Dostepne moduly:
 !!   get <std:cybersecurity::constant_time>  - porownania w stalym czasie
-!!   get <std:cybersecurity::entropy>        - entropia Shannona (detekcja packerow)
+!!   get <std:cybersecurity::entropy>        - entropia Shannona (detekcja packerow), ct_eq
+!!   get <std:cybersecurity::hash>           - 0.6: md5/sha1/sha2/sha3/blake2/crc32 (tekst, bajty, plik)
+!!   get <std:cybersecurity::mac>            - 0.6: HMAC (sha1/256/384/512) + PBKDF2
+!!   get <std:cybersecurity::random>         - 0.6: bezpieczne bajty/tokeny/liczby (OsRng)
+!!   get <std:cybersecurity::encoding>       - hex, base64/base64url (tekst i bajty), HMAC-SHA256
 !!   get <std:io>                            - pliki (read_file_or/file_readable/write_file_ok);
 !!                                              read_file()/write_file() sa wbudowane w kompilator
 !!                                              (jak log()), dzialaja WSZEDZIE bez importu
@@ -25,6 +29,8 @@
 !!                                              zagniezdzenie ->/-->/--->, klucze kropkowe,
 !!                                              interpolacja ${sekcja.klucz}/${env:VAR}); zwraca
 !!                                              JsonValue, zbudowany na std:toml/std:json/std:env
+!!                                              0.6: hk_set_value/hk_remove_key/hk_add_dependency -
+!!                                              edycja Z ZACHOWANIEM komentarzy i ukladu pliku
 !!   get <std:os>                            - 0.6: os_name/os_is_linux/windows/macos/ios/android/
 !!                                              os_is_unix/os_is_mobile/os_path_separator/
 !!                                              os_exe_suffix/os_shared_lib_ext (na wierzchu target_os())
@@ -33,14 +39,16 @@
 !!   get <std:process>                       - run_command_checked/command_succeeds/run_command_simple;
 !!                                              run_command() (BEZ powloki - bezposredni fork/exec)
 !!                                              jest wbudowane w kompilator
+!!                                              0.6: proc_spawn/proc_read_line/proc_write/proc_wait/
+!!                                              proc_kill... - uchwyty ze strumieniowym odczytem
+!!                                              linii na zywo; run_lines, run_tee
 !!   get <std:http>                          - http_get_checked/http_get_ok (tylko GET, cialo
 !!                                              MUSI byc UTF-8); http_get() jest wbudowane w
 !!                                              kompilator, WYMAGA `get <crates:ureq::2>`
 !!
-!! Std jest teraz kompletne wg pierwotnego zakresu tej rundy (~20-30
-!! modulow: fs/io/result + string/math/path/json/toml/hk/env/process/
-!! http + cybersecurity/*). Reszta (wiecej formatow/protokolow) - patrz
-!! docs/ROADMAP.md.
+!! Przyklady uruchamiane w weryfikacji repozytorium: docs/std-examples/.
+!! Czego jeszcze brakuje (szyfry, podpisy, klient HTTP strumieniujacy...) -
+!! patrz docs/ROADMAP.md.
 
 !! Wersja biblioteki standardowej (zgodna z wersja kompilatora).
 const STD_VERSION: Str = "0.6"
