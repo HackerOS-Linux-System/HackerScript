@@ -4,7 +4,7 @@ Status: **zaimplementowane w `hackerc lsp`** (diagnostyka, hover, definition,
 completion, formatowanie, a od 0.6 także rename, references, documentSymbol —
 patrz sekcje niżej). Dokument zaczyna się od pierwotnej specyfikacji
 (Faza 1), którą zachowano jako opis założeń. `bit lsp` należy do `bit`
-(poza tym repozytorium). Lista otwartych braków: `CHANGELOG.md`.
+(poza tym repozytorium). Lista otwartych braków: `docs/ROADMAP.md`.
 
 ## Dlaczego w dwóch miejscach
 
@@ -63,7 +63,7 @@ LSP 3.17.
 * `textDocument/formatting` — cienka nakładka na już istniejący
   `hackerc/cmd/formatter.hcs` (parytet z `bit fmt`)
 * `textDocument/codeAction` — "quick fix" korzystający wprost z bazy
-  `bit repair` (`docs/BIT.md`, "Plan: baza diagnostyk") — sugestia
+  `bit repair` (plan po stronie `bit`) — sugestia
   z `RepairDiagnostic.suggestion` jako codeAction tam, gdzie to
   możliwe zamienić automatycznie
 
@@ -91,7 +91,7 @@ LSP 3.17.
   wbudowane narzędzia — HackerScript idzie tu bliżej modelu
   "podkomenda", żeby nie mnożyć artefaktów do zainstalowania.
 
-## Etap 2b/2c (Tura 10) - hover, definition, completion
+## Etap 2b/2c - hover, definition, completion
 
 Status: **zaimplementowane, przetestowane przez surowy JSON-RPC po
 stdio** (skrypt Python otwierający `hackerc lsp` jako proces i
@@ -127,7 +127,8 @@ protokół JSON-RPC bezpośrednio.
 ## 0.6 — rename, references, documentSymbol
 
 Status: **zaimplementowane, sprawdzone surowym JSON-RPC po stdio**
-(`tests/lsp/lsp_test.py`, uruchamiany przez `tests/run.sh`).
+(skrypt `scripts/lsp_check.py`, uruchamiany w `scripts/verify.sh`; to nadal NIE jest test w
+prawdziwym edytorze).
 
 Implementacja nadal skanuje tekst (`lsp_features.hcs`): słowo pod kursorem
 jest dopasowywane jako CAŁE słowo w każdej linii, z pominięciem literałów
@@ -147,3 +148,33 @@ Przy `initialize` serwer deklaruje `renameProvider`, `referencesProvider` i
 0.5” były nieścisłe: w kodzie tej metody wtedy nie było.
 
 **Nieprzetestowane w prawdziwym edytorze** — tak jak reszta serwera.
+
+## 0.6 — zakresy (scope-aware definition / hover / rename / references)
+
+Dotąd `rename` i `references` zmieniały **każde** wystąpienie słowa w dokumencie, a `definition`
+brało pierwszą deklarację o tej nazwie. Od 0.6 serwer rozpoznaje zakresy — **nadal na skanie
+tekstu, nie na AST** (AST nie niesie pozycji linia/kolumna; dodanie ich wymaga zmiany w całym
+parserze, więc to jest świadomie poza zakresem).
+
+Jak to działa: blok `fun ... [ ... ]` albo `impl Typ [ ... ]` to zakres; nagłówek kończy się `[`,
+a blok kończy pierwsza linia zaczynająca się od `]` w tym samym wcięciu (kod po `hackerc fmt`
+spełnia to zawsze). Dzięki temu:
+
+* **Zmienna lokalna / parametr** (`let x`, `for x in`, `for k, x in`, wzorzec `Wariant(x) -> [`,
+  parametr funkcji) jest szukana, zmieniana i wskazywana **tylko w swojej funkcji**; zmienna o tej
+  samej nazwie w innej funkcji zostaje nietknięta.
+* **Nazwa globalna** (funkcja, struktura) obejmuje cały plik, z pominięciem funkcji, które mają
+  własną zmienną o tej nazwie (cieniowanie). `definition` szuka deklaracji tylko na poziomie
+  pliku (nie łapie już cudzego `let`).
+* **Metoda** `obiekt.nazwa(...)` jest przypisywana do typu odbiorcy: `self` → typ z otaczającego
+  `impl`; zmienna → typ z `let v = Typ(...)`, `let v: Typ` albo parametru `v: Typ`. Dwie metody o
+  tej samej nazwie w różnych `impl` są rozróżniane (`a.value()` → `impl A`, `b.value()` → `impl B`).
+
+Ograniczenia: brak wnioskowania typów (wynik funkcji, pole struktury, element listy) — gdy typ
+odbiorcy jest nieznany, działamy jak dawniej (wszystkie metody o tej nazwie); wzorce zagnieżdżone w
+`match` (`Some(Foo(x))`) nie są rozpoznawane jako deklaracje; `rename`/`references` obejmują nadal
+tylko otwarty dokument.
+
+Naprawiony przy okazji błąd: diagnostyka parsera (`[hackerc-self] parser: ...`) trafiała na
+**stdout**, co psuło ramkowanie protokołu, gdy edytowany dokument miał błąd składni; teraz idzie na
+stderr.
