@@ -1,0 +1,54 @@
+struct Point [
+    x: Int,
+    y: Int
+]
+
+enum Shape [
+    Circle(Int),
+    Rect(Int, Int),
+    Empty
+]
+
+impl Point [
+    fun manhattan(self) -> Int [
+        end self.x + self.y
+    ]
+]
+
+fun area(s: Shape) -> Int [
+    match s [
+        Circle(r) -> [
+            end 3 * r * r
+        ]
+        Rect(w, h) -> [
+            end w * h
+        ]
+        Empty -> [
+            end 0
+        ]
+    ]
+]
+
+fun fib(n: Int) -> Int [
+    if n < 2 [
+        end n
+    ]
+    end fib(n - 1) + fib(n - 2)
+]
+
+fun main() [
+    let p = Point(3, 4)
+    log("manhattan", p.manhattan())
+    log("area", area(Circle(2)), area(Rect(3, 5)), area(Empty))
+    log("fib(20)", fib(20))
+    let xs: List<Int> = [5, 3, 9, 1]
+    xs.push(7)
+    xs.sort()
+    let total = 0
+    for x in xs [
+        total = total + x
+    ]
+    log("sorted first", xs[0], "last", xs[4], "total", total)
+    let s = "Hack" + "erScript"
+    log(s, s.len())
+]
