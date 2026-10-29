@@ -1,0 +1,157 @@
+get <crates:hmac::0.12>
+get <crates:sha1::0.10>
+get <crates:sha2::0.10>
+
+!! mac - HMAC (RFC 2104) i PBKDF2 (RFC 8018) (std 0.6).
+!! Uzycie: get <std:cybersecurity::mac>
+!!
+!! Algorytmy: sha1, sha256, sha384, sha512 (nazwa nie rozroznia wielkosci
+!! liter ani `-`/`_`). Klucz, wiadomosc, haslo i sol to bajty UTF-8
+!! napisow. Wynik to male cyfry hex.
+!!
+!! PBKDF2: do przechowywania hasel OWASP zaleca dzis co najmniej 600 000
+!! iteracji dla PBKDF2-HMAC-SHA256 (210 000 dla SHA-512) i losowej soli
+!! (patrz std:cybersecurity::random). Dla nowych systemow rozwaz algorytm
+!! pamieciochlonny (argon2id) - ta biblioteka go NIE ma.
+
+native {Rust} [
+    use hmac::{Hmac, Mac};
+
+    pub fn hks_norm_algo(algo: &str) -> String {
+        algo.chars().filter(|c| *c != '-' && *c != '_').collect::<String>().to_lowercase()
+    }
+
+    macro_rules! hks_hmac_with {
+        ($h:ty, $key:expr, $msg:expr) => {{
+            let mut m = <Hmac<$h>>::new_from_slice($key).expect("HMAC przyjmuje klucz dowolnej dlugosci");
+            m.update($msg);
+            Some(m.finalize().into_bytes().to_vec())
+        }};
+    }
+
+    pub fn hks_hmac(algo: &str, key: &[u8], msg: &[u8]) -> Option<Vec<u8>> {
+        match hks_norm_algo(algo).as_str() {
+            "sha1" => hks_hmac_with!(sha1::Sha1, key, msg),
+            "sha256" => hks_hmac_with!(sha2::Sha256, key, msg),
+            "sha384" => hks_hmac_with!(sha2::Sha384, key, msg),
+            "sha512" => hks_hmac_with!(sha2::Sha512, key, msg),
+            _ => None,
+        }
+    }
+
+    macro_rules! hks_pbkdf2_with {
+        ($h:ty, $pw:expr, $salt:expr, $iters:expr, $dklen:expr) => {{
+            let prf = <Hmac<$h>>::new_from_slice($pw).expect("HMAC przyjmuje klucz dowolnej dlugosci");
+            let mut out: Vec<u8> = Vec::with_capacity($dklen);
+            let mut block: u32 = 1;
+            while out.len() < $dklen {
+                let mut m = prf.clone();
+                m.update($salt);
+                m.update(&block.to_be_bytes());
+                let mut u = m.finalize().into_bytes();
+                let mut t = u.clone();
+                for _ in 1..$iters {
+                    let mut m2 = prf.clone();
+                    m2.update(u.as_slice());
+                    u = m2.finalize().into_bytes();
+                    for (a, b) in t.iter_mut().zip(u.iter()) {
+                        *a ^= *b;
+                    }
+                }
+                out.extend_from_slice(t.as_slice());
+                block += 1;
+            }
+            out.truncate($dklen);
+            Some(out)
+        }};
+    }
+
+    pub fn hks_pbkdf2(algo: &str, pw: &[u8], salt: &[u8], iters: u64, dklen: usize) -> Option<Vec<u8>> {
+        match hks_norm_algo(algo).as_str() {
+            "sha1" => hks_pbkdf2_with!(sha1::Sha1, pw, salt, iters, dklen),
+            "sha256" => hks_pbkdf2_with!(sha2::Sha256, pw, salt, iters, dklen),
+            "sha384" => hks_pbkdf2_with!(sha2::Sha384, pw, salt, iters, dklen),
+            "sha512" => hks_pbkdf2_with!(sha2::Sha512, pw, salt, iters, dklen),
+            _ => None,
+        }
+    }
+
+    pub fn hks_hex_of(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{:02x}", x)).collect::<String>()
+    }
+
+    pub fn hks_hex_to_bytes(h: &str) -> Option<Vec<u8>> {
+        let h = h.trim();
+        if h.len() % 2 != 0 || !h.is_ascii() {
+            return None;
+        }
+        let mut out = Vec::with_capacity(h.len() / 2);
+        let mut i = 0;
+        while i < h.len() {
+            out.push(u8::from_str_radix(&h[i..i + 2], 16).ok()?);
+            i += 2;
+        }
+        Some(out)
+    }
+]
+
+!! Lista obslugiwanych algorytmow HMAC/PBKDF2.
+fun mac_algorithms() -> List<Str> [
+    end ["sha1", "sha256", "sha384", "sha512"]
+]
+
+!! HMAC `message` kluczem `key` algorytmem `algo` (hex).
+fun hmac_hex(algo: Str, key: Str, message: Str) -> Result<Str, Str> [
+    let good = false
+    let out = ""
+    native {Rust} [
+        match hks_hmac(&algo, key.as_bytes(), message.as_bytes()) {
+            Some(b) => { out = hks_hex_of(&b); good = true; }
+            None => { out = format!("nieznany algorytm HMAC: {}", algo); }
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err(out)
+]
+
+!! Sprawdza, czy `expected_hex` to poprawny HMAC `message` pod `key`.
+!! Porownanie jest STALOCZASOWE (bez wczesnego wyjscia); zly hex albo
+!! nieznany algorytm daja `false`.
+fun hmac_verify_hex(algo: Str, key: Str, message: Str, expected_hex: Str) -> Bool [
+    let valid = false
+    native {Rust} [
+        if let (Some(mac), Some(exp)) = (hks_hmac(&algo, key.as_bytes(), message.as_bytes()), hks_hex_to_bytes(&expected_hex)) {
+            let mut acc: u8 = if mac.len() == exp.len() { 0 } else { 1 };
+            for (x, y) in mac.iter().zip(exp.iter()) {
+                acc |= x ^ y;
+            }
+            valid = std::hint::black_box(acc) == 0;
+        }
+    ]
+    end valid
+]
+
+!! PBKDF2-HMAC: wyprowadza `dklen` bajtow (1..=1024) z hasla i soli po
+!! `iterations` (>= 1) iteracjach; wynik jako hex (2 * dklen znakow).
+fun pbkdf2_hex(algo: Str, password: Str, salt: Str, iterations: Int, dklen: Int) -> Result<Str, Str> [
+    if iterations < 1 [
+        end err("iterations musi byc >= 1")
+    ]
+    if dklen < 1 or dklen > 1024 [
+        end err("dklen poza zakresem 1..=1024")
+    ]
+    let good = false
+    let out = ""
+    native {Rust} [
+        match hks_pbkdf2(&algo, password.as_bytes(), salt.as_bytes(), iterations as u64, dklen as usize) {
+            Some(b) => { out = hks_hex_of(&b); good = true; }
+            None => { out = format!("nieznany algorytm PBKDF2: {}", algo); }
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err(out)
+]
