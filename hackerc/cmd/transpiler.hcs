@@ -59,7 +59,7 @@ struct TranspileResult [
     needs_native_kotlin: Bool,
     native_kotlin_sources: Dict<Str, Str>,
     native_kotlin_order: List<Str>,
-    !! DODANE (Tura 10, patrz docs/GO.md) - `native {go}`/`get <go:...>`.
+    !! DODANE (patrz docs/GO.md) - `native {go}`/`get <go:...>`.
     needs_native_go: Bool,
     native_go_sources: Dict<Str, Str>,
     native_go_order: List<Str>,
@@ -555,7 +555,7 @@ fun extract_direct_blocks(source: Str) -> DirectExtraction [
                     k = k + 1
                 ]
                 if closed_at == -1 [
-                    log("[transpiler.hcs] niezamkniety blok direct [ ... ]")
+                    elog("[transpiler.hcs] niezamkniety blok direct [ ... ]")
                     i = n
                 ] else [
                     let raw = source.slice(j + 1, closed_at)
@@ -668,7 +668,7 @@ fun extract_fast_direct_blocks(source: Str) -> FastDirectExtraction [
                         bk = bk + 1
                     ]
                     if brace_end == -1 [
-                        log("[transpiler.hcs] niezamkniety '{' po 'fast direct' (brak '}')")
+                        elog("[transpiler.hcs] niezamkniety '{' po 'fast direct' (brak '}')")
                         i = n
                     ] else [
                         let backend = trim_str_local(source.slice(brace_start, brace_end))
@@ -704,7 +704,7 @@ fun extract_fast_direct_blocks(source: Str) -> FastDirectExtraction [
                         !! - ten sam mechanizm zepsul wczesniejsza wersje
                         !! komunikatu bledu w codegen.hcs::gen_fast_direct,
                         !! znalezione i naprawione realnym buildem).
-                        log("[transpiler.hcs] niezamkniety blok fast direct " + "{" + backend + "}" + " [ ... ]")
+                        elog("[transpiler.hcs] niezamkniety blok fast direct " + "{" + backend + "}" + " [ ... ]")
                                 i = n
                             ] else [
                                 let raw = source.slice(k2 + 1, closed_at)
@@ -790,7 +790,7 @@ fun extract_native_blocks(source: Str, base_dir: Str) -> NativeExtraction [
                     bk = bk + 1
                 ]
                 if brace_end == -1 [
-                    log("[transpiler.hcs] niezamkniety '{' po 'native' (brak '}')")
+                    elog("[transpiler.hcs] niezamkniety '{' po 'native' (brak '}')")
                     i = n
                 ] else [
                     let engine = trim_str_local(source.slice(brace_start, brace_end))
@@ -813,7 +813,7 @@ fun extract_native_blocks(source: Str, base_dir: Str) -> NativeExtraction [
                             gk = gk + 1
                         ]
                         if gt_at == -1 [
-                            log("[transpiler.hcs] niezamkniety '<' po native {" + engine + "} (brak '>')")
+                            elog("[transpiler.hcs] niezamkniety '<' po native {" + engine + "} (brak '>')")
                             i = n
                             bail = true
                         ] else [
@@ -824,7 +824,7 @@ fun extract_native_blocks(source: Str, base_dir: Str) -> NativeExtraction [
                                     imported = content
                                 ]
                                 Err(e) -> [
-                                    log("[transpiler.hcs] native {" + engine + "} <" + rel_path + "> - nie udalo sie wczytac (" + full_path + "): " + e)
+                                    elog("[transpiler.hcs] native {" + engine + "} <" + rel_path + "> - nie udalo sie wczytac (" + full_path + "): " + e)
                                     imported = "// [hackerc] BLAD IMPORTU: " + full_path
                                 ]
                             ]
@@ -867,7 +867,7 @@ fun extract_native_blocks(source: Str, base_dir: Str) -> NativeExtraction [
                             k = k + 1
                         ]
                         if closed_at == -1 [
-                            log("[transpiler.hcs] niezamkniety blok native {...} [ ... ]")
+                            elog("[transpiler.hcs] niezamkniety blok native {...} [ ... ]")
                             i = n
                         ] else [
                             let raw = source.slice(k2 + 1, closed_at)
@@ -996,10 +996,10 @@ fun extract_hot_reload_markers(source: Str) -> HotReloadExtraction [
                 if nk > name_start [
                     names.push(source.slice(name_start, nk))
                 ] else [
-                    log("[transpiler.hcs] @hot_reload: nie znaleziono nazwy funkcji po 'fun'")
+                    elog("[transpiler.hcs] @hot_reload: nie znaleziono nazwy funkcji po 'fun'")
                 ]
             ] else [
-                log("[transpiler.hcs] @hot_reload: oczekiwano 'fun <nazwa>(...)' zaraz po markerze")
+                elog("[transpiler.hcs] @hot_reload: oczekiwano 'fun <nazwa>(...)' zaraz po markerze")
             ]
             i = after
         ]
@@ -1062,10 +1062,10 @@ fun extract_wasm_export_markers(source: Str) -> WasmExportExtraction [
                 if nk > name_start [
                     names.push(source.slice(name_start, nk))
                 ] else [
-                    log("[transpiler.hcs] @wasm_export: nie znaleziono nazwy funkcji po 'fun'")
+                    elog("[transpiler.hcs] @wasm_export: nie znaleziono nazwy funkcji po 'fun'")
                 ]
             ] else [
-                log("[transpiler.hcs] @wasm_export: oczekiwano 'fun <nazwa>(...)' zaraz po markerze")
+                elog("[transpiler.hcs] @wasm_export: oczekiwano 'fun <nazwa>(...)' zaraz po markerze")
             ]
             i = after
         ]
@@ -1164,7 +1164,7 @@ fun extract_sandbox_blocks(source: Str) -> SandboxExtraction [
                 ck = ck + 1
             ]
             if close_at == -1 [
-                log("[transpiler.hcs] niezamkniety sandbox-blok (brak drugiego '$')")
+                elog("[transpiler.hcs] niezamkniety sandbox-blok (brak drugiego '$')")
                 out = out + source.slice(dollar_at, n)
                 i = n
             ] else [
