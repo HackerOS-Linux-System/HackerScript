@@ -1,4 +1,5 @@
 get <crates:sha2::0.10>
+get <crates:base64::0.22>
 
 !! encoding - kodowanie hex i HMAC-SHA256 (std 0.5).
 !! Uzycie: get <std:cybersecurity::encoding>
@@ -95,4 +96,162 @@ fun random_hex(n: Int) -> Str [
         }
     ]
     end out
+]
+
+!! ---------------------------------------------------------------------
+!! 0.6: base64 (RFC 4648) i hex BINARNIE BEZPIECZNY (List<Int> bajtow).
+!! ---------------------------------------------------------------------
+
+!! Base64 (alfabet standardowy, z dopelnieniem `=`) bajtow UTF-8 napisu.
+fun base64_encode(text: Str) -> Str [
+    let out = ""
+    native {Rust} [
+        use base64::Engine;
+        out = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    ]
+    end out
+]
+
+!! Base64 URL-safe (`-`/`_`, BEZ dopelnienia) bajtow UTF-8 napisu.
+fun base64url_encode(text: Str) -> Str [
+    let out = ""
+    native {Rust} [
+        use base64::Engine;
+        out = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(text.as_bytes());
+    ]
+    end out
+]
+
+!! Odwrotnosc `base64_encode`; Err przy niepoprawnym base64 albo gdy
+!! wynik nie jest poprawnym UTF-8 (dla danych binarnych uzyj
+!! `base64_decode_bytes`).
+fun base64_decode(b64: Str) -> Result<Str, Str> [
+    let good = false
+    let out = ""
+    native {Rust} [
+        use base64::Engine;
+        match base64::engine::general_purpose::STANDARD.decode(b64.trim()) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(s) => { out = s; good = true; }
+                Err(_) => { out = "wynik nie jest poprawnym UTF-8".to_string(); }
+            },
+            Err(e) => { out = format!("niepoprawny base64: {}", e); }
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err(out)
+]
+
+!! Odwrotnosc `base64url_encode` (przyjmuje tez wejscie z dopelnieniem).
+fun base64url_decode(b64: Str) -> Result<Str, Str> [
+    let good = false
+    let out = ""
+    native {Rust} [
+        use base64::Engine;
+        let cleaned = b64.trim().trim_end_matches('=');
+        match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(cleaned) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(s) => { out = s; good = true; }
+                Err(_) => { out = "wynik nie jest poprawnym UTF-8".to_string(); }
+            },
+            Err(e) => { out = format!("niepoprawny base64url: {}", e); }
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err(out)
+]
+
+!! Base64 listy bajtow (0..=255; inne wartosci -> Err).
+fun base64_encode_bytes(data: List<Int>) -> Result<Str, Str> [
+    let good = false
+    let out = ""
+    native {Rust} [
+        use base64::Engine;
+        if data.iter().any(|b| *b < 0 || *b > 255) {
+            out = "bajt poza zakresem 0..=255".to_string();
+        } else {
+            let raw: Vec<u8> = data.iter().map(|b| *b as u8).collect();
+            out = base64::engine::general_purpose::STANDARD.encode(&raw);
+            good = true;
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err(out)
+]
+
+!! Dekoduje base64 do listy bajtow (dowolne dane binarne).
+fun base64_decode_bytes(b64: Str) -> Result<List<Int>, Str> [
+    let good = false
+    let why = ""
+    let bytes: List<Int> = []
+    native {Rust} [
+        use base64::Engine;
+        match base64::engine::general_purpose::STANDARD.decode(b64.trim()) {
+            Ok(v) => { bytes = v.iter().map(|b| *b as i64).collect(); good = true; }
+            Err(e) => { why = format!("niepoprawny base64: {}", e); }
+        }
+    ]
+    if good [
+        end ok(bytes)
+    ]
+    end err(why)
+]
+
+!! Hex listy bajtow (0..=255; inne wartosci -> Err).
+fun hex_encode_bytes(data: List<Int>) -> Result<Str, Str> [
+    let good = false
+    let out = ""
+    native {Rust} [
+        if data.iter().any(|b| *b < 0 || *b > 255) {
+            out = "bajt poza zakresem 0..=255".to_string();
+        } else {
+            out = data.iter().map(|b| format!("{:02x}", *b as u8)).collect::<String>();
+            good = true;
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err(out)
+]
+
+!! Odwrotnosc `hex_encode_bytes` - dziala dla DOWOLNYCH bajtow (w
+!! odroznieniu od `hex_decode`, ktore wymaga wyniku w UTF-8).
+fun hex_decode_bytes(hex: Str) -> Result<List<Int>, Str> [
+    let good = false
+    let why = ""
+    let bytes: List<Int> = []
+    native {Rust} [
+        let h = hex.trim();
+        if h.len() % 2 != 0 || !h.is_ascii() {
+            why = "nieparzysta dlugosc albo znak spoza ASCII".to_string();
+        } else {
+            let mut acc: Vec<i64> = Vec::new();
+            let mut bad = false;
+            let mut i = 0;
+            while i < h.len() {
+                match u8::from_str_radix(&h[i..i + 2], 16) {
+                    Ok(b) => acc.push(b as i64),
+                    Err(_) => { bad = true; break; }
+                }
+                i += 2;
+            }
+            if bad {
+                why = "niepoprawny znak hex".to_string();
+            } else {
+                bytes = acc;
+                good = true;
+            }
+        }
+    ]
+    if good [
+        end ok(bytes)
+    ]
+    end err(why)
 ]
