@@ -2,7 +2,7 @@ include <ast_nodes>
 include <typeinfer>
 include <codegen>
 include <js_runtime>
-get <std:string> import <str_split::str_replace>
+get <std:string> import <str_split::str_replace::str_to_int>
 
 !!! ROZBUDOWA 0.6 - backend JavaScript: `use <lang:javascript>` oraz
 !!! `use <mode:website>` (HackerScript dla stron). Patrz docs/JAVASCRIPT.md
@@ -29,7 +29,41 @@ struct JsGen [
     scope_marks: List<Int>,
     user_methods: List<Str>,
     has_main: Bool,
-    npm_imports: List<Str>
+    npm_imports: List<Str>,
+    native_blocks: List<Str>,
+    native_engines: List<Str>,
+    in_async: Bool
+]
+
+fun str_to_lower_js(s: Str) -> Str [
+    let out = ""
+    let i = 0
+    while i < s.len() [
+        let c = s.char_at(i)
+        if c == "J" [
+            out = out + "j"
+        ] elif c == "A" [
+            out = out + "a"
+        ] elif c == "V" [
+            out = out + "v"
+        ] elif c == "S" [
+            out = out + "s"
+        ] elif c == "C" [
+            out = out + "c"
+        ] elif c == "R" [
+            out = out + "r"
+        ] elif c == "I" [
+            out = out + "i"
+        ] elif c == "P" [
+            out = out + "p"
+        ] elif c == "T" [
+            out = out + "t"
+        ] else [
+            out = out + c
+        ]
+        i = i + 1
+    ]
+    end out
 ]
 
 fun js_list_has(items: List<Str>, x: Str) -> Bool [
@@ -256,8 +290,82 @@ impl JsGen [
         end x
     ]
 
+    !!! Indeks bloku `native` dla wyrazenia `__native__(N)` albo -1.
+    fun native_index(self, e: Expr) -> Int [
+        match e [
+            Call(callee, args) -> [
+                if expr_as_ident_name(callee.clone()) == "__native__" and args.len() == 1 [
+                    match args[0].clone() [
+                        NumberLit(s) -> [
+                            match str_to_int(s) [
+                                Some(v) -> [
+                                    end v
+                                ]
+                                None -> [
+                                    end -1
+                                ]
+                            ]
+                        ]
+                        _ -> [
+                            end -1
+                        ]
+                    ]
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+        end -1
+    ]
+
+    fun emit_native(self, idx: Int) [
+        if idx >= self.native_blocks.len() [
+            self.fail("blok `native` - brak tresci bloku (nieoczekiwany indeks)")
+        ] else [
+            let eng = str_to_lower_js(self.native_engines[idx].clone())
+            if eng == "javascript" or eng == "js" [
+                self.emit("{")
+                let lines = str_split(self.native_blocks[idx].clone(), "\n")
+                let li = 0
+                while li < lines.len() [
+                    self.emit(lines[li].clone())
+                    li = li + 1
+                ]
+                self.emit("}")
+            ] else [
+                self.fail("blok `native {" + self.native_engines[idx].clone() + "}` - backend JavaScript obsluguje tylko `native {JavaScript}`")
+            ]
+        ]
+    ]
+
+    !!! 0.6: automatyczny `await` na kanalach - `kanal.send(x)` i `kanal.recv()`
+    !!! w kontekscie `async` (async fun albo operand `spawn`) dostaja `await`
+    !!! bez jego recznego wpisywania. Nie dotyczy metod o tych nazwach
+    !!! zdefiniowanych przez uzytkownika w `impl` (patrz `user_methods`);
+    !!! dla innych obiektow z `.send()` (np. gniazdo z JS) `await` jest
+    !!! nieszkodliwy (await na nie-Promise zwraca wartosc).
     fun call(self, callee: Expr, args: List<Expr>) -> Str [
+        let plain = self.call_plain(callee.clone(), args.clone())
+        if self.in_async [
+            match callee.clone() [
+                Attr(recv_obj, m) -> [
+                    if (m == "send" or m == "recv") and js_list_has(self.user_methods.clone(), m.clone()) == false [
+                        end "(await " + plain + ")"
+                    ]
+                ]
+                _ -> [
+                ]
+            ]
+        ]
+        end plain
+    ]
+
+    fun call_plain(self, callee: Expr, args: List<Expr>) -> Str [
         let name = expr_as_ident_name(callee.clone())
+        if name == "__native__" [
+            self.fail("`native {...} [ ... ]` mozna uzyc tylko jako instrukcji (nie jako wyrazenia)")
+            end "undefined"
+        ]
         if name != "" [
             if name == "log" [
                 end "console.log(" + self.join(args.clone()) + ")"
@@ -399,7 +507,14 @@ impl JsGen [
                 end self.binop(op.clone(), l.clone(), r.clone())
             ]
             UnaryOp(op, operand) -> [
+                !!! 0.6: operand `spawn` jest renderowany jako cialo `async () => ...`,
+                !!! wiec w nim `send`/`recv` dostaja automatyczny `await`.
+                let was_in_async = self.in_async
+                if op == "spawn" [
+                    self.in_async = true
+                ]
                 let x = self.expr(operand.clone())
+                self.in_async = was_in_async
                 if op == "not" [
                     end "(!" + x + ")"
                 ]
@@ -407,7 +522,7 @@ impl JsGen [
                     end "(await " + x + ")"
                 ]
                 if op == "spawn" [
-                    end "hks_spawn(() => " + x + ")"
+                    end "hks_spawn(async () => " + x + ")"
                 ]
                 end "(" + op + x + ")"
             ]
@@ -533,7 +648,10 @@ impl JsGen [
         ]
         let pt = self.params_text(params.clone())
         self.emit(kw + js_ident(name.clone()) + "(" + pt + ") {")
+        let was_async = self.in_async
+        self.in_async = is_async
         self.function_body(params.clone(), body.clone(), false)
+        self.in_async = was_async
         self.emit("}")
     ]
 
@@ -800,7 +918,10 @@ impl JsGen [
                         let unused10 = 0
                     ]
                 ]
-                if not is_doc_stmt [
+                let native_idx = self.native_index(e.clone())
+                if native_idx >= 0 [
+                    self.emit_native(native_idx)
+                ] elif not is_doc_stmt [
                     let etext = self.expr(e.clone())
                     self.emit(etext + ";")
                 ]
@@ -900,7 +1021,10 @@ impl JsGen [
                     ]
                     let mpt = self.params_text(params.clone())
                     self.emit(js_ident(tname.clone()) + ".prototype." + mname.clone() + " = " + kw + "(" + mpt + ") {")
+                    let was_async = self.in_async
+                    self.in_async = is_async
                     self.function_body(params.clone(), body.clone(), true)
+                    self.in_async = was_async
                     self.emit("};")
                 ]
                 _ -> [
@@ -935,7 +1059,7 @@ fun js_assemble_runtime(body: Str, site: Bool) -> Str [
                 if site and cname == "node_io" [
                     allowed = false
                 ]
-                if not site and cname == "web_dom" [
+                if not site and (cname == "web_dom" or cname == "web_router") [
                     allowed = false
                 ]
                 if allowed [
@@ -972,8 +1096,17 @@ fun js_assemble_runtime(body: Str, site: Bool) -> Str [
 !!! Punkt wejscia: `Program` -> tekst JavaScript albo blad (lista
 !!! nieobslugiwanych konstrukcji). `site` = tryb `use <mode:website>`.
 fun transpile_js(prog: Program, site: Bool) -> Result<Str, Str> [
+    end transpile_js_native(prog, site, [], [])
+]
+
+!!! 0.6: jak `transpile_js`, ale z blokami `native {JavaScript} [ ... ]`
+!!! (`native_blocks[i]` <-> `native_engines[i]`). Blok jest wklejany jako
+!!! surowy JavaScript w osobnym zasiegu `{ ... }` w miejscu uzycia (tylko
+!!! jako instrukcja); widzi zmienne HackerScript pod ich nazwami JS.
+!!! Silnik inny niz JavaScript/JS daje czytelny blad.
+fun transpile_js_native(prog: Program, site: Bool, native_blocks: List<Str>, native_engines: List<Str>) -> Result<Str, Str> [
     let sigs = collect_signatures(prog.clone())
-    let g = JsGen([], 0, [], TypeEnv(sigs.clone(), dict()), site, [], [], [], false, [])
+    let g = JsGen([], 0, [], TypeEnv(sigs.clone(), dict()), site, [], [], [], false, [], native_blocks.clone(), native_engines.clone(), false)
     let ui = 0
     while ui < prog.body.len() [
         match prog.body[ui].clone() [
@@ -1057,7 +1190,7 @@ fun transpile_js(prog: Program, site: Bool) -> Result<Str, Str> [
     let entry = ""
     if g.has_main [
         if site [
-            entry = "    const $start = () => {\n        try {\n            const r = main();\n            if (r && typeof r.catch === \"function\") r.catch((e) => console.error(e));\n        } catch (e) { console.error(e); }\n    };\n    if (document.readyState === \"loading\") document.addEventListener(\"DOMContentLoaded\", $start); else $start();\n"
+            entry = "    const $start = () => {\n        try {\n            const r = main();\n            const go = () => (typeof hks_router_start === \"function\" ? hks_router_start() : undefined);\n            if (r && typeof r.then === \"function\") { r.then(go).catch((e) => console.error(e)); } else { const p = go(); if (p && typeof p.catch === \"function\") p.catch((e) => console.error(e)); }\n        } catch (e) { console.error(e); }\n    };\n    if (document.readyState === \"loading\") document.addEventListener(\"DOMContentLoaded\", $start); else $start();\n"
         ] else [
             entry = "    Promise.resolve().then(() => main()).catch((e) => {\n        console.error(e instanceof Error ? e.message : e);\n        process.exit(e && e.message && String(e.message).startsWith(\"hks panic\") ? 101 : 1);\n    });\n"
         ]
