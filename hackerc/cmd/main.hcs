@@ -174,10 +174,41 @@ fun cmd_kotlin(src_path: Str, out_path: Str) -> Int [
 !!! ROZBUDOWA 0.6 - `use <lang:javascript>` i `use <mode:website>`
 !!! (docs/JAVASCRIPT.md, docs/WEBSITE.md). Backend: javascript_backend.hcs.
 
+!!! 0.6: `native {JavaScript} [ ... ]` w backendzie JS. `native_blocks[i]` <->
+!!! `native_engines[i]` to bloki ze WSZYSTKICH wczytanych plikow (indeksy
+!!! `__native__(N)` sa przesuwane przy wczytywaniu kolejnego pliku, wiec sa
+!!! globalne, a nie per plik).
 struct JsLoader [
     visited: List<Str>,
     errors: List<Str>,
-    css: List<Str>
+    css: List<Str>,
+    native_blocks: List<Str>,
+    native_engines: List<Str>
+]
+
+struct JsParse [
+    result: ParseResult,
+    blocks: List<Str>,
+    engines: List<Str>
+]
+
+!!! Jak `parse_with_direct_checked`, ale zwraca tez bloki `native` i przesuwa
+!!! ich indeksy o `offset` (liczba blokow z wczesniej wczytanych plikow).
+fun parse_for_js(source: Str, src_path: Str, offset: Int) -> JsParse [
+    let fast_direct_extraction = extract_fast_direct_blocks(source)
+    let extraction = extract_direct_blocks(fast_direct_extraction.stripped_source)
+    let native_extraction = extract_native_blocks(extraction.stripped_source, native_dirname(src_path))
+    let sandbox_extraction = extract_sandbox_blocks(native_extraction.stripped_source)
+    let hot_extraction = extract_hot_reload_markers(sandbox_extraction.stripped_source)
+    let stripped = hot_extraction.stripped_source
+    if offset > 0 [
+        let k = native_extraction.blocks.len() - 1
+        while k >= 0 [
+            stripped = str_replace(stripped, "__native__(" + (k as Str) + ")", "__native__(" + ((k + offset) as Str) + ")")
+            k = k - 1
+        ]
+    ]
+    end JsParse(parse_checked(stripped), native_extraction.blocks.clone(), native_extraction.engines.clone())
 ]
 
 fun js_dirname(p: Str) -> Str [
@@ -222,7 +253,14 @@ impl JsLoader [
                 end out
             ]
             Ok(source) -> [
-                let pr = parse_with_direct_checked(source.clone(), path.clone())
+                let jp = parse_for_js(source.clone(), path.clone(), self.native_blocks.len())
+                let pr = jp.result
+                let nb = 0
+                while nb < jp.blocks.len() [
+                    self.native_blocks.push(jp.blocks[nb].clone())
+                    self.native_engines.push(jp.engines[nb].clone())
+                    nb = nb + 1
+                ]
                 if pr.errors.len() > 0 [
                     self.errors.push(render_many(source.clone(), path.clone(), pr.errors.clone()))
                     end out
@@ -334,7 +372,7 @@ fun cmd_js(src_path: Str, out_path: Str, site: Bool) -> Int [
         elog(c_red("hackerc:") + " nie znaleziono pliku " + src_path)
         end 1
     ]
-    let loader = JsLoader([], [], [])
+    let loader = JsLoader([], [], [], [], [])
     let body = loader.load(src_path.clone())
     if loader.errors.len() > 0 [
         log(str_join(loader.errors.clone(), "\n"))
@@ -376,7 +414,7 @@ fun cmd_js(src_path: Str, out_path: Str, site: Bool) -> Int [
     if not site and site_css.len() > 0 [
         elog(c_bold_yellow("hackerc:") + " bloki `style { ... }` dzialaja tylko w `use <mode:website>` - pominieto")
     ]
-    match transpile_js(Program(body), site) [
+    match transpile_js_native(Program(body), site, loader.native_blocks.clone(), loader.native_engines.clone()) [
         Err(msgs) -> [
             elog(c_red("hackerc js:") + " " + src_path)
             elog(msgs)
@@ -631,6 +669,31 @@ fun cmd_build(src_path: Str, out_dir: Str, crate_name: Str, libs_root: Option<St
             ]
             if result.needs_sandbox [
                 log(c_bold_cyan("hackerc build:") + " wykryto $ ... $ (Zero-Cost Sandbox) -> Cargo.toml zawiera zaleznosc libc")
+            ]
+            !! 0.6 - inline `native {C++}`: sprawdz kompilator C++ OD RAZU (czytelny
+            !! blad zamiast surowego bledu `cc` w srodku `cargo build`). Pominiecie
+            !! sprawdzenia: HKS_SKIP_CXX_CHECK=1 (np. gdy kompilator jest dostepny dopiero
+            !! w srodowisku budowania, a nie tam, gdzie dziala `hackerc`).
+            if result.needs_native_cpp [
+                let skip_cxx = false
+                match env_var("HKS_SKIP_CXX_CHECK") [
+                    Some(_v) -> [
+                        skip_cxx = true
+                    ]
+                    None -> [
+                    ]
+                ]
+                if skip_cxx == false [
+                    match find_cpp_compiler() [
+                        Some(cxx) -> [
+                            log(c_bold_cyan("hackerc build:") + " kompilator C++ dla native {C++}: " + cxx)
+                        ]
+                        None -> [
+                            elog(c_red("hackerc:") + " " + src_path + ": blok native {C++} wymaga kompilatora C++ (c++, g++ lub clang++ w PATH, zmienna CXX albo cl.exe na Windows), a zadnego nie znaleziono. Zainstaluj kompilator albo usun blok native {C++}. (Pominiecie sprawdzenia: HKS_SKIP_CXX_CHECK=1.)")
+                            end 1
+                        ]
+                    ]
+                ]
             ]
             if result.needs_hot_reload [
                 log(c_bold_cyan("hackerc build:") + " wykryto @hot_reload -> utworzono " + out_dir + "/hotlib/ (zbuduj osobno: cargo build --release --manifest-path " + out_dir + "/hotlib/Cargo.toml), ustaw HKS_HOT_OUT_DIR=" + out_dir + " przed uruchomieniem")
@@ -1229,8 +1292,8 @@ fun main() [
         !! `[[bin]]`, patrz `project.hcs::cargo_toml_text`.
         let force_library = has_flag(argv, "--library")
         !! ROZBUDOWA (ta runda) - `--bin-name <nazwa>` (przekazywane
-        !! przez `bit build`, patrz `docs/BIT.md`, "Plan:
-        !! multi-binarki na czlonka") - pisze do `src/bin/<nazwa>.rs` i
+        !! przez `bit build`; multi-binarki
+        !! na czlonka) - pisze do `src/bin/<nazwa>.rs` i
         !! DOPISUJE `[[bin]]` do juz istniejacego Cargo.toml, zamiast
         !! generowac calosc od nowa (patrz `project.hcs::build_project`).
         let bin_name: Option<Str> = none()
