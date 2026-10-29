@@ -1,0 +1,52 @@
+fun halve(n: Int) -> Result<Int, Str> [
+    if n < 0 [
+        end Err("ujemna")
+    ]
+    if n % 2 != 0 [
+        end Err("nieparzysta")
+    ]
+    end Ok(n / 2)
+]
+
+fun quarter(n: Int) -> Result<Int, Str> [
+    let h = halve(n)?
+    let q = halve(h)?
+    end Ok(q)
+]
+
+fun first_even(xs: List<Int>) -> Option<Int> [
+    for x in xs [
+        if x % 2 == 0 [
+            end some(x)
+        ]
+    ]
+    end none()
+]
+
+fun show(n: Int) [
+    match quarter(n) [
+        Ok(v) -> [
+            log("quarter", n, "=", v)
+        ]
+        Err(e) -> [
+            log("quarter", n, "blad:", e)
+        ]
+    ]
+]
+
+fun main() [
+    show(8)
+    show(6)
+    show(-4)
+    let xs: List<Int> = [1, 3, 6, 7]
+    match first_even(xs) [
+        Some(v) -> [
+            log("first even", v)
+        ]
+        None -> [
+            log("brak")
+        ]
+    ]
+    let ys: List<Int> = [1, 3]
+    log("none?", first_even(ys).is_none())
+]
