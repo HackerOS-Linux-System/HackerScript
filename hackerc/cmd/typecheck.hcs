@@ -27,7 +27,7 @@ fun is_known_get_source(s: Str) -> Bool [
 ]
 
 fun is_builtin_func(name: Str) -> Bool [
-    !! NAPRAWA (Tura 10, patrz SESSION_LOG.md) - dopisano `args`/`exit`/
+    !! NAPRAWA - dopisano `args`/`exit`/
     !! `copy_file`/`create_dir`/`dir_exists`/`list_dir`/`path_exists`/
     !! `remove_dir_all`/`remove_file`/`__sandbox__` - byly rozpoznawane
     !! przez `codegen.hcs` (kompiluja sie OK od dawna), ale NIE byly
@@ -174,7 +174,7 @@ struct FnChecker [
     fn_name: Str,
     imported_names: Dict<Str, Bool>,
     extra_variant_names: List<Str>,
-    !! DODANE (Tura 10) - patrz `Checker.lines`.
+    !! DODANE - patrz `Checker.lines`.
     lines: List<Str>
 ]
 
@@ -204,8 +204,29 @@ impl FnChecker [
         match self.sigs.functions.fetch(name) [
             Some(f) -> [
                 let params = fun_decl_params(f)
-                if arg_count != params.len() [
-                    self.diags.push(Diagnostic("error", "E0001", "'" + name + "' oczekuje " + (params.len() as Str) + " argument(ow), otrzymano " + (arg_count as Str), find_call_line_of(self.lines.clone(), name.clone()), 0, name.len(), ""))
+                !!! 0.6: parametry z wartoscia domyslna (`fun f(a: Int, b: Int = 5)`) mozna
+                !!! pominac na koncu wywolania - minimalna liczba argumentow to liczba
+                !!! parametrow BEZ wartosci domyslnej.
+                let min_args = params.len()
+                let pi = params.len()
+                while pi > 0 [
+                    let has_default = false
+                    match params[pi - 1].default_expr.clone() [
+                        Some(_dflt) -> [
+                            has_default = true
+                        ]
+                        None -> [
+                        ]
+                    ]
+                    if has_default [
+                        min_args = min_args - 1
+                        pi = pi - 1
+                    ] else [
+                        pi = 0
+                    ]
+                ]
+                if arg_count > params.len() or arg_count < min_args [
+                    self.diags.push(Diagnostic("error", "E0001", "'" + name + "' oczekuje " + (min_args as Str) + (if_range_suffix(min_args, params.len())) + " argument(ow), otrzymano " + (arg_count as Str), find_call_line_of(self.lines.clone(), name.clone()), 0, name.len(), ""))
                 ]
             ]
             None -> [
@@ -407,7 +428,7 @@ impl FnChecker [
 
 !!! -- Checker: sprawdza CALY program -------------------------------------
 
-!!! DODANE (Tura 10, patrz docs/ROADMAP.md "numery linii w AST") -
+!!! DODANE (patrz docs/ROADMAP.md, "numery linii w AST") -
 !!! `source: Str` na `Checker` + `find_line_of` (nizej) - PRZYBLIZONE
 !!! numery linii dla diagnostyk typechecka (byly `0, 0` na sztywno w
 !!! KAZDYM miejscu - AST nie ma pozycji). Podejscie: przeszukanie
@@ -419,7 +440,7 @@ impl FnChecker [
 !!! dopasowania (0) -> `render_many` pokaze linie 1 z pustym
 !!! kontekstem - GORSZE niz nic nie pokazac, ALE nadal lepsze niz
 !!! zawsze-0 (i tak bylo zawsze-0 wczesniej).
-!!! NAPRAWA WYDAJNOSCI (Tura 10, ten sam dzien co dodanie) - PIERWSZA
+!!! NAPRAWA WYDAJNOSCI - PIERWSZA
 !!! wersja robila `split_lines(source)` PRZY KAZDYM wywolaniu (kazda
 !!! diagnostyka od nowa dzielila caly plik na linie) - przy pliku z
 !!! wieloma diagnostykami (np. `hackerc/cmd/main.hcs` samo w sobie, ~70
@@ -614,4 +635,12 @@ fun main() [
     let prog = Program([bad_fn, ok_fn])
     let diags = check_program(prog, [], "")
     log("liczba diagnostyk:", diags.len())
+]
+
+!!! " .. N" gdy funkcja ma parametry domyslne (zakres argumentow), inaczej "".
+fun if_range_suffix(min_args: Int, max_args: Int) -> Str [
+    if min_args == max_args [
+        end ""
+    ]
+    end ".." + (max_args as Str)
 ]
