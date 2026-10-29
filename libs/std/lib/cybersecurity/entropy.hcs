@@ -47,6 +47,8 @@ fun looks_encrypted(data: List<Int>, threshold: Float) -> Bool [
 !! ROZBUDOWA (ta runda, patrz docs/ROADMAP.md sekcja 4) - dotad
 !! calkowicie brakujace prymitywy poza entropia.
 
+!!! (0.6: liczone w Ruscie jako suma XOR bajtow + `black_box`, a nie petla z
+!!! `if` zaleznym od danych.)
 !!! Stalo-czasowe porownanie dwoch stringow (np. hashy hasel, tokenow
 !!! sesji, podpisow) - w ODROZNIENIU od zwyklego `a == b`, sprawdza
 !!! WSZYSTKIE znaki niezaleznie od tego, czy wczesniejszy juz sie nie
@@ -56,21 +58,19 @@ fun looks_encrypted(data: List<Int>, threshold: Float) -> Bool [
 !!! natychmiast (dlugosc sekretu i tak zwykle nie jest tajemnica) -
 !!! stalo-czasowosc dotyczy TRESCI, nie dlugosci.
 fun ct_eq(a: Str, b: Str) -> Bool [
-    if a.len() != b.len() [
-        end false
+    let equal = false
+    native {Rust} [
+        let xa = a.as_bytes();
+        let xb = b.as_bytes();
+        if xa.len() == xb.len() {
+            let mut acc: u8 = 0;
+            for (x, y) in xa.iter().zip(xb.iter()) {
+                acc |= x ^ y;
+            }
+            equal = std::hint::black_box(acc) == 0;
+        }
     ]
-    let diff = 0
-    let i = 0
-    let n = a.len()
-    while i < n [
-        let ca = a.char_at(i)
-        let cb = b.char_at(i)
-        if ca != cb [
-            diff = diff + 1
-        ]
-        i = i + 1
-    ]
-    end diff == 0
+    end equal
 ]
 
 !!! Wygodny skrot: `true` jesli SHA-256 tekstu `data` (szesnastkowo)
