@@ -37,8 +37,11 @@ fun kt_type(t: TypeRef) -> Str [
     if n == "Option" [
         end inner + "?"
     ]
+    !!! 0.6: kanal ma ZAWSZE typ `HksChan<Any?>` (elementy jako `Any?`): `chan(1)` bez adnotacji
+    !!! nie pozwala Kotlinowi wywnioskowac parametru typu, a `HksChan<Long>` vs `HksChan<Any>`
+    !!! sa niezgodne (inwariancja). Wartosc odebrana z kanalu wymaga rzutowania w Kotlinie.
     if n == "Chan" [
-        end "HksChan<" + inner + ">"
+        end "HksChan<Any?>"
     ]
     if n == "Dict" [
         let inner2 = "Any"
@@ -110,6 +113,17 @@ fun kt_method_text(callee: Expr, args: List<Expr>) -> Str [
             if m == "clone" [
                 end t
             ]
+            !!! 0.6: Dict<K, V> -> MutableMap: `fetch` zwraca wartosc albo null (= Option),
+            !!! `insert` -> `put`, `contains`/`contains_key` -> `containsKey`.
+            if m == "insert" and args.len() == 2 [
+                end t + ".put(" + kt_join(args.clone()) + ")"
+            ]
+            if m == "fetch" and args.len() == 1 [
+                end t + "[" + kt_join(args.clone()) + "]"
+            ]
+            if (m == "contains" or m == "contains_key") and args.len() == 1 [
+                end t + ".containsKey(" + kt_join(args.clone()) + ")"
+            ]
             end t + "." + m + "(" + kt_join(args.clone()) + ")"
         ]
         _ -> [
@@ -133,14 +147,29 @@ fun kt_join(items: List<Expr>) -> Str [
 
 fun kt_call(callee: Expr, args: List<Expr>) -> Str [
     let name = expr_as_ident_name(callee.clone())
-    if name == "log" [
-        end "println(" + kt_join(args) + ")"
+    !!! 0.6: `log(a, b, ...)` laczy argumenty spacja jak w Ruscie (wczesniej
+    !!! powstawalo `println(a, b)`, ktore sie nie kompiluje - Kotlin ma `println(x)`).
+    if name == "log" or name == "elog" [
+        let sink = "println"
+        if name == "elog" [
+            sink = "System.err.println"
+        ]
+        if args.len() <= 1 [
+            end sink + "(" + kt_join(args) + ")"
+        ]
+        end sink + "(listOf<Any?>(" + kt_join(args) + ").joinToString(\" \"))"
     ]
     if name == "chan" [
         if args.len() == 0 [
-            end "HksChan(1L)"
+            end "HksChan<Any?>(1L)"
         ]
-        end "HksChan(" + kt_expr(args[0].clone()) + ")"
+        end "HksChan<Any?>(" + kt_expr(args[0].clone()) + ")"
+    ]
+    if name == "dict" and args.len() == 0 [
+        end "mutableMapOf()"
+    ]
+    if name == "__native__" [
+        end "__HKS_KT_UNSUPPORTED__"
     ]
     if name == "some" and args.len() == 1 [
         end "(" + kt_expr(args[0].clone()) + ")"
