@@ -44,7 +44,8 @@ Dyrektywę rozpoznaje się w pliku wejściowym (aliasy: `lang:js`).
 | `match` | łańcuch `if (x.$ === "Wariant")` z wiązaniem pól; `_` = `else` |
 | `Option` / `Result` | `some`/`none`/`ok`/`err`, `?` przez wyjątek wczesnego powrotu |
 | `async fun`, `await`, `spawn` | `async function`, `await`, `Promise` |
-| `chan(n)`, `.send`, `.recv`, `.close` | `HksChan` (**`send`/`recv` trzeba poprzedzić `await`**) |
+| `chan(n)`, `.send`, `.recv`, `.close` | `HksChan`; w kontekście `async` (async fun, operand `spawn`) `send`/`recv` dostają **automatyczny `await`** (0.6) |
+| `native {JavaScript} [ ... ]` | surowy JS wklejony w osobnym zasięgu `{ ... }` (0.6) |
 | `log`, `elog` | `console.log`, `console.error` |
 | `expr as T` | `Number()`, `Math.trunc(Number())`, `String()` |
 | `a / b` na `Int` | dzielenie całkowite (obcina, panic przy `b == 0`) — wybór po typie z `typeinfer` |
@@ -57,6 +58,20 @@ Funkcje biblioteki std (`str_join`, `str_split`, `str_trim`,
 odpowiedniki w runtime. W Node dostępne są `args()`, `exit()`,
 `read_file`, `write_file`, `file_readable`, `now_ms`, `sleep`.
 `get <npm:pakiet>` → `const pakiet = require("pakiet")` (tylko Node).
+
+**`native {JavaScript} [ ... ]`** (0.6): treść bloku trafia dosłownie do wyniku, w
+zasięgu `{ ... }`, i widzi zmienne HackerScript pod ich nazwami JS. Używaj go jako
+INSTRUKCJI (nie jako wyrażenia). Wariant z importem pliku
+`native {JavaScript} <ścieżka.js>` wczytuje plik względem pliku `.hcs`. Inny silnik
+(`native {C++}` itd.) daje czytelny błąd. Bloki z plików dołączonych przez `include`
+działają (indeksy są globalne dla całego programu).
+
+**Automatyczny `await` na kanałach** (0.6): `kanal.send(x)` i `kanal.recv()` w kontekście
+`async` same dostają `await`; ręczny `await` nadal jest poprawny. Nie dotyczy metod o
+nazwach `send`/`recv` zdefiniowanych w twoim `impl`. Uwaga: dla obcego obiektu JS z
+metodą `send` `await` jest nieszkodliwy (await na nie-Promise zwraca wartość), ale
+dodaje jedno przejście pętli zdarzeń. Poza `async` (zwykła `fun`) `await` nie jest
+dodawany — blokująca synchronizacja na kanale wymaga `async fun`.
 
 **Dowolne API JavaScript** jest dostępne bez bloków `native`: nieznane
 nazwy przechodzą przez bez zmian (`Math.floor(x)`, `document.title`,
@@ -77,7 +92,7 @@ przeglądarki.
   operują na znakach Unicode / jednostkach UTF-16 (różnica tylko dla
   znaków spoza BMP)
 - niewspierane (czytelny błąd, nie crash): `region [...]` (FFI),
-  `direct`/`native`, `get <...>` poza `std`/`core`/`npm`
+  `direct`, `native` z silnikiem innym niż JavaScript, `get <...>` poza `std`/`core`/`npm`
 - `for x in range(a, b)` jest obsługiwane jako rozszerzenie (w Rust
   `range` nie istnieje)
 
@@ -86,5 +101,7 @@ przeglądarki.
 Programy wspólne dla obu backendów dały identyczne wyjście pod `hackerc`
 (Rust) i pod Node: `control`, `recursion`, `logic`, `scope`, `strings`
 oraz `structs`, `enums`, `lists`, `options` (struct/impl/enum/match/
-listy/Dict/Option/Result/`?`). Testy: `tests/js/` (uruchamiane przez `tests/run.sh`).
+listy/Dict/Option/Result/`?`). Programy testowe nie są częścią tego repozytorium, więc to porównanie nie jest odtwarzalne
+automatycznie (patrz `docs/ROADMAP.md`). Przykłady z `docs/js-examples/` (`native_js`, `channels`) są
+budowane i uruchamiane pod Node przez `scripts/verify.sh`.
 Programy z `Int` > 2^53 (`arith`, `algos`) różnią się celowo — patrz wyżej.
