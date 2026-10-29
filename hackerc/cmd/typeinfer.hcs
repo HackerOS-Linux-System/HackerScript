@@ -417,7 +417,7 @@ fun infer_ident_call_type(name: Str, sigs: Signatures) -> Option<TypeRef> [
     if name == "read_stdin_exact" [
         end some(make_type1("Option", make_type0("Str")))
     ]
-    !! ROZBUDOWA (ta runda, patrz docs/BIT.md - "bit lsp") -
+    !! ROZBUDOWA ("bit lsp") -
     !! `run_command_inherit(program, argumenty) -> Int` - jak
     !! `run_command`, ale z ODZIEDZICZONYM (nie przechwyconym) stdin/
     !! stdout/stderr dziecka - jedyny sposob, zeby `bit lsp` mogl
