@@ -1,557 +1,166 @@
-# Roadmap / znane braki HackerScript
-
-> ## Stan 0.6 — aktualna sekcja (czytaj najpierw)
->
-> Poniższy plik jest **chronologicznym dziennikiem**: starsze sekcje opisują
-> stan z dnia ich powstania i część ich twierdzeń jest dziś nieaktualna.
-> Autorytatywna, bieżąca lista otwartych punktów jest w `CHANGELOG.md`
-> (sekcja „Nadal otwarte”). Mapa odwołań „Tura N” z komentarzy w kodzie:
-> `SESSION_LOG.md`.
->
-> **Zamknięte w 0.6 (wcześniej wymieniane niżej jako braki):**
-> `Dict.items()` w `for k, v in ...` (bez typu krotki); `log()` dla
-> struct/enum; serializacja TOML (`toml_stringify`) i tablice tabel `[[x]]`;
-> LSP `rename`/`references`/`documentSymbol` oraz `definition` w plikach z
-> `include`; zewnętrzne jary na runtime classpath Javy/Kotlina; strumieniowe
-> pobieranie w `std:http`; `run_tee` w `std:process`; brakujące pliki
-> `CHANGELOG.md`, `SESSION_LOG.md`, `docs/BIT.md`, `docs/WORK_INCLUDE_FIX.md`,
-> `tests/`, `hack3rc/tests/`, `playground/web/`, `docs/website-style/`.
->
-> **Starsze punkty, które okazały się nieaktualne:** `std:term` ma już
-> `term_stdout_is_tty` i `term_set_raw`; `std:process` ma `run_capture`;
-> `std:cybersecurity` ma SHA-256/HMAC. (Brakuje tylko automatycznego
-> przywracania trybu surowego terminala — język nie ma RAII/closures.)
->
-> **Nadal otwarte (skrót; pełna lista w `CHANGELOG.md`):** pozycje
-> linia/kolumna w AST; generyczne struktury z adnotacją typu (`Wrapper<Int>`);
-> typ krotki; podział `codegen.hcs`/`project.hcs`; `hack3rc` bez `Dict`,
-> interpolacji, async, `native`, `log()` struktury; statyczne `fast direct`;
-> `native {JavaScript}`; LSP oparty na AST; luki po stronie `bit`.
-
-
-Ten plik jest cytowany z dziesiątek komentarzy `!!!` w całym kodzie
-(`hackerc/cmd/*.hcs`, `hack3rc/cmd/*.hcs`, `libs/*/lib/mod.hcs`,
-`README.adoc`, `docs/SYNTAX.md`) jako "pełna, szczera lista braków" —
-ale fizycznie nie istniał w repozytorium. To jest jego pierwsza wersja,
-zebrana z tamtych komentarzy plus wiedzy zdobytej przy pracy nad 0.4.
-
-Status: **0.4**, self-hosted (`hackerc` skompilowany przez samego
-siebie). Nic poniżej nie jest "krytyczne" w sensie "hackerc nie
-działa" — to lista miejsc, gdzie bootstrap wziął skrót, celowo albo z
-braku czasu, i gdzie kolejna runda pracy przyniesie najwięcej.
-
-## Zrobione w 0.4
-
-* **Wspólny `cache/` dla całego workspace** (naprawiony bug). Każdy
-  członek workspace (`hackerc/`, `hack3rc/`, `libs/core/`, `libs/std/`)
-  ma własny, w pełni poprawny `Bit.hk` — co wcześniej powodowało, że
-  `find_project_root` (bit) zatrzymywał się na
-  NAJBLIŻSZYM `Bit.hk` zamiast na korzeniu całego workspace, i
-  `bit <cokolwiek>` odpalone z wnętrza `hackerc/` czy `bit/`
-  tworzyło **własny, osobny** `cache/` zamiast dzielić jeden wspólny z
-  korzeniem — dokładnie tak jak `cargo` w workspace zawsze dzieli
-  jeden `target/`, niezależnie z którego członka go odpalisz. Naprawa:
-  `find_project_root` teraz idzie w górę przez WSZYSTKICH przodków
-  (nie tylko bezpośredniego rodzica), sprawdzając, czy jakiś dalszy
-  `Bit.hk` z sekcją `[workspace]` rości sobie prawa (przez
-  `-> members`) do znalezionego katalogu — i bierze najdalszego takiego
-  przodka. Patrz `bit`.
-
-* **Usunięcie `[build]` z `Bit.hk`.** Sekcja `[build] -> entry =>
-  <ścieżka>`, pozwalająca nadpisać plik wejściowy, została CAŁKOWICIE
-  usunięta z formatu `.hk`. Powód: to była jedyna sekcja w całym
-  manifeście pozwalająca odejść od konwencji `cmd/main.hcs` — a w
-  praktyce (`hackerc/Bit.hk`: `-> entry => cli.hcs`, bez `cmd/`)
-  wskazywała na plik, który **nigdy nie istniał** (prawdziwa ścieżka
-  to zawsze była hackerc/cmd/cli.hcs - plik historyczny, dziś `cmd/main.hcs`), więc `bit build` na
-  korzeniu workspace po cichu pomijał `hackerc` jako rzekomą
-  "bibliotekę bez entry point". Naprawa: plik przemianowany na
-  `hackerc/cmd/main.hcs` (jedyna dopuszczalna nazwa od 0.4), pole
-  `[build]` usunięte wszędzie — patrz `find_cmd_entry()` w
-  `bit`, dokładny analog tego, jak Cargo samo
-  znajduje `src/main.rs` bez żadnego pola w `Cargo.toml`.
-
-* **`get <work:członek[::plik]>`** — ogólny import dowolnego członka
-  workspace mającego `lib/mod.hcs` (nie tylko uprzywilejowanych
-  `core`/`std`), analog Rustowego `use nazwa_membera::modul::*;` dla
-  członka `cargo`-owego workspace. Patrz `docs/SYNTAX.md`, sekcja
-  "`get <work:...>`" i `find_workspace_root`/`work_module_file_path`
-  w `hackerc/cmd/project.hcs`. Przy okazji naprawiono też drobne,
-  wcześniej istniejące przeoczenie: `"hlib"` nie był wypisany w liście
-  znanych źródeł w `typecheck.hcs` (`is_known_get_source`), mimo że
-  `gen_get_import`/`Discovery.resolve` już go w pełni obsługiwały —
-  poprawny `get <hlib:nazwa>` dostawał fałszywy błąd E0003.
-
-* **`get <work:członek[::plik]>`** — ogólny import dowolnego członka
-  workspace mającego `lib/mod.hcs` (nie tylko uprzywilejowanych
-  `core`/`std`), analog Rustowego `use nazwa_membera::modul::*;` dla
-  członka `cargo`-owego workspace. Patrz `docs/SYNTAX.md`, sekcja
-  "`get <work:...>`" i `find_workspace_root`/`work_module_file_path`
-  w `hackerc/cmd/project.hcs`. Przy okazji naprawiono też drobne,
-  wcześniej istniejące przeoczenie: `"hlib"` nie był wypisany w liście
-  znanych źródeł w `typecheck.hcs` (`is_known_get_source`), mimo że
-  `gen_get_import`/`Discovery.resolve` już go w pełni obsługiwały —
-  poprawny `get <hlib:nazwa>` dostawał fałszywy błąd E0003.
-
-* **`include <work:członek[::plik]>`** — drugi kształt `include`
-  (obok zwykłego, względem katalogu pliku): PRAWDZIWE statyczne
-  linkowanie źródła innego członka workspace (scalane bez prefiksu,
-  jak Rustowe `mod`), rozwiązywane względem korzenia workspace —
-  bez duplikowania plików. Patrz `docs/SYNTAX.md`, sekcja
-  "`include <work:...>`".
-
-* **`@wasm_export` + `bit build --wasm`** — pierwszy działający
-  pipeline kompilacji do WASM: marker `@wasm_export` (wzorowany na
-  `@hot_reload`) oznacza funkcję do wyeksportowania przez
-  `wasm-bindgen`; obecność choć jednej takiej funkcji przełącza
-  wygenerowany `Cargo.toml` z `[[bin]]` na `[lib]` (cdylib+rlib);
-  `bit build --wasm` kompiluje na `wasm32-unknown-unknown` i (gdy
-  `wasm-bindgen-cli` jest zainstalowany) generuje glue JS. Patrz
-  `docs/SYNTAX.md`, oraz **`playground/`** — pierwszy prawdziwy
-  konsument obu nowości: `playground/cmd/main.hcs` statycznie linkuje
-  cały checker `hackerc`a (`ast_nodes`/`parser`/`typecheck`/
-  `diagnostics`) przez `include <work:hackerc::...>`, eksportuje
-  `check_source` przez `@wasm_export`, a `playground/web/`
-  (`index.html`+`main.js`) to działająca strona w stylu Rust
-  Playground — patrz `playground/web/README.md` po dokładne kroki
-  budowania (wymaga lokalnego Rust + `wasm-bindgen-cli`, nie da się
-  zweryfikować end-to-end w tym środowisku bez pełnego toolchaina).
-
-## 1. Braki językowe samego bootstrapu (`hackerc`)
-
-> Status tej rundy: lista niżej bez zmian merytorycznych — te braki
-> są przesłanką (nie celem) dla `docs/LSP.md` (numery linii w AST są
-> wymagane dla dokładnego `textDocument/publishDiagnostics`) i dla
-> `docs/GRAMMAR.md` (sekcja "Znane rozbieżności"). Kolejność
-> wdrożenia: numery linii w AST i `ParseError` idą przed Etapem 2a
-> `lsp` (patrz `docs/LSP.md`), reszta punktów niżej pozostaje
-> nieuszeregowana w czasie.
-
-* Brak iteracji po `Dict` (`.keys()`/`.values()`/`.items()`) —
-  dostępny jest tylko `.fetch(known_key)`. Wymusza to obejścia w
-  całym kompilatorze (ręczne listy `*_names` towarzyszące każdemu
-  `Dict`, np. w `typeinfer.hcs`/`transpiler.hcs`).
-* Brak realnego `ParseError`/wyjątków — parser (`parser.hcs`) loguje
-  błąd i próbuje kontynuować zamiast rzucać wyjątek jak wersja
-  pythonowa.
-* Brak numerów linii w AST — utrudnia dokładną diagnostykę błędów.
-* `log()` nie obsługuje structów/enumów (brak odpowiednika
-  `Display`/`Debug` z Rusta) — `typeinfer.hcs`.
-* Brak `Set` jako typu.
-* Brak prymitywu tworzenia katalogów (`mkdir(parents=True)`) —
-  `out_path` w `transpile_file`/`build_project` musi już istnieć
-  (patrz `create_dir` bez rekursji w `project.hcs`).
-
-## 2. Uproszczenia per-plik w kompilatorze
-
-`codegen.hcs`, `typeinfer.hcs`, `project.hcs`, cli.hcs (dziś
-`main.hcs`), `formatter.hcs`, `parser.hcs` — każdy ma odziedziczone
-uproszczenia z wersji pythonowej sprzed self-hostingu, częściowo tylko
-nadrobione podczas bootstrapu.
-
-## 3. FFI 0.3/0.4
-
-* ✅ **Zrobione (ta runda):** kompilacja WŁASNYCH źródeł `.c`/`.cpp`
-  projektu przez crate `cc`, obok `get <c:...>`/`get <cpp:...>`
-  (które nadal tylko linkują systemową bibliotekę po nazwie) — nowa
-  sekcja manifestu `[native_sources] -> c = [...]` / `cpp = [...]`
-  (`bit::NativeSourcesSection`), którą
-  `build_wire_extern_dependencies` (`bit`) zamienia na
-  wywołania `cc::Build::new().file(...).compile(...)` w generowanym
-  `build.rs`, dopisując `[build-dependencies] cc = "1"` do Cargo.toml,
-  gdy jeszcze go tam nie ma.
-* ✅ **Zrobione (ta runda), częściowo:** `bit build` sprawdza z góry
-  dostępność kompilatora C/C++ (`cc`/`gcc`/`clang`/`cl`), gdy projekt
-  używa `[native_sources]`, i zwraca czytelny błąd zamiast surowego
-  błędu `cc`/`rustc` w środku `cargo build`. **Zostaje:** inline
-  `native {C++}[...]` (bez `[native_sources]`) wciąż nie ma tego
-  prechecku — jego błąd braku kompilatora nadal wychodzi dopiero z
-  samego `cc`.
-* ✅ **Zrobione (ta runda):** sygnatury zadeklarowane w
-  `region [ ... ]` trafiają teraz do tej samej tabeli `functions` co
-  zwykłe `fun` (`hackerc/cmd/typeinfer.hcs::collect_signatures`) —
-  `check_call` (typecheck.hcs) sprawdza teraz liczbę argumentów przy
-  wywołaniach funkcji z `region`, zamiast dawać błąd dopiero z
-  `rustc` na wygenerowanym kodzie. Patrz `docs/SYNTAX.md`, sekcja FFI
-  "Ograniczenia".
-* Format `.hlib` (biblioteki binarne) — dopiero raczkuje:
-  `hackerc hlib build/inspect/verify` działa, ale integracja z `bit
-  install` (auto-generowanie stubów `get <extern:...>`) jest
-  częściowa. **Plan:** `bit install hlib <nazwa>` po pobraniu
-  archiwum `.hlib` woła `hackerc hlib inspect --stubs` (nowa flaga) i
-  zapisuje wygenerowane stuby `get <extern:...> use <...>` +
-  `region [...]` do `cache/hlib_stubs/<nazwa>.hcs`, gotowe do
-  `include`.
-
-## 4. Luki w `libs/std` poza rdzeniem
-
-Rdzeń (`fs`, `io`, `string`, `math`, `json`, `result`) jest solidny,
-ale moduły dodatkowe (`toml`, `http`, `process`, `term`,
-`cybersecurity/`) mają mniejsze pokrycie funkcji niż odpowiedniki w
-Pythonie/Rust.
-
-**Plan domykania, moduł po module** (kolejność wg tego, co dziś
-najczęściej brakuje w praktyce, ustalona przy pisaniu `docs/BIT.md`
-i `docs/FAST_DIRECT.md`):
-1. `libs/std/lib/process.hcs` — brakuje przechwytywania stdout/stderr
-   jako strumieni (dziś tylko odpowiednik `run-and-collect`); potrzebne
-   wprost pod przyszłe `fast direct {multiprocessing}`/`{ray}`
-   (patrz `docs/FAST_DIRECT.md`) do zarządzania procesami roboczymi.
-2. `libs/std/lib/http.hcs` — brak klienta streamującego (dziś
-   całe ciało odpowiedzi na raz); zderza się z tym samym obszarem co
-   przyszłe `fast direct {httpx}`/`{aiohttp}`.
-3. `libs/std/lib/term.hcs` — pokrycie kolorów/kursora wystarczające
-   dla dzisiejszych potrzeb (`bit`, patrz `docs/BIT.md`), brakuje
-   odczytu rozmiaru terminala i trybu raw (potrzebne pod interaktywne
-   `bit repair`/przyszłe `lsp` logi debug).
-4. `libs/std/lib/toml.hcs` — (0.6: ZROBIONE) ma już serializację
-   (`toml_stringify`) i tablice tabel `[[x]]`. `Bit.hk` jest jednak nadal
-   edytowany przez `bit install`/`remove` na poziomie tekstu (to kod
-   `bit`, poza tym repozytorium) - przejście na `toml.hcs` zależy od `bit`.
-5. `libs/std/lib/cybersecurity/entropy.hcs` — dziś tylko entropia
-   Shannona; brak innych podstawowych prymitywów (hashowanie,
-   stałoczasowe porównanie) używanych w przykładach z `docs/showcase`.
-
-## 5. Sandbox i uprawnienia (`codegen.hcs`)
-
-Izolacja sieciowa (`CLONE_NEWNET`) i systemu plików (`CLONE_NEWNS`) po
-prostu wypisuje ostrzeżenie i uruchamia bez izolacji, gdy brakuje
-uprawnień (np. `CAP_SYS_ADMIN`) — zamiast twardo odmówić lub
-zaoferować alternatywę.
-
-## 6. Menedżer pakietów `bit`
-
-`bit` jest **osobnym projektem** (H#, repozytorium bit-io/bit) — nie jest
-częścią tego repozytorium. Po stronie HackerScript zostają: kontrakt
-CLI `hackerc build` (flagi `-o`, `--crate-name`, `--library`,
-`--bin-name`, `--version-map`, `--libs-root`, `--bootstrap-root`,
-`--bit-root`), rozwiązywanie `get <bit:...>` (`BIT_LIBS`,
-`cache/libs/<nazwa>/`, `~/.hackeros/libs/<nazwa>/current/`) oraz format
-manifestu `Bit.hk`. Pełny opis: **`docs/BIT.md`**.
-
-## 7. Dokumentacja
-
-Ten plik jest pierwszą wersją — wcześniej cytowany wszędzie, ale
-fizycznie nieobecny, więc lista braków była rozproszona po
-komentarzach `!!!` w kodzie.
-
-* ✅ **Formalna gramatyka `hackerc` (EBNF)** — `docs/GRAMMAR.md`,
-  dodana w tej rundzie. `docs/SYNTAX.md` zostaje jako ręcznie pisana
-  mapa/samouczek (nadal nadrzędny wobec obu w razie rozbieżności jest
-  kod `lexer.hcs`/`parser.hcs`), `GRAMMAR.md` to formalne uzupełnienie
-  w notacji EBNF, z osobną sekcją nazywającą wprost dwa miejsca, gdzie
-  gramatyka formalna i dzisiejszy parser się rozjeżdżają (brak
-  `ParseError`, brak numerów linii w AST — patrz sekcja 1 niżej).
-* ✅ **Osobny dokument opisujący `bit`** — `docs/BIT.md`, dodana w
-  tej rundzie. Opisuje manifest `Bit.hk`, wszystkie komendy
-  (`init`/`build`/`cache`/`check`/`lint`/`fmt`/`install`/`remove`/
-  `repair`/`clean`) i — nowość względem samego `--help` — rozpisany
-  plan implementacji dla każdego z czterech braków w sekcji 6 niżej.
-
-## 8. Plan kolejnej rundy: `lsp` i `fast direct {backend}`
-
-Dwie duże, nowe rzeczy zaprojektowane w tej rundzie (Faza 1 —
-specyfikacja + dokumentacja; kod przyjdzie w kolejnych rundach,
-iteracyjnie, żeby każdy krok był realnie sprawdzalny zamiast
-deklarowany "zrobiony" bez pokrycia w działającym kodzie):
-
-* ✅ **Zrobione (ta runda) — Etap 2a:** `hackerc lsp`/`bit lsp`
-  istnieją i działają — JSON-RPC po stdio (`hackerc/cmd/lsp.hcs`),
-  `initialize`/`shutdown`/`exit`, `textDocument/didOpen`/`didChange`
-  → prawdziwy `textDocument/publishDiagnostics` (reużywa
-  `check_program`). Wymagało dwóch nowych prymitywów w samym
-  `hackerc` (`read_stdin_line`/`read_stdin_exact`, `write_stdout`,
-  `run_command_inherit` — patrz `codegen.hcs::gen_call`), bo bootstrap
-  wcześniej w ogóle nie czytał stdin. **Zostaje (Etap 2b/2c):**
-  hover/definition/completion/rename/formatting — pełny plan w
-  **`docs/LSP.md`**. Zakresy diagnostyk są dziś zawsze `(0,0)-(0,1)`
-  (patrz sekcja 1 wyżej — brak numerów linii w AST).
-* **`fast direct {backend} [ ... ]`** — rozszerzenie dzisiejszego
-  `direct[...]` o wybór jednego z 19 backendów przyspieszających
-  Pythona (`pypy`, `numba`, `cython`, `numpy`, `polars`, `scipy`,
-  `asyncio`, `uvloop`, `multiprocessing`, `jax`, `pythran`, `duckdb`,
-  `cupy`, `vaex`, `numexpr`, `trio`, `aiohttp`, `granian`, `httpx`,
-  `ray`), ze statycznym linkowaniem całego interpretera (PyPy albo
-  CPython, zależnie od backendu) i bibliotek do finalnej binarki —
-  poza udokumentowanymi wyjątkami narzuconymi przez same biblioteki
-  (CUDA runtime dla `cupy`, proces `raylet` dla `ray`). Pełna
-  specyfikacja, w tym kolejność wdrażania w 6 grupach, w
-  **`docs/FAST_DIRECT.md`**. Gramatyka już dodana do
-  `docs/GRAMMAR.md`, sekcja 6.
-
-## Aktualizacja sesji (patrz SESSION_LOG.md po pelna liste zmian plik-po-pliku)
-
-Kilka punktow powyzej bylo NIEAKTUALNYCH wzgledem faktycznego stanu kodu -
-sprawdzone i skorygowane w tej sesji:
-
-* **`mkdir -p`/`create_dir`** - JUZ zaimplementowane (`create_dir` mapuje sie
-  na `std::fs::create_dir_all`, rekurencyjne). Doszlifowane: `transpile_file`
-  teraz faktycznie tworzy katalog nadrzedny `out_path` przed zapisem.
-* **`bit lsp`** - JUZ w pelni zaimplementowane i podpiete (`cmd_lsp_run` w
-  `bit`, wywolywane z `main.hcs`). Diagnostyka dziala; zakres
-  Etap 2b/2c (hover/definition/completion/rename/formatting) nadal otwarty.
-* **`bit build --jar`** - JUZ w pelni zaimplementowane (`build_package_jar`
-  + flaga `--jar` w `bit` -> `TargetJar`), NIE placeholder.
-* **`bit build --release --wasm`** - naprawiony realny bug: `include
-  <work:hackerc::...>` nigdy nie dzialalo dla czlonkow-binarek (`hackerc`,
-  `playground`) trzymajacych kod w `cmd/` zamiast `lib/` - patrz
-  `find_workspace_root`/`work_module_file_path` w `hackerc/cmd/project.hcs`.
-  Plus naprawiony `#[wasm_bindgen]` + parametry `&String` (nieobslugiwane
-  przez `wasm-bindgen`) - patrz `wasm_param_type_str` w `codegen.hcs`.
-* **`Dict.keys()`/`.values()`** - dodane (typeinfer.hcs + codegen.hcs).
-  `.items()` zostaje - wymaga typu pary/tupli.
-* **Sandbox `$ ... $`** - zmienione z "ostrzezenie + uruchom bez izolacji" na
-  fail-closed (kod wyjscia 111, polecenie NIE wykonuje sie bez izolacji).
-* **NOWOSC: `using <wersja>` per plik** - patrz **`docs/MULTI_VERSION.md`** -
-  rozne pliki `.hcs` w JEDNYM projekcie moga deklarowac rozne wersje jezyka;
-  `bit build` pobiera wszystkie potrzebne binarki `hackerc` i orkiestruje
-  delegacje per-plik. Plus `Bit.hk -> [package] -> all-versions => [...]`.
-* **`hack3rc`** - dodany do `[workspace]`, manifest + plan architektury
-  (frontend re-used z `hackerc`, backend Cranelift) - **implementacja
-  jeszcze NIE zaczeta** (tylko manifest/plan), patrz `docs/HACK3RC.md`
-  (do napisania w kolejnej sesji - w TEJ sesji nie zdazono).
-
-Wciaz calkowicie nieruszone: Go FFI (`get <go:>`/`native {go}`), `fast direct
-{backend}` (19 backendow), `ParseError`/numery linii w AST, typ `Set`,
-LSP Etap 2b/2c, stuby `.hlib` w `bit install`.
-
-## Aktualizacja sesji 2
-
-* **Stuby `.hlib` w `bit install`** - odkryto, ze `hackerc` JUZ ma
-  PELNA, automatyczna obsluge `get <hlib:nazwa>` (`find_hlib_file_path`/
-  `hlib_extract_for_import` w `project.hcs` - szuka `.hlib` w
-  `<projekt>/hlibs/`, generuje `region [...]` z `manifest.json` gdy brak
-  zrodla). Jedyny brakujacy element: `bit build` (zaleznosci `bytes`/
-  `bit` konczace sie na `.hlib`) tylko OSTRZEGAL "dopisz recznie" zamiast
-  skopiowac plik do `<projekt>/hlibs/<nazwa>.hlib`, gdzie `get
-  <hlib:nazwa>` juz by go znalazl. Naprawione (`bit`) -
-  teraz to dziala od razu, bez zadnego recznego kroku.
-* **`Set<T>`** dodany (`std::collections::HashSet`) - patrz tura 4 w
-  SESSION_LOG.md.
-* **Kolorowe diagnostyki + timing w `bit build`** - patrz tura 4 w
-  SESSION_LOG.md.
-
-Wciaz calkowicie nieruszone: Go FFI, `fast direct {backend}` (19
-backendow), `ParseError`/numery linii w AST, LSP Etap 2b/2c
-(hover/definition/completion/rename/formatting), `hack3rc/cmd/main.hcs`.
-
-## Aktualizacja sesji 3
-
-* **`ParseError`** - ZROBIONE (`Parser.errors`, `parse_checked()`,
-  wpiete do `check`/`lint`/`build`/`emit-module`/LSP). Real, ale
-  ograniczone: parser NADAL robi odzyskiwanie po bledzie (nie
-  przerywa w miejscu) - to swiadoma decyzja (parytet z `rustc`), nie
-  brak.
-* **Numery linii w AST** - CZESCIOWO: bledy PARSERA maja teraz realny
-  `line`/`col` (z `Token`). Diagnostyki TYPECHECKA (`check_program`)
-  NADAL maja `line=0, col=0` na sztywno w kazdym miejscu
-  `typecheck.hcs` - wymaga pola pozycji na KAZDYM wariancie `Expr`/
-  `Stmt`, co dotyka tysiace miejsc dopasowania w kompilatorze na raz.
-  NAJWIEKSZY pojedynczy pozostaly punkt, odlozony do sesji z dostepem
-  do `cargo build` (zbyt ryzykowne bez mozliwosci kompilacji).
-* **LSP** - zakresy diagnostyk realne dla bledow PARSERA (wczesniej
-  zawsze `(0,0)-(0,1)`), nadal `(0,0)-(0,1)` dla typechecka (patrz
-  wyzej - ten sam powod). Bledy parsera TERAZ w ogole trafiaja do LSP
-  (wczesniej byly calkowicie gubione przez `lsp_parse_with_direct`
-  uzywajace `parse()` zamiast `parse_checked()`).
-
-Wciaz calkowicie nieruszone: Go FFI, `fast direct {backend}` (19
-backendow), LSP hover/definition/completion/rename/formatting,
-`hack3rc/cmd/main.hcs`.
-
-## Aktualizacja sesji 4 - PIERWSZA realna weryfikacja przez `cargo build`
-
-W tej sesji po raz pierwszy zainstalowano `rustc`/`cargo` i faktycznie
-skompilowano `hackerc`, `bit` oraz programy testowe. Wyniki (pelne
-szczegoly w SESSION_LOG.md, Tura 7):
-
-* **`hackerc` i `bit` kompiluja sie i dzialaja** - self-hosting
-  fixed-point zweryfikowany (dwie generacje transpilacji daja
-  identyczny wynik).
-* **`Set<T>`, `Dict.keys()/values()`, `ParseError`** - zweryfikowane
-  DZIALAJACYM kodem (nie tylko czytaniem zrodla) - skompilowane I
-  URUCHOMIONE, poprawne wyniki.
-* Znalezione i naprawione 2 realne bledy kompilacji we wczesniejszych
-  turach tej sesji (`tt.generic1` -> `tt.generic`, `VERSION.clone()` ->
-  `VERSION.to_string()`) - niewidoczne bez `cargo build`.
-* **`bit build --wasm`/playground - CZESCIOWO naprawione**: oryginalny
-  zglaszany blad (`E0432 unresolved import`) jest naprawiony, ALE
-  odkryto GLEBSZY problem: `include <work:...>` nie kanonizuje nazw
-  modulow po sciezce pliku, wiec plik zaladowany i BEZPOSREDNIO (przez
-  playground) i TRANSYTYWNIE (przez parser.hcs/typecheck.hcs, ktore
-  playground tez importuje) dostaje DWIE rozne nazwy modulu = dwa
-  niezgodne typy `Program`/`Diagnostic`. Dotyczy WYLACZNIE plikow
-  uzywajacych `include <work:...>` na pliki, ktore SAME maja dalsze
-  `include` (dzis: tylko `playground`). Najwiekszy, potwierdzony-przez-
-  kompilator priorytet na kolejna sesje.
-
-Wciaz calkowicie nieruszone: Go FFI, `fast direct {backend}` (19
-backendow), LSP hover/definition/completion/rename/formatting,
-`hack3rc/cmd/main.hcs`, numery linii w AST dla typechecka.
-
-## Aktualizacja sesji 5
-
-* **`get <kotlin:>` / `native {kotlin}`** - ZROBIONE i zweryfikowane
-  end-to-end (docs/KOTLIN.md).
-* **`include <work:...>` duplikacja modulow + `main` ambiguity** -
-  ZROBIONE; `playground --library` kompiluje sie bez bledow. Do
-  sprawdzenia u Ciebie: sam target `wasm32-unknown-unknown`.
-* Wciaz nieruszone: Go FFI, `fast direct {backend}`, LSP
-  hover/definition/completion, numery linii w AST dla typechecka,
-  `hack3rc/cmd/main.hcs`.
-
-## Aktualizacja sesji 6 (Tura 10) - Go FFI, fast direct (19 backendow), LSP hover/definition/completion, numery linii w typechecku
-
-Wszystkie ponizsze zweryfikowane realna kompilacja (`rustc`/`cargo`
-1.91) + w wiekszosci realnym URUCHOMIENIEM (nie tylko `cargo build`).
-
-* **`get <go:>`/`native {go}`** - ZROBIONE, zweryfikowane end-to-end
-  (`fmt`, `strings`, dwa bloki, petle). Statyczne linkowanie (Go
-  wbudowany w binarke, `go build -buildmode=c-archive`). Moduly
-  zewnetrzne (`get <go:sciezka::wersja>`) zaimplementowane, ale
-  NIEPRZETESTOWANE (proxy.golang.org zablokowany w srodowisku pracy).
-  Patrz docs/GO.md.
-* **`fast direct {backend}` (19 backendow)** - ZROBIONE w wersji
-  DYNAMICZNEJ (nie statycznej - statyczne linkowanie CPythona/PyPy to
-  osobny, duzy projekt). 9 z 19 przetestowanych realnym uruchomieniem
-  (numpy, pypy, asyncio, uvloop, trio, multiprocessing, cython,
-  pythran, httpx) + poprawny czytelny blad przy braku modulu (numba).
-  Patrz docs/FAST_DIRECT.md, "Stan implementacji".
-* **LSP hover/definition/completion** - ZROBIONE (Etap 2b/2c),
-  zweryfikowane przez bezposredni protokol JSON-RPC (nie w prawdziwym
-  edytorze). Implementacja oparta na tekscie (skan linii), nie na
-  AST - patrz nizej. Patrz docs/LSP.md.
-* **Numery linii w AST dla diagnostyk typechecka** - ZROBIONE w wersji
-  PRZYBLIZONEJ: `Checker`/`FnChecker` dostaly pole `source: Str`,
-  wszystkie 6 miejsc tworzenia `Diagnostic` w typecheck.hcs licza teraz
-  linie przez wyszukanie tekstowe charakterystycznego fragmentu
-  (`find_line_of`) zamiast sztywnego `0, 0`. TO NIE SA prawdziwe pozycje
-  z parsera (AST nadal ich nie ma - `Expr`/`Stmt` bez zmian) - przy
-  wielu wystapieniach tego samego identyfikatora trafia PIERWSZE. Ten
-  sam kompromis co `lsp_features.hcs`. Zweryfikowane: `E0001`/`W0002`/
-  `W0001` na programie testowym wskazuja poprawne linie.
-
-Jedyny pozostaly punkt z oryginalnej listy: **`hack3rc/cmd/main.hcs`**
-(patrz docs/HACK3RC.md) - świadomie nieruszone, wymaga integracji z
-Cranelift (crates `cranelift-*`), ktorej NIE dalo sie zweryfikowac w
-tej sesji (proxy.golang.org byl zablokowany, kwestia dostepu do
-crates.io dla tych konkretnych crate'ow niezweryfikowana, a pisanie
-kilkuset linii wywolan API Cranelift bez petli kompiluj-sprawdz ma
-wysokie ryzyko bledow).
-
-## Aktualizacja sesji 6 - WSZYSTKIE pozostale punkty zrobione
-
-Wszystkie 5 pozostalych punktow z listy zrobione w Turze 10 (pelne
-szczegoly: SESSION_LOG.md):
-
-* **`fast direct {backend}`** - ZROBIONE (dynamiczne, nie statyczne) -
-  docs/FAST_DIRECT.md.
-* **`get <go:>`/`native {go}`** - ZROBIONE, zweryfikowane end-to-end -
-  docs/GO.md.
-* **LSP hover/definition/completion** - ZROBIONE (oparte na tekscie,
-  nie AST), zweryfikowane przez JSON-RPC - docs/LSP.md.
-* **Numery linii w AST dla typechecka** - ZROBIONE jako PRZYBLIZENIE
-  (przeszukanie tekstu, nie prawdziwe pozycje z parsera - pelne AST z
-  pozycjami NADAL nie istnieje, to swiadomy kompromis). Przy okazji
-  naprawiono realna dziure (`args`/`exit`/itd. nie byly w whiteliscie
-  typechecka) i ZNALEZIONO (czesciowo naprawiono) regresje wydajnosci
-  `hackerc build` na sobie samym (~20s -> 133s, WYMAGA DALSZEGO
-  ZBADANIA w kolejnej sesji).
-* **`hack3rc/cmd/main.hcs`** - ZROBIONE dla Zakresu 0.0.1 (prosta
-  arytmetyka calkowita), zweryfikowane end-to-end przez prawdziwy
-  Cranelift JIT - docs/HACK3RC.md (do zaktualizowania o wynik).
-
-**Priorytet na kolejna sesje**: zdiagnozowac i naprawic regresje
-wydajnosci `hackerc build` (Turze 10, punkt 4) - prawdopodobnie
-nadliniowe skalowanie w `build_project`/`Discovery.resolve` przy
-wiekszej liczbie plikow/instrukcji, ujawnione przez wzrost rozmiaru
-wlasnego zrodla `hackerc` w tej sesji.
-
-Nieruszone pozostaje: statyczne linkowanie dla `fast direct`, mosty
-Rust-native dla backendow bez CPythona, prawdziwe (nie przyblizone)
-numery linii w AST, pelny zakres jezyka w `hack3rc` (dzis: tylko
-arytmetyka calkowita).
-
-## Tura 11 — `hack3rc` 0.2 (kompilator AOT) i backend JavaScript
-
-* **`hack3rc` — prawdziwy kompilator AOT** (docs/HACK3RC.md): natywny plik
-  wykonywalny w kilkadziesiąt ms zamiast crate'a z JIT-em (≈ 2,5 min cargo
-  na program). 0.1: `Int/Float/Bool`, funkcje, pętle, `log`. **0.2:**
-  `struct`, `enum` z polami + `match`, `impl` (metody), `List<T>`,
-  `Option<T>`, napisy (`+`, `==`, `as Str`), głębokie `.clone()`.
-  Całość w HackerScript; API Cranelifta w jednym bloku `native {Rust}` w
-  `backend.hcs`.
-* **Model pamięci**: konserwatywny odśmiecacz mark-sweep w runtime
-  (skanowanie stosu i rejestrów, wskaźniki wewnętrzne, deskryptory typów
-  do `clone`). Testy w trybie „GC przy każdej alokacji”; pamięć stała
-  (≈ 14 MB) przy ≈ 900 MB zaalokowanych w sumie.
-* **Cross-kompilacja i wiele architektur**: `--target` (aarch64, riscv64,
-  s390x, x86_64 + pełne triple), `--cc` z argumentami, `--runner`. Cały
-  zestaw (31 testów) przechodzi na x86_64, aarch64, riscv64 i s390x
-  (big-endian) pod QEMU. Obiekty Mach-O i COFF emitowane (bez linkowania).
-* **`get <crates:nazwa::wersja+feature>`** (hackerc/cmd/project.hcs):
-  features Cargo w składni `get` — odblokowało `all-arch` dla Cranelifta.
-  Bootstrap: `hack3rc` buduje się teraz hackerc z tego repozytorium.
-* **Weryfikacja różnicowa z `hackerc`**: 14 programów daje bajt w bajt to
-  samo wyjście pod `hack3rc` i `hackerc`; plus testy matematyki, kodów
-  wyjścia, paniki, stdin i błędów kompilacji — `hack3rc/tests/`.
-* **Naprawiony błąd parsera `hackerc`**: pętle `while not
-  self.check(Close, ...)` nie sprawdzały końca pliku, więc niedomknięty
-  nawias na końcu pliku zapętlał parser w nieskończoność (OOM-kill).
-* **Znaleziony, NIEnaprawiony błąd generatora Rust w `hackerc`**:
-  `lista[i].pole += x` i `lista[i][j] += x` generują `lista[i].clone()...` i
-  po cichu gubią zapis (modyfikują kopię). `hack3rc` ma poprawną semantykę
-  (test `inplace`); do naprawy w `hackerc/cmd/codegen.hcs`.
-* **`use <lang:javascript>`** (docs/JAVASCRIPT.md): backend
-  `hackerc/cmd/javascript_backend.hcs` + runtime `js_runtime.hcs`;
-  struct/enum/impl/match/Option/Result/`?`/async/await/spawn/kanały/Dict/
-  listy; podkomenda `hackerc js`; testy `tests/js/`.
-* **`use <mode:website>`** (docs/WEBSITE.md): `hackerc build`/`hackerc
-  website` generuje `index.html` + `app.js` z mostkiem DOM (zdarzenia,
-  `http_get`, `localStorage`…); zweryfikowane w jsdom.
-* **Następne kroki**: `Dict`/`Result`/`?` i metody `Str` w `hack3rc`,
-  inline'owanie dostępu do list i szybsza ścieżka alokacji, `native
-  {JavaScript}` w backendzie JS, `Int` jako BigInt (opcjonalnie), prawdziwe
-  pozycje w AST dla diagnostyk, test strony w prawdziwej przeglądarce.
-
-## Runda 12 — porządki wokół `bit`, naprawy i rozbudowa
-
-Zrobione i zweryfikowane kompilacją/uruchomieniem:
-
-* **Błąd generatora Rusta naprawiony**: `lista[i].pole += x`,
-  `g[i][j] += x` i `lista[i] = x` modyfikują element w miejscu
-  (`codegen.hcs::gen_lvalue`; dawniej zapis trafiał w tymczasowy `.clone()`).
-* **`get <bit:nazwa[::plik]>`** rozwiązuje się zgodnie z układem `bit`
-  (`BIT_LIBS`, `cache/libs/<nazwa>/`, `~/.hackeros/libs/<nazwa>/current/`;
-  źródła w `lib/`). Patrz `docs/BIT.md`.
-* **Usunięte** wszystkie starsze źródła `get` poza `bit` (nieznane źródło
-  daje `E0003`) i ich wzmianki; wszystkie `Bit.hk` w nowym formacie; workflowy budują tylko
-  `hackerc` i `hack3rc`.
-* **`hack3rc`**: metody `Str` (`contains`, `starts_with`, `ends_with`,
-  `find`, `to_upper`, `to_lower`, `trim`, `repeat`, `is_empty`) i list
-  (`contains`, `insert`, `remove`, `sort`, `reverse`); testy w
-  `hack3rc/tests/` (z GC w trybie stress).
-* **LSP**: `textDocument/formatting` (dokumenty bez błędów składni).
-* **Backend Kotlin**: nieobsługiwane wyrażenie to błąd kompilacji, nie
-  `TODO_unsupported_expr()` w wyniku.
-* Atrapy `std_placeholder`/`core_placeholder` zastąpione stałymi wersji.
-
-Nadal otwarte (nie ruszane w tej rundzie): `Dict`, `Result` i `?`, funkcje
-asocjacyjne, interpolacja i async w `hack3rc`; pozycje (linia/kolumna) w AST;
-`Dict.items()`; `log()` dla struktur/enumów; LSP `rename`; zapis w `toml`;
-`isatty`; kanały JS bez ręcznego `await`; statyczne linkowanie CPythona;
-weryfikacja `crosscompile`/`arc`; podział `codegen.hcs`.
-
-
-## Aktualizacja 0.5 (2026-10-12)
-
-Zrobione i sprawdzone w tej rundzie: patrz `CHANGELOG.md` (wersje 0.5, escapowanie słów Rusta w lekserze,
-patch portu Hacker Lang, nowe workflowy, testy, brakujące dokumenty). Lista rzeczy nadal otwartych jest
-na końcu `CHANGELOG.md` i zastępuje starsze listy "Nadal otwarte" powyżej tam, gdzie są sprzeczne.
-Uwaga: sekcje 1 (brak ParseError / numerów linii) i duplikat wpisu `get <work:...>` są historyczne.
-
-## Aktualizacja 0.6 (2026-10-22)
-
-Zrobione: `use <os:...>` + `target_os()` + `std:os` (`docs/OS.md`), cache budowania i szybsza transpilacja
-(`docs/PERFORMANCE.md`), nowe CI, `tests/` i `hack3rc/tests/`, wersja 0.6 wszędzie. Pełna lista zmian i
-rzeczy nadal otwartych: `CHANGELOG.md` (sekcja „Nadal otwarte” zastępuje sprzeczne starsze listy powyżej).
+# Roadmap HackerScript 0.6 - otwarte punkty
+
+Jedna, aktualna lista tego, co jeszcze nie jest zrobione albo nie jest
+zweryfikowane. To NIE jest dziennik zmian: rzeczy zrobione sa opisane w
+README (sekcja "Historia wersji") i w dokumentach poszczegolnych funkcji.
+Numeracja wersji pozostaje **0.6**.
+
+Oznaczenia: **[brak]** nie zaimplementowane · **[niezweryfikowane]**
+zaimplementowane, ale nie sprawdzone realnym uruchomieniem · **[czesciowe]**
+dziala w ograniczonym zakresie.
+
+## Weryfikacja repozytorium
+
+Automatycznie sprawdza `scripts/verify.sh` (uruchamiany w CI): `hackerc
+check` na wszystkich `.hcs`, budowa i uruchomienie `docs/std-examples/*`
+z porownaniem wyjscia, przyklady `hack3rc` (gdy ustawione `HACK3RC`) i -
+w CI - samohostowanie.
+
+* [brak] Zestaw testow roznicowych `hackerc` vs `hack3rc` i testow bledow
+  (`H0xxx`) - dzis tylko przyklady w `docs/`. Lista programow do
+  odtworzenia: struct/enum/match, listy, Option, Result i `?`, GC pod
+  `HKS_GC_STRESS=1`.
+* [brak] Testy serwera LSP w prawdziwym edytorze (dotychczas tylko surowy
+  JSON-RPC).
+
+## Kompilator `hackerc`
+
+* [czesciowe] Numery linii w AST: diagnostyki typecheckera szukaja
+  fragmentu w tekscie zrodla (`find_line_of`) - przy powtorzonych
+  identyfikatorach wskazuja pierwsze wystapienie. Wlasciwe rozwiazanie to
+  pozycje (linia/kolumna) w kazdym wezle AST.
+* [czesciowe] Funkcje asocjacyjne (`Typ.nazwa(args)` -> `Typ::nazwa`) i wartosci
+  domyslne parametrow funkcji dzialaja w `hackerc` od 0.6 (sprawdzone testem
+  roznicowym z `hack3rc`). Znany konflikt: nazwa `new` jest zajeta przez
+  automatyczny konstruktor struktury (rustc: E0592) - uzyj innej nazwy.
+* [brak] Struktury generyczne z adnotacja typu (`Wrapper<Int>`), typ krotki.
+* [brak] Podzial duzych plikow: `codegen.hcs` (~5500 linii) i `project.hcs`
+  (~2800 linii).
+* [niezweryfikowane] Czas samohostowania po dodaniu cache budowania -
+  zmierzony regres (~20 s -> ~133 s) mogl nie zniknac na wszystkich
+  maszynach.
+* [brak] Warunkowa kompilacja `use <os:...>` per plik (dzis tylko poziom
+  projektu).
+* [brak] RAII/domkniecia - w szczegolnosci automatyczne przywracanie trybu
+  raw terminala po bledzie.
+* [czesciowe] Crate z myslnikiem w nazwie, ktorego biblioteka nazywa sie
+  inaczej (np. `md-5` -> `md5`): `get <crates:...>` emituje `use md_5::*`
+  i nie kompiluje sie. Obejscie: uzywac crate'ow, ktorych nazwa pakietu
+  = nazwa biblioteki (`md5`).
+* [brak] Skladnia zgody na uruchomienie bez piaskownicy w kodzie zrodlowym
+  (`$ polecenie $ allow_unsandboxed`) - dzis tylko zmienna `HKS_SANDBOX`.
+
+## Sandbox `$ ... $`
+
+Patrz `docs/SANDBOX.md`.
+
+* [czesciowe] Kaskada metod izolacji sprawdzona recznie: jako root
+  (izolacja dziala, zapis do `/` zablokowany, widoczny tylko `lo`), jako
+  uzytkownik bez uprawnien (user namespace) oraz przy wymuszonym bledzie
+  `unshare` (tryby `strict` - panic bez wykonania polecenia, `best-effort`
+  i `off` - ostrzezenie i uruchomienie). **Nie sprawdzono** poziomu 3
+  (`bwrap` nie byl zainstalowany) ani maszyny z wylaczonymi user namespaces
+  na poziomie jadra. Brak zautomatyzowanego testu w CI.
+* [czesciowe] Remount RO obejmuje tylko `/` (nie osobne montowania).
+* [brak] Izolacja PID/IPC, limity zasobow, filtr seccomp, Windows/macOS.
+
+## FFI i backendy
+
+* [brak] `fast direct {backend}`: statyczne linkowanie CPythona/PyPy.
+  Dzis wylacznie wersja dynamiczna.
+* [czesciowe] `fast direct`: test dymny (`scripts/verify_fast_direct.sh`) przeszedl dla
+  17 z 20 backendow. Niesprawdzone: `pypy` (brak binarki), `cupy` (GPU), `vaex`
+  (nie udalo sie zainstalowac). Test dymny sprawdza tylko, ze backend sie uruchamia.
+* [niezweryfikowane] Moduly zewnetrzne Go (`get <go:...::wersja>`): w srodowisku
+  pracy nie bylo `go` ani dostepu do `proxy.golang.org`, wiec nie dalo sie ich uruchomic.
+* [czesciowe] Backend JavaScript: `native {JavaScript}` i automatyczny `await`
+  na `send`/`recv` (w kontekscie `async`) dzialaja (przyklady pod Node). Brak:
+  `native` jako wyrazenie (tylko instrukcja), inne silniki `native`.
+* [czesciowe] Tryb `website`: routing po `#hash` (`route`, `route_param`,
+  `navigate`...) dziala w jsdom. Brak: routingu po zwyklych sciezkach
+  (history API), SSR, zagniezdzonych tras; nie sprawdzono w prawdziwej
+  przegladarce.
+* [czesciowe] Cel `wasm32` dla playgroundu: buduje sie i `check_source` dziala
+  w Node (`scripts/verify_wasm.sh`) - po naprawie `tokio` (`rt-multi-thread`
+  nie istnieje na wasm32) i runtime async. Strona webowa playgroundu nie jest
+  czescia repozytorium; nie sprawdzono w przegladarce.
+* [czesciowe] Backend Kotlin (`use <lang:kotlin>`): zakres opisany w
+  `docs/KOTLIN.md`; przyklady kompiluja sie `kotlinc` i uruchamiaja. Brak
+  `enum`, `impl`, `?`/`Result`, `native`. Kanaly maja typ `HksChan<Any?>`.
+* [czesciowe] Inline `native {C++}`: `hackerc build` sprawdza teraz z gory
+  obecnosc kompilatora C++ (`CXX`, `c++`, `g++`, `clang++`, `cl`;
+  pominiecie: `HKS_SKIP_CXX_CHECK=1`). Sprawdzone: z kompilatorem, bez
+  kompilatora (blad, kod 1), z `HKS_SKIP_CXX_CHECK=1` i z nieistniejacym
+  `CXX`. Pelny przebieg z `bit build` nie byl sprawdzany.
+* [czesciowe] `hks_get_jvm()` jest emitowane raz na plik `.hcs`; bloki
+  `native {java}` w roznych plikach tego samego projektu moga probowac
+  utworzyc druga JVM.
+
+## Serwer LSP (`hackerc lsp`)
+
+Patrz `docs/LSP.md`.
+
+* [czesciowe] `hover`, `definition`, `rename`, `references` rozpoznaja zakresy
+  (0.6): zmienna lokalna/parametr tylko w swojej funkcji, metoda wg typu
+  odbiorcy (`self`, `let v = Typ(...)`, `let v: Typ`, parametr `v: Typ`) -
+  ale nadal na skanie tekstu, NIE na AST (AST nie ma pozycji linia/kolumna;
+  dodanie ich to zmiana w calym parserze). Typ odbiorcy z wywolania funkcji
+  lub pola nie jest wnioskowany (wtedy dzialanie jak dawniej: wszystkie
+  metody o tej nazwie). `completion` bez zmian.
+* [czesciowe] `rename` i `references` obejmuja otwarty dokument, nie caly
+  workspace.
+* [czesciowe] Formatowanie dziala tylko dla dokumentow bez bledow skladni.
+* [niezweryfikowane] Brak testow w prawdziwym edytorze.
+
+## `hack3rc` (kompilator AOT)
+
+Patrz `docs/HACK3RC.md`. Obslugiwane: `Result<T, E>` i `?`, `Option`,
+struct/enum/impl, listy. **Nieobslugiwane** (czytelny blad `H0xxx`):
+
+* [brak] `Dict` (w tym `for k, v in d.items()`, kod H0151) - wymaga tablicy
+  mieszajacej w runtime C, typow `Dict<K, V>` w loweringu i integracji z GC
+* [brak] interpolacja napisow
+* [brak] `async`/kanaly, `native`/`direct`, `get`/`include`
+* [brak] wartosci domyslne parametrow METOD (dla funkcji dziala od 0.6)
+* [brak] `for` po czymkolwiek poza lista
+* [brak] `log()` dla struct/enum
+* [czesciowe] `List.sort()` dla `List<Int>`, `List<Float>`, `List<Str>` (0.6);
+  inne typy elementow -> H0475
+* [czesciowe] Rozbieznosc z `hackerc`: `hack3rc` przyjmuje metody `Str`
+  (`to_upper`, `to_lower`, `contains`...), dla ktorych `hackerc` generuje
+  Rust, ktory sie nie kompiluje (sprawdzone dla `to_upper()` i
+  `contains("...")`). Zalozenie "program przyjety przez hack3rc dziala tak
+  samo pod hackerc" nie zachodzi dla tych metod - w przenosnym kodzie
+  uzywaj funkcji z `std:string`.
+* [czesciowe] GC jednowatkowy; zbyt gleboka rekurencja konczy sie SIGSEGV
+* [brak] inline'owanie dostepu do list i szybsza sciezka alokacji
+  (glowne zrodlo roznicy wydajnosci wzgledem Rusta)
+* [czesciowe] Cele: obiekty Mach-O (macOS) i COFF (Windows) sa emitowane
+  i sprawdzany jest tylko naglowek - **nie sa linkowane ani uruchamiane**.
+  Runtime C zaklada POSIX/libc.
+* [czesciowe] Przyklady uruchamiane pod QEMU (aarch64, riscv64, s390x)
+  byly sprawdzone na wczesniejszej wersji zestawu, nie w tym repozytorium.
+
+## Biblioteka standardowa
+
+* [czesciowe] `std:http`: brak klienta strumieniujacego (cale cialo naraz).
+* [czesciowe] `std:term`: brak odczytu rozmiaru terminala i trybu raw.
+* [czesciowe] `std:cybersecurity`: dostepne skroty (SHA-1/2/3, BLAKE2, MD5,
+  CRC32), HMAC, PBKDF2, OsRng, base64, porownania w stalym czasie.
+  Brak: szyfrow (AES/ChaCha), podpisow (Ed25519 poza `hlib`), KDF
+  pamieciochlonnych (argon2/scrypt), HKDF.
+* [czesciowe] `std:process`: uchwyty z odczytem linii na zywo i zapisem
+  do stdin (zrobione). Brak: odczytu surowych bajtow (tylko linie), grup
+  procesow, limitow czasu (`timeout`) wbudowanych w `run_*`.
+* [czesciowe] `std:hk`: edycja z zachowaniem formatu dla kluczy pierwszego
+  poziomu (`hk_set_value`, `hk_remove_key`, `hk_add_dependency`). `bit`
+  nadal edytuje `Bit.hk` wlasnym kodem tekstowym - przejscie na `std:hk`
+  zalezy od `bit`, ktory jest poza tym repozytorium.
+
+## Menedzer pakietow `bit`
+
+Osobny projekt (poza tym repozytorium). Po stronie HackerScript zostaja:
+flagi `hackerc build` (`-o`, `--crate-name`, `--library`, `--bin-name`,
+`--version-map`, `--libs-root`, `--bootstrap-root`, `--bit-root`),
+rozwiazywanie `get <bit:...>` (`BIT_LIBS`, `cache/libs/<nazwa>/`,
+`~/.hackeros/libs/<nazwa>/current/`) i format manifestu `Bit.hk`.
