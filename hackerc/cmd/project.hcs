@@ -254,7 +254,7 @@ fun find_bootstrap_root(start: Str) -> Option<Str> [
 ]
 
 !!! Rozwiazywanie bibliotek menedzera pakietow `bit` dla
-!!! `get <bit:nazwa[::plik]>` (patrz docs/BIT.md). Uklad katalogow jest
+!!! `get <bit:nazwa[::plik]>`. Uklad katalogow jest
 !!! TEN SAM, ktory tworzy `bit` (patrz jego README, sekcja
 !!! `[directories]`):
 !!!
@@ -500,8 +500,7 @@ fun find_hlib_file_path(name: Str, version: Option<Str>, base_dir: Str, bit_root
 struct QueueItem [
     stmt: Stmt,
     base_dir: Str,
-    !! DODANE (ta runda, patrz docs/MULTI_VERSION.md - nie, patrz
-    !! docs/WORK_INCLUDE_FIX.md) - naprawa duplikacji modulow przy
+    !! DODANE (naprawa duplikacji modulow) - naprawa duplikacji modulow przy
     !! `include <work:member::plik>`, gdy TEN plik SAM ma dalsze
     !! `include <cos>` (bez prefiksu "work:") - patrz uzasadnienie przy
     !! `collect_module_imports`/obsludze `IncludeStmt` w `resolve()`
@@ -701,7 +700,7 @@ struct DiscoveredFile [
     !! work_member` - propagowane az do kodegen, zeby `gen_include`
     !! (dla `IncludeStmt` WEWNATRZ tego pliku) wiedzial, czy przepisac
     !! goly `include <cos>` na `include <work:member::cos>` (naprawa
-    !! duplikacji modulow, patrz SESSION_LOG.md).
+    !! duplikacji modulow).
     work_member: Option<Str>
 ]
 
@@ -1038,9 +1037,7 @@ impl Discovery [
                     ]
                 ]
                 IncludeStmt(path) -> [
-                    !!! NAPRAWA (ta runda, patrz docs/MULTI_VERSION.md -
-                    !!! nie, to osobna sprawa - patrz SESSION_LOG.md,
-                    !!! "problem z work:/nazewnictwem modulow") -
+                    !!! NAPRAWA (naprawa nazewnictwa modulow work:) -
                     !!! `effective_path`: gdy TEN `IncludeStmt` pochodzi
                     !!! z pliku zaladowanego jako `work:member` (patrz
                     !!! `item.work_member` wyzej w petli), a `path` NIE
@@ -1129,8 +1126,7 @@ impl Discovery [
 !!! `_hks_inc_ast_nodes`, BEZ prefiksu member) dostaje DWIE ROZNE nazwy
 !!! modulu Rust - dwie NIEZALEZNE kopie tych samych `struct`/`enum`,
 !!! `error[E0308]: mismatched types` w Rust (odkryte w tej sesji przez
-!!! `cargo build` na `playground/cmd/main.hcs --wasm`, patrz
-!!! SESSION_LOG.md). Naprawa: `work_member` propagowany przez `queue`,
+!!! `cargo build` na `playground/cmd/main.hcs --wasm`).  Naprawa: `work_member` propagowany przez `queue`,
 !!! uzywany w `resolve()` przy `IncludeStmt` (patrz tam) do przepisania
 !!! "goly `include <cos>`" na "`include <work:member::cos>`" PRZED
 !!! policzeniem `flat_include_module_name`/`resolve_include_path` -
@@ -1442,7 +1438,14 @@ fun cargo_toml_text(crate_name: Str, needs_pyo3: Bool, needs_native_js: Bool, ne
         if deps_names[i] == "ureq" [
             deps_lines = deps_lines + deps_names[i] + " = { version = \"" + deps_versions[i] + "\", features = [\"native-certs\"] }\n"
         ] elif deps_names[i] == "tokio" [
-            deps_lines = deps_lines + "tokio = { version = \"" + deps_versions[i] + "\", features = [\"rt-multi-thread\", \"sync\", \"time\"] }\n"
+            !!! 0.6: dla crate'ow wasm (`needs_wasm_bindgen`) tokio dostaje ("rt", "sync", "time"),
+            !!! bo `rt-multi-thread` nie jest wspierane na wasm32 (compile_error! w tokio);
+            !!! poza wasm - wielowatkowy runtime jak dotad.
+            let tokio_rt = "rt-multi-thread"
+            if needs_wasm_bindgen [
+                tokio_rt = "rt"
+            ]
+            deps_lines = deps_lines + "tokio = { version = \"" + deps_versions[i] + "\", features = [\"" + tokio_rt + "\", \"sync\", \"time\"] }\n"
         ] elif deps_names[i] == "ed25519-dalek" [
             deps_lines = deps_lines + deps_names[i] + " = { version = \"" + deps_versions[i] + "\", features = [\"rand_core\"] }\n"
         ] elif deps_names[i] == "serde" or deps_names[i] == "clap" [
@@ -1895,8 +1898,7 @@ fun load_cached_result(cache_file: Str, fp: Str) -> Option<ProjectResult> [
 !!! ROZBUDOWA (ta runda) - `bin_name`: `none()` = zachowanie
 !!! dotychczasowe (`src/main.rs`/`src/lib.rs` + PELNY, nadpisujacy
 !!! zapis `Cargo.toml`). `some(nazwa)` = multi-binarki (odpowiednik
-!!! Cargo `src/bin/*.rs`, patrz `docs/BIT.md`, "Plan: multi-binarki
-!!! na czlonka") - PISZE do `src/bin/<nazwa>.rs` i DOPISUJE (nie
+!!! Cargo `src/bin/*.rs`) - PISZE do `src/bin/<nazwa>.rs` i DOPISUJE (nie
 !!! nadpisuje) sekcje `[[bin]]` do JUZ ISTNIEJACEGO `Cargo.toml` -
 !!! wywolujacy (`bit build`/`cmd_build` w main.hcs) MUSI wiec
 !!! najpierw zbudowac glowny entry (`cmd/main.hcs`, `bin_name =
@@ -2004,7 +2006,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     let needs_native_kotlin = false
     let native_kotlin_sources: Dict<Str, Str> = dict()
     let native_kotlin_names: List<Str> = []
-    !! DODANE (Tura 10, patrz docs/GO.md) - `native {go}`/`get <go:...>`.
+    !! DODANE (patrz docs/GO.md) - `native {go}`/`get <go:...>`.
     let needs_native_go = false
     !! ROZBUDOWA (async/coroutines) - agregacja `TranspileResult::needs_async_rt`.
     let needs_async_rt = false
@@ -2149,7 +2151,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
             ]
             nksi = nksi + 1
         ]
-        !! DODANE (Tura 10, patrz docs/GO.md) - agregacja `native {go}`
+        !! DODANE (patrz docs/GO.md) - agregacja `native {go}`
         !! i `get <go:...>` z kazdego pliku projektu.
         if r.needs_native_go [
             needs_native_go = true
@@ -2313,7 +2315,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
             entry_rust = r.rust_code
         ] else [
             let mod_out = src_dir + "/" + df.flat_name + ".rs"
-            !! NAPRAWA (ta runda, patrz SESSION_LOG.md Tura 8/9) - modul
+            !! NAPRAWA (ta runda) - modul
             !! NIEBEDACY wejsciem crate'a (kazdy plik inny niz `main`)
             !! moze miec wlasne demo `fun main()` (np. ast_nodes.hcs,
             !! transpiler.hcs - "ten plik jest samodzielny, testowany
@@ -2615,7 +2617,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
         nki = nki + 1
     ]
 
-    !! DODANE (Tura 10, patrz docs/GO.md) - `native {go}`: JEDEN plik
+    !! DODANE (patrz docs/GO.md) - `native {go}`: JEDEN plik
     !! `out_dir/go/hks_go.go` (+ `go.mod`) ze WSZYSTKIMI blokami
     !! projektu jako funkcjami `//export hks_native_go_N`. `bit
     !! build` kompiluje go `go build -buildmode=c-archive` (patrz linie
@@ -2792,4 +2794,45 @@ fun main() [
     log("flat_module_name:", flat)
     let path = module_file_path("/repo/libs", "core", "memory", some("arena"))
     log("module_file_path:", path)
+]
+
+!!! 0.6 - sprawdzenie Z GORY, czy w systemie jest kompilator C++ dla inline
+!!! `native {C++} [ ... ]` (blok jest kompilowany build-time przez crate `cc`).
+!!! Bez tego brak kompilatora objawial sie dopiero surowym bledem `cc`/`rustc`
+!!! w srodku `cargo build`. Kolejnosc: zmienna `CXX` (pierwszy token, bo moze
+!!! zawierac flagi, np. `g++ -m32`), potem `c++`, `g++`, `clang++`, a na
+!!! Windows `cl`. Zwraca nazwe znalezionego kompilatora albo `none()`.
+fun find_cpp_compiler() -> Option<Str> [
+    let candidates: List<Str> = []
+    match env_var("CXX") [
+        Some(v) -> [
+            let parts = str_split(str_trim(v), " ")
+            if parts.len() > 0 and parts[0].len() > 0 [
+                candidates.push(parts[0].clone())
+            ]
+        ]
+        None -> [
+        ]
+    ]
+    candidates.push("c++")
+    candidates.push("g++")
+    candidates.push("clang++")
+    candidates.push("cl")
+    let i = 0
+    while i < candidates.len() [
+        let name = candidates[i].clone()
+        let probe: List<Str> = []
+        if name != "cl" [
+            probe.push("--version")
+        ]
+        match run_command(name.clone(), probe) [
+            Ok(_out) -> [
+                end some(name)
+            ]
+            Err(_e) -> [
+            ]
+        ]
+        i = i + 1
+    ]
+    end none()
 ]
