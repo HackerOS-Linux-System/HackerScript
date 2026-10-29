@@ -52,3 +52,55 @@ Program testowy z `native {kotlin} [ println(...); listOf(1,2,3,4,5).sum() ]`:
   transpilacja i `cargo check`, NIE uruchomieniem z JVM. Zeby drugi kandydat
   mial efekt, `bit build` musi kopiowac jary do `java_classes/` (kod `bit`,
   poza tym repozytorium).
+
+# Backend `use <lang:kotlin>` (`hackerc kotlin`) — zakres
+
+To jest **osobna rzecz** niż `native {kotlin}` wyżej: cały program HackerScript jest
+tłumaczony na `Main.kt` (zamiast na Rust). Backend jest **eksperymentalny** i obejmuje
+podzbiór języka. Poniższa lista pochodzi z kodu `kotlin_backend.hcs` i z kompilacji
+wyniku prawdziwym `kotlinc` (konstrukcje oznaczone ✔ zostały przetłumaczone, skompilowane
+i uruchomione).
+
+## Obsługiwane
+
+| Konstrukcja | Wynik w Kotlinie | |
+|---|---|---|
+| `fun` (także `async fun`, bez `suspend`) | `fun` | ✔ |
+| `let` / `const` z wartością początkową | `var` / `val` | ✔ |
+| przypisania, `+ - * / %`, porównania, `and`/`or`/`not` | operatory Kotlina | ✔ |
+| `if` / `elif` / `else`, `while`, `for x in lista` | to samo | ✔ |
+| `return`/`end`, `break`, `continue` | to samo | ✔ |
+| `struct` | `data class` (pola `var`) | ✔ |
+| `List<T>`: literał, `.push`, `.len()`, `lista[i]` | `MutableList`, `.add`, `hksLen`, `[i.toInt()]` | ✔ |
+| `Option<T>`: `some`/`none`, `match` z `Some(x)`/`None` | typ nullable `T?` | ✔ |
+| `Dict<K, V>`: `dict()`, `.insert`, `.fetch`, `.contains`, `.len()` (0.6) | `MutableMap` | ✔ |
+| `log(a, b, ...)`, `elog(...)` | `println(...)` / `System.err.println(...)` (wiele argumentów łączone spacją — 0.6) | ✔ |
+| `x as Int/Float/Str` | `.toLong()` / `.toDouble()` / `.toString()` | ✔ |
+| `chan(n)`, `.send`, `.recv`, `spawn`, `await` | `HksChan<Any?>`, `CompletableFuture` | częściowo (patrz niżej) |
+
+## Odrzucane z czytelnym błędem (`lang:kotlin: ... nieobsługiwane`)
+
+`enum` · `impl` (metody) · operator `?` i `Result` · `let x` bez wartości początkowej ·
+`match` na wariantach innych niż `Some`/`None` · `native` / `direct` · `manual` ·
+`region [ ... ]` (FFI) · `get <...>` (importy).
+
+Program zawierający konstrukcję spoza listy **nie generuje częściowego wyniku** —
+`hackerc kotlin` kończy się błędem.
+
+## Różnice względem backendu Rust (świadome / znane)
+
+* `Int` → `Long`, `Float` → `Double`. `Float` wypisywany przez `log` ma zawsze kropkę
+  (`3.0`), Rust wypisuje `3`.
+* `.len()` na napisie to `String.length` (jednostki UTF-16); w Ruście — bajty UTF-8.
+  Różnica tylko dla znaków spoza ASCII.
+* Dzielenie przez zero rzuca `ArithmeticException` (w Ruście — panic z innym komunikatem).
+* Kanały: typ elementu to zawsze `Any?` (Kotlin nie wnioskuje `HksChan<T>` z `chan(1)`,
+  a `HksChan<Long>` i `HksChan<Any>` są niezgodne), więc odebraną wartość trzeba w
+  Kotlinie rzutować. Kompilację programu z kanałami sprawdzono wyłącznie dla przykładu
+  bez użycia odebranej wartości.
+* Nie ma garbage-collectora ani `Drop` z Rusta — to zwykły GC JVM.
+
+## Weryfikacja
+
+`scripts/verify.sh` buduje i uruchamia `docs/kotlin-examples/*.hcs` (gdy w systemie jest
+`kotlinc` i `java`) i porównuje wyjście z `*.out`.
