@@ -164,6 +164,15 @@ fun has_value_return(stmts: List<Stmt>) -> Bool [
 
 !!! Patrz uwaga projektowa na gorze pliku co do tego, DLACZEGO to NIE
 !!! opakowuje `TypeEnv` jako pole, tylko trzyma `sigs`/`vars` osobno.
+!!! 0.6: pola `start_line`/`cursor`/`declared_lines`/`call_seen` to pozycje
+!!! swiadome zakresu (patrz `find_let_from`/`nth_call_line`): `start_line` =
+!!! 1-based linia `fun nazwa(` tej funkcji (0 = nieznana), `cursor` = 0-based
+!!! indeks linii, od ktorej szukamy nastepnego `let`, `declared_lines` =
+!!! rownolegle do `declared_names` (1-based linia `let`), `call_seen` = ile
+!!! wywolan danej nazwy juz odwiedzono w tej funkcji. `pos_ok`/`pos_lines`/`pos_cols`/
+!!! `stmt_idx`/`declared_cols`: dokladne pozycje z parsera (`Program.lines/cols`),
+!!! uzywane tylko gdy `positions_consistent`; `stmt_idx` = numer biezacej instrukcji
+!!! w kolejnosci pre-order.
 struct FnChecker [
     sigs: Signatures,
     diags: List<Diagnostic>,
@@ -175,10 +184,55 @@ struct FnChecker [
     imported_names: Dict<Str, Bool>,
     extra_variant_names: List<Str>,
     !! DODANE - patrz `Checker.lines`.
-    lines: List<Str>
+    lines: List<Str>,
+    start_line: Int,
+    cursor: Int,
+    declared_lines: List<Int>,
+    call_seen: Dict<Str, Int>,
+    pos_ok: Bool,
+    pos_lines: List<Int>,
+    pos_cols: List<Int>,
+    stmt_idx: Int,
+    declared_cols: List<Int>
 ]
 
 impl FnChecker [
+    !!! 0.6: linia naglowka biezacej funkcji (dla E0011 itp.).
+    fun fn_header_line(self, fname: Str) -> Int [
+        if self.start_line > 0 [
+            end self.start_line
+        ]
+        end find_line_of(self.lines.clone(), "fun " + fname)
+    ]
+
+    !!! 0.6: linia (1-based) K-tego wywolania `name(` w tej funkcji, gdzie K =
+    !!! ile razy `check_call` juz widzial te nazwe. Odwiedzanie AST idzie w
+    !!! kolejnosci zrodla, wiec K-te odwiedzenie = K-te wystapienie w tekscie.
+    fun next_call_index(self, name: Str) -> Int [
+        let k = 0
+        match self.call_seen.fetch(name.clone()) [
+            Some(c) -> [
+                k = c
+            ]
+            None -> [
+            ]
+        ]
+        self.call_seen.insert(name.clone(), k + 1)
+        end k
+    ]
+
+    fun call_line(self, name: Str, k: Int) -> Int [
+        let from = 0
+        if self.start_line > 0 [
+            from = self.start_line - 1
+        ]
+        let found = nth_call_line(self.lines.clone(), name.clone(), from, k)
+        if found == 0 [
+            end find_call_line_of(self.lines.clone(), name.clone())
+        ]
+        end found
+    ]
+
     fun mark_used(self, name: Str) [
         self.used.insert(name, true)
     ]
@@ -198,6 +252,7 @@ impl FnChecker [
     !!! JUZ wyciagnieta nazwa identyfikatora calleego (patrz
     !!! `expr_as_ident_name` w typeinfer.hcs).
     fun check_call(self, name: Str, arg_count: Int) [
+        let call_k = self.next_call_index(name.clone())
         if is_builtin_func(name) or self.sigs.structs.contains(name) or self.sigs.variant_owner.contains(name) or self.imported_names.contains(name) [
             end
         ]
@@ -226,11 +281,13 @@ impl FnChecker [
                     ]
                 ]
                 if arg_count > params.len() or arg_count < min_args [
-                    self.diags.push(Diagnostic("error", "E0001", "'" + name + "' oczekuje " + (min_args as Str) + (if_range_suffix(min_args, params.len())) + " argument(ow), otrzymano " + (arg_count as Str), find_call_line_of(self.lines.clone(), name.clone()), 0, name.len(), ""))
+                    let cl = self.call_line(name.clone(), call_k)
+                    self.diags.push(Diagnostic("error", "E0001", "'" + name + "' oczekuje " + (min_args as Str) + (if_range_suffix(min_args, params.len())) + " argument(ow), otrzymano " + (arg_count as Str), cl, 0, name.len(), ""))
                 ]
             ]
             None -> [
-                self.diags.push(Diagnostic("warning", "W0002", "wywolanie nieznanej funkcji '" + name + "' (jesli pochodzi z 'get <...>', to ograniczenie bootstrapu - patrz docs/ROADMAP.md)", find_call_line_of(self.lines.clone(), name.clone()), 0, name.len(), ""))
+                let cl2 = self.call_line(name.clone(), call_k)
+                self.diags.push(Diagnostic("warning", "W0002", "wywolanie nieznanej funkcji '" + name + "' (jesli pochodzi z 'get <...>', to ograniczenie bootstrapu - patrz docs/ROADMAP.md)", cl2, 0, name.len(), ""))
             ]
         ]
     ]
@@ -298,7 +355,8 @@ impl FnChecker [
                 ]
                 if not ok [
                     let fname = self.fn_name.clone()
-                    self.diags.push(Diagnostic("error", "E0011", "'?' uzyte w '" + fname + "', ktora nie zwraca Result<T,E> ani Option<T> - '?' propaguje Err/None do OTACZAJACEJ funkcji, wiec jej typ zwracany musi na to pozwalac", find_line_of(self.lines.clone(), "fun " + fname.clone()), 0, fname.len(), ""))
+                    let hl = self.fn_header_line(fname.clone())
+                    self.diags.push(Diagnostic("error", "E0011", "'?' uzyte w '" + fname + "', ktora nie zwraca Result<T,E> ani Option<T> - '?' propaguje Err/None do OTACZAJACEJ funkcji, wiec jej typ zwracany musi na to pozwalac", hl, 0, fname.len(), ""))
                 ]
             ]
             _ -> [
@@ -319,8 +377,24 @@ impl FnChecker [
     !!! `declared_names`), sprawdza E0005, rekuruje w bloki zagniezdzone.
     fun visit_stmt(self, s: Stmt) [
         let s2 = s.clone()
+        let my_idx = self.stmt_idx
+        self.stmt_idx = self.stmt_idx + 1
         match s2 [
             LetStmt(name, type_ref, value, is_const) -> [
+                let let_line = 0
+                let let_col = 0
+                if self.pos_ok and my_idx < self.pos_lines.len() [
+                    let_line = self.pos_lines[my_idx]
+                    if let_line > 0 and let_line <= self.lines.len() [
+                        let_col = find_word_col(self.lines[let_line - 1].clone(), name.clone(), self.pos_cols[my_idx])
+                        let_col = let_col + 1
+                    ]
+                ] else [
+                    let_line = find_let_from(self.lines.clone(), name.clone(), self.cursor)
+                ]
+                if let_line > 0 [
+                    self.cursor = let_line
+                ]
                 let inferred: Option<TypeRef> = none()
                 match value [
                     Some(v) -> [
@@ -334,8 +408,12 @@ impl FnChecker [
                     Some(tref) -> [
                         match inferred [
                             Some(inf) -> [
-                                if not types_equal(some(tref.clone()), some(inf.clone())) [
-                                    self.diags.push(Diagnostic("error", "E0005", "zmienna '" + name + "' zadeklarowana jako " + tref.name + ", ale przypisana wartosc ma wywnioskowany typ " + inf.name, find_line_of(self.lines.clone(), "let " + name.clone()), 0, name.len(), ""))
+                                !! 0.6 (generyki): `let w: Wrapper<Int> = Wrapper(5)` - konstruktor
+                                !! generycznego struct/enum nie niesie argumentu typu w wywnioskowanym
+                                !! typie (`Wrapper`), wiec sama zgodnosc NAZW wystarcza.
+                                let generic_arity_only = tref.name == inf.name and user_type_param_count(self.sigs, tref.name.clone()) > 0
+                                if not generic_arity_only and not types_equal(some(tref.clone()), some(inf.clone())) [
+                                    self.diags.push(Diagnostic("error", "E0005", "zmienna '" + name + "' zadeklarowana jako " + tref.name + ", ale przypisana wartosc ma wywnioskowany typ " + inf.name, let_line, let_col, name.len(), ""))
                                 ]
                             ]
                             None -> [
@@ -348,6 +426,8 @@ impl FnChecker [
                     ]
                 ]
                 self.declared_names.push(name)
+                self.declared_lines.push(let_line)
+                self.declared_cols.push(let_col)
             ]
             AssignStmt(target, op, value) -> [
                 self.visit_expr(value)
@@ -421,6 +501,9 @@ impl FnChecker [
                 ]
             ]
             _ -> [
+                !! zagniezdzone instrukcje, do ktorych nie schodzimy (np. `fun` w
+                !! `fun`), nadal zajmuja sloty pozycji - przeskocz je.
+                self.stmt_idx = self.stmt_idx + stmt_subtree_size(s2.clone()) - 1
             ]
         ]
     ]
@@ -483,12 +566,280 @@ fun find_call_line_of(lines: List<Str>, name: Str) -> Int [
     end find_line_of(lines, name)
 ]
 
+!!! -- 0.6: pozycje z parsera (Program.lines/cols/tags) -------------------
+!!! `stmt_children` = zagniezdzone instrukcje w KOLEJNOSCI ZRODLA, w tej samej
+!!! kolejnosci, w jakiej parser rezerwuje sloty pozycji (pre-order).
+fun stmt_children(s: Stmt) -> List<Stmt> [
+    let out: List<Stmt> = []
+    match s [
+        FunDecl(_n, _p, _r, body, _pub, _tp, _as) -> [
+            out = body.clone()
+        ]
+        IfStmt(_c, body, elifs, else_body) -> [
+            let a = 0
+            while a < body.len() [
+                out.push(body[a].clone())
+                a = a + 1
+            ]
+            let e = 0
+            while e < elifs.len() [
+                let arm = elifs[e].clone()
+                let b = 0
+                while b < arm.body.len() [
+                    out.push(arm.body[b].clone())
+                    b = b + 1
+                ]
+                e = e + 1
+            ]
+            match else_body [
+                Some(eb) -> [
+                    let c = 0
+                    while c < eb.len() [
+                        out.push(eb[c].clone())
+                        c = c + 1
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+        ]
+        WhileStmt(_c, body) -> [
+            out = body.clone()
+        ]
+        ForStmt(_v, _i, body) -> [
+            out = body.clone()
+        ]
+        ManualBlock(body) -> [
+            out = body.clone()
+        ]
+        MatchStmt(_subj, arms) -> [
+            let m = 0
+            while m < arms.len() [
+                let arm = arms[m].clone()
+                let b = 0
+                while b < arm.body.len() [
+                    out.push(arm.body[b].clone())
+                    b = b + 1
+                ]
+                m = m + 1
+            ]
+        ]
+        ImplDecl(_n, body, _d) -> [
+            out = body.clone()
+        ]
+        _ -> [
+        ]
+    ]
+    end out
+]
+
+!!! Liczba instrukcji w poddrzewie (wlacznie z `s`).
+fun stmt_subtree_size(s: Stmt) -> Int [
+    let total = 1
+    let kids = stmt_children(s)
+    let i = 0
+    while i < kids.len() [
+        total = total + stmt_subtree_size(kids[i].clone())
+        i = i + 1
+    ]
+    end total
+]
+
+!!! Tagi rodzaju wszystkich instrukcji w kolejnosci pre-order.
+fun collect_stmt_tags(stmts: List<Stmt>) -> List<Str> [
+    let out: List<Str> = []
+    let i = 0
+    while i < stmts.len() [
+        out.push(stmt_tag(stmts[i].clone()))
+        let sub = collect_stmt_tags(stmt_children(stmts[i].clone()))
+        let j = 0
+        while j < sub.len() [
+            out.push(sub[j].clone())
+            j = j + 1
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+!!! Czy tabela pozycji programu jest zgodna z drzewem: ta sama dlugosc i
+!!! identyczna sekwencja tagow. Dopiero wtedy numer instrukcji w kolejnosci
+!!! pre-order jest wiarygodnym indeksem do `lines`/`cols`.
+fun positions_consistent(prog: Program) -> Bool [
+    if prog.lines.len() == 0 [
+        end false
+    ]
+    if prog.lines.len() != prog.cols.len() or prog.lines.len() != prog.tags.len() [
+        end false
+    ]
+    let want = collect_stmt_tags(prog.body.clone())
+    if want.len() != prog.tags.len() [
+        end false
+    ]
+    let i = 0
+    while i < want.len() [
+        if want[i] != prog.tags[i] [
+            end false
+        ]
+        i = i + 1
+    ]
+    end true
+]
+
+!!! 0-based kolumna pierwszego WYSTAPIENIA slowa `word` (z granicami slowa) w
+!!! `line`, od kolumny `from`; 0 gdy brak. (Wynik trafia do Diagnostic jako kolumna 1-based: +1.)
+fun find_word_col(line: Str, word: Str, from: Int) -> Int [
+    let wn = word.len()
+    let n = line.len()
+    let i = from
+    while i + wn <= n [
+        if line.slice(i, i + wn) == word [
+            let left_ok = i == 0 or not tc_is_ident_char(line.char_at(i - 1))
+            let right_ok = i + wn == n or not tc_is_ident_char(line.char_at(i + wn))
+            if left_ok and right_ok [
+                end i
+            ]
+        ]
+        i = i + 1
+    ]
+    end 0
+]
+
+!!! -- 0.6: pozycje diagnostyk swiadome zakresu ---------------------------
+!!! Pelne pozycje (linia/kolumna) w AST to nadal otwarty punkt (patrz
+!!! docs/ROADMAP.md). Do tego czasu typechecker szuka tekstu ZA kursorem:
+!!! odwiedzanie AST idzie w kolejnosci zrodla, wiec kolejne `let`/wywolania
+!!! trafiaja w kolejne wystapienia, a nie za kazdym razem w pierwsze z pliku.
+
+fun tc_is_ident_char(c: Str) -> Bool [
+    end (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+]
+
+!!! Czy linia (po obcieciu) jest komentarzem `!!`/`!!!`.
+fun tc_is_comment_line(line: Str) -> Bool [
+    let t = str_trim(line)
+    end str_starts_with(t, "!!")
+]
+
+!!! Ile razy `pat` wystepuje w `line` jako CALE slowo z lewej strony (znak
+!!! przed nie jest znakiem identyfikatora ani `.`), z pominieciem deklaracji
+!!! `fun pat` (poprzedzonych slowem `fun `).
+fun tc_count_calls_in_line(line: Str, name: Str) -> Int [
+    let pat = name + "("
+    let pn = pat.len()
+    let n = line.len()
+    if pn > n [
+        end 0
+    ]
+    let count = 0
+    let i = 0
+    let last = n - pn
+    while i <= last [
+        if line.slice(i, i + pn) == pat [
+            let ok = true
+            if i > 0 [
+                let prev = line.char_at(i - 1)
+                if tc_is_ident_char(prev) or prev == "." [
+                    ok = false
+                ]
+            ]
+            if ok and i >= 4 [
+                if line.slice(i - 4, i) == "fun " [
+                    ok = false
+                ]
+            ]
+            if ok [
+                count = count + 1
+            ]
+        ]
+        i = i + 1
+    ]
+    end count
+]
+
+!!! 1-based linia K-tego (od 0) wywolania `name(` w liniach od `from` (0-based).
+!!! 0 gdy nie znaleziono.
+fun nth_call_line(lines: List<Str>, name: Str, from: Int, k: Int) -> Int [
+    let pat = name + "("
+    let seen = 0
+    let i = from
+    while i < lines.len() [
+        let ln = lines[i].clone()
+        if str_contains(ln.clone(), pat.clone()) and not tc_is_comment_line(ln.clone()) [
+            let c = tc_count_calls_in_line(ln.clone(), name.clone())
+            if seen + c > k [
+                end i + 1
+            ]
+            seen = seen + c
+        ]
+        i = i + 1
+    ]
+    end 0
+]
+
+!!! 1-based linia pierwszego `let NAZWA`/`const NAZWA` od linii `from` (0-based),
+!!! z granica slowa (`let i` nie pasuje do `let items`). 0 gdy brak.
+fun find_let_from(lines: List<Str>, name: Str, from: Int) -> Int [
+    let a = "let " + name
+    let b = "const " + name
+    let i = from
+    while i < lines.len() [
+        let ln = lines[i].clone()
+        if not tc_is_comment_line(ln.clone()) [
+            if tc_has_word_decl(ln.clone(), a.clone()) or tc_has_word_decl(ln.clone(), b.clone()) [
+                end i + 1
+            ]
+        ]
+        i = i + 1
+    ]
+    end 0
+]
+
+!!! Czy `line` zawiera `decl` (np. "let x") zakonczone granica slowa.
+fun tc_has_word_decl(line: Str, decl: Str) -> Bool [
+    let dn = decl.len()
+    let n = line.len()
+    let i = 0
+    while i + dn <= n [
+        if line.slice(i, i + dn) == decl [
+            if i + dn == n [
+                end true
+            ]
+            if not tc_is_ident_char(line.char_at(i + dn)) [
+                end true
+            ]
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+!!! 1-based linia deklaracji `fun NAZWA(`/`pub fun NAZWA(` od linii `from`
+!!! (0-based). 0 gdy brak.
+fun find_fun_header_from(lines: List<Str>, name: Str, from: Int) -> Int [
+    let pat = "fun " + name + "("
+    let i = from
+    while i < lines.len() [
+        let ln = lines[i].clone()
+        if str_contains(ln.clone(), pat.clone()) and not tc_is_comment_line(ln.clone()) [
+            end i + 1
+        ]
+        i = i + 1
+    ]
+    end 0
+]
+
+!!! 0.6: `fn_cursor` = 0-based indeks linii, od ktorej szukamy naglowka KOLEJNEJ funkcji.
 struct Checker [
     sigs: Signatures,
     diags: List<Diagnostic>,
     imported_names: Dict<Str, Bool>,
     extra_variant_names: List<Str>,
-    lines: List<Str>
+    lines: List<Str>,
+    fn_cursor: Int,
+    pos_ok: Bool,
+    pos_lines: List<Int>,
+    pos_cols: List<Int>
 ]
 
 impl Checker [
@@ -505,14 +856,26 @@ impl Checker [
 
     !!! Sprawdza jedna funkcje/metode - buduje `FnChecker`, odwiedza
     !!! cale cialo, robi E0002/W0001, i doklada wynik do `self.diags`.
-    fun check_fun(self, fn_stmt: Stmt, self_type: Option<TypeRef>) [
+    !!! `slot` = numer tej funkcji w kolejnosci pre-order instrukcji programu
+    !!! (indeks do tabeli pozycji parsera); cialo zaczyna sie od `slot + 1`.
+    fun check_fun(self, fn_stmt: Stmt, self_type: Option<TypeRef>, slot: Int) [
         let owned_fn = fn_stmt.clone()
         let fn_name = fun_decl_name(owned_fn.clone())
         let params = fun_decl_params(owned_fn.clone())
         let ret_type = fun_decl_ret_type(owned_fn.clone())
         let body = fun_decl_body(owned_fn)
 
-        let checker = FnChecker(self.sigs.clone(), [], dict(), [], dict(), ret_type, fn_name, self.imported_names.clone(), self.extra_variant_names.clone(), self.lines.clone())
+        let start_line = 0
+        if self.pos_ok and slot < self.pos_lines.len() [
+            start_line = self.pos_lines[slot]
+        ] else [
+            start_line = find_fun_header_from(self.lines.clone(), fn_name.clone(), self.fn_cursor)
+        ]
+        if start_line > 0 [
+            self.fn_cursor = start_line
+        ]
+
+        let checker = FnChecker(self.sigs.clone(), [], dict(), [], dict(), ret_type, fn_name, self.imported_names.clone(), self.extra_variant_names.clone(), self.lines.clone(), start_line, start_line, [], dict(), self.pos_ok, self.pos_lines.clone(), self.pos_cols.clone(), slot + 1, [])
 
         let i = 0
         let n = params.len()
@@ -533,7 +896,7 @@ impl Checker [
             Some(rt) -> [
                 if not has_value_return(body) [
                     let fname_for_e0002 = checker.fn_name.clone()
-                    checker.diags.push(Diagnostic("error", "E0002", "funkcja '" + fname_for_e0002 + "' deklaruje typ zwracany " + rt.name + ", ale nigdzie nie ma 'end <wartosc>'", 0, 0, 1, ""))
+                    checker.diags.push(Diagnostic("error", "E0002", "funkcja '" + fname_for_e0002 + "' deklaruje typ zwracany " + rt.name + ", ale nigdzie nie ma 'end <wartosc>'", start_line, 0, 1, ""))
                 ]
             ]
             None -> [
@@ -544,8 +907,13 @@ impl Checker [
         let dn = checker.declared_names.len()
         while j < dn [
             let dname = checker.declared_names[j]
+            let warn_line = checker.declared_lines[j]
+            let warn_col = checker.declared_cols[j]
+            if warn_line == 0 [
+                warn_line = find_line_of(self.lines.clone(), "let " + dname.clone())
+            ]
             if not checker.used.contains(dname) and not str_starts_with_underscore(dname) [
-                checker.diags.push(Diagnostic("warning", "W0001", "zmienna '" + dname + "' jest zadeklarowana, ale nigdy nie uzyta", find_line_of(self.lines.clone(), "let " + dname.clone()), 0, dname.len(), ""))
+                checker.diags.push(Diagnostic("warning", "W0001", "zmienna '" + dname + "' jest zadeklarowana, ale nigdy nie uzyta", warn_line, warn_col, dname.len(), ""))
             ]
             j = j + 1
         ]
@@ -594,24 +962,45 @@ fun collect_imported_names(prog: Program) -> Dict<Str, Bool> [
 fun check_program(prog: Program, extra_variant_names: List<Str>, source: Str) -> List<Diagnostic> [
     let sigs = collect_signatures(prog.clone())
     let imported_names = collect_imported_names(prog.clone())
-    let checker = Checker(sigs, [], imported_names, extra_variant_names.clone(), split_lines(source))
+    let pos_ok = positions_consistent(prog.clone())
+    let checker = Checker(sigs, [], imported_names, extra_variant_names.clone(), split_lines(source), 0, pos_ok, prog.lines.clone(), prog.cols.clone())
 
+    !! W0900 (tylko z HKS_DEBUG_POSITIONS=1): parser dal tabele pozycji, ale nie
+    !! zgadza sie z drzewem - typechecker wraca wtedy do wyszukiwania tekstowego.
+    !! Testy repozytorium (scripts/verify.sh) wymagaja braku W0900 na kazdym pliku.
+    if prog.lines.len() > 0 and not pos_ok [
+        match env_var("HKS_DEBUG_POSITIONS") [
+            Some(dbg) -> [
+                if dbg == "1" [
+                    checker.diags.push(Diagnostic("warning", "W0900", "tabela pozycji parsera niezgodna z drzewem AST (uzyto wyszukiwania tekstowego)", 1, 0, 1, ""))
+                ]
+            ]
+            None -> [
+            ]
+        ]
+    ]
+
+    let slot = 0
     let i = 0
     let n = prog.body.len()
     while i < n [
         let s = prog.body[i]
+        let this_slot = slot
+        slot = slot + stmt_subtree_size(prog.body[i].clone())
         match s [
             GetImportStmt(source, name, version, details) -> [
                 checker.check_get(source, name)
             ]
             FunDecl(fname, fparams, fret, fbody, fis_pub, ftype_params, fname_async) -> [
-                checker.check_fun(prog.body[i], none())
+                checker.check_fun(prog.body[i], none(), this_slot)
             ]
             ImplDecl(struct_name, methods, type_params) -> [
+                let mslot = this_slot + 1
                 let j = 0
                 let mn = methods.len()
                 while j < mn [
-                    checker.check_fun(methods[j], some(TypeRef(struct_name.clone(), none(), none())))
+                    checker.check_fun(methods[j], some(TypeRef(struct_name.clone(), none(), none())), mslot)
+                    mslot = mslot + stmt_subtree_size(methods[j].clone())
                     j = j + 1
                 ]
             ]
@@ -632,7 +1021,7 @@ fun main() [
     let bad_fn = FunDecl("bad", [], some(TypeRef("Int", none(), none())), bad_body, false, [], false)
     let ok_body: List<Stmt> = [ReturnStmt(some(BinOp("+", NumberLit("1"), NumberLit("2"))))]
     let ok_fn = FunDecl("ok", [], some(TypeRef("Int", none(), none())), ok_body, false, [], false)
-    let prog = Program([bad_fn, ok_fn])
+    let prog = Program([bad_fn, ok_fn], [], [], [])
     let diags = check_program(prog, [], "")
     log("liczba diagnostyk:", diags.len())
 ]
