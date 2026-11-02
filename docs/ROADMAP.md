@@ -16,33 +16,57 @@ check` na wszystkich `.hcs`, budowa i uruchomienie `docs/std-examples/*`
 z porownaniem wyjscia, przyklady `hack3rc` (gdy ustawione `HACK3RC`) i -
 w CI - samohostowanie.
 
-* [brak] Zestaw testow roznicowych `hackerc` vs `hack3rc` i testow bledow
-  (`H0xxx`) - dzis tylko przyklady w `docs/`. Lista programow do
-  odtworzenia: struct/enum/match, listy, Option, Result i `?`, GC pod
+* [czesciowe] Zestaw testow: `tests/run.sh` (diagnostyki `tests/errors/*` z
+  oczekiwaniem `!! expect: KOD@LINIA` + budowa i uruchomienie programow z
+  `tests/cases`, `docs/hack3rc-examples`, `docs/std-examples`) oraz
+  `hack3rc/tests/run.sh` (te same programy przez hack3rc = test roznicowy +
+  `hack3rc/tests/errors`). Brak jeszcze: testow bledow o kodach `H0xxx`
+  (hack3rc), programow struct/enum/match z `Option`/`Result` i `?`, GC pod
   `HKS_GC_STRESS=1`.
 * [brak] Testy serwera LSP w prawdziwym edytorze (dotychczas tylko surowy
   JSON-RPC).
 
 ## Kompilator `hackerc`
 
-* [czesciowe] Numery linii w AST: diagnostyki typecheckera szukaja
-  fragmentu w tekscie zrodla (`find_line_of`) - przy powtorzonych
-  identyfikatorach wskazuja pierwsze wystapienie. Wlasciwe rozwiazanie to
-  pozycje (linia/kolumna) w kazdym wezle AST.
+* [czesciowe] Pozycje w AST: parser zapisuje w `Program` tabele pozycji WSZYSTKICH
+  instrukcji (`lines`/`cols`/`tags`, kolejnosc pre-order, obok drzewa - warianty
+  `Stmt` bez zmian). Typechecker uzywa jej dla naglowkow funkcji/metod i `let`
+  (E0002, E0005, E0011, W0001; kolumna 1-based), ale tylko gdy
+  `positions_consistent` potwierdzi zgodnosc z drzewem; inaczej wraca do
+  wyszukiwania tekstowego za kursorem. `HKS_DEBUG_POSITIONS=1` + `scripts/verify.sh`
+  wymagaja braku `W0900` na kazdym pliku repozytorium. Nadal: wywolania
+  (E0001/W0002) to k-te wystapienie `nazwa(` w funkcji (heurystyka), pozycje
+  wyrazen i identyfikatorow nie sa w AST, E0003 szuka pierwszego `get <zrodlo:`,
+  a LSP (`rename`/`references`/`hover`) dziala na skanie tekstu.
+* [x] (0.6) Linie po wielolinijkowym bloku `direct`/`fast direct`/`native`/`$ ... $`
+  nie przesuwaja sie juz (ekstrakcja dopisuje newline'y), a ekstraktory
+  `direct`/`fast direct`/`native` pomijaja napisy i komentarze (wczesniej napis
+  zawierajacy slowo kluczowe i nawias, np. w `formatter.hcs`, wycinal kod).
 * [czesciowe] Funkcje asocjacyjne (`Typ.nazwa(args)` -> `Typ::nazwa`) i wartosci
   domyslne parametrow funkcji dzialaja w `hackerc` od 0.6 (sprawdzone testem
   roznicowym z `hack3rc`). Znany konflikt: nazwa `new` jest zajeta przez
   automatyczny konstruktor struktury (rustc: E0592) - uzyj innej nazwy.
-* [brak] Struktury generyczne z adnotacja typu (`Wrapper<Int>`), typ krotki.
-* [brak] Podzial duzych plikow: `codegen.hcs` (~5500 linii) i `project.hcs`
-  (~2800 linii).
+* [czesciowe] Generyki: `let w: Wrapper<Int> = Wrapper(5)` i wnioskowanie bez
+  adnotacji dzialaja (typecheck + `let` bez zbednego typu), funkcje i `impl`
+  generyczne dostaja ograniczenie `T: Clone` (indeksowanie elementow `T`).
+  Test: `tests/cases/generics.hcs`. Brak: ograniczen trait'ow zdefiniowanych
+  przez uzytkownika, jawnych argumentow typu przy wywolaniu (`first<Int>(..)`).
+* [brak] Typ krotki (`(Int, Str)`, `let (a, b) = ...`) - nowy wariant `Expr` i
+  `TypeRef` we wszystkich backendach.
+* [czesciowe] Podzial duzych plikow: z `codegen.hcs` wydzielono emiter sandboxa
+  (`codegen_sandbox.hcs`, czysta funkcja zwracajaca linie Rusta - nie wymaga
+  struktury `CodeGen`). Reszta (~5350 linii) i `project.hcs` (~2800) bez zmian.
+  Dalszy podzial wymaga najpierw wyciagniecia `struct CodeGen` i wspolnych
+  funkcji do pliku bazowego, bo `include` nie obsluguje cyklicznych zaleznosci.
 * [niezweryfikowane] Czas samohostowania po dodaniu cache budowania -
   zmierzony regres (~20 s -> ~133 s) mogl nie zniknac na wszystkich
   maszynach.
 * [brak] Warunkowa kompilacja `use <os:...>` per plik (dzis tylko poziom
   projektu).
-* [brak] RAII/domkniecia - w szczegolnosci automatyczne przywracanie trybu
-  raw terminala po bledzie.
+* [czesciowe] RAII/domkniecia: w jezyku nadal brak. Dla trybu raw terminala
+  problem rozwiazany w bibliotece (`std:term`: termios + automatyczne
+  przywracanie przy wyjsciu, panice i SIGINT/SIGTERM/SIGHUP; test w PTY
+  `docs/std-examples/term_raw.pty.py`). Ogolny RAII (`defer`/`Drop`) - otwarte.
 * [czesciowe] Crate z myslnikiem w nazwie, ktorego biblioteka nazywa sie
   inaczej (np. `md-5` -> `md5`): `get <crates:...>` emituje `use md_5::*`
   i nie kompiluje sie. Obejscie: uzywac crate'ow, ktorych nazwa pakietu
@@ -60,9 +84,14 @@ Patrz `docs/SANDBOX.md`.
   `unshare` (tryby `strict` - panic bez wykonania polecenia, `best-effort`
   i `off` - ostrzezenie i uruchomienie). **Nie sprawdzono** poziomu 3
   (`bwrap` nie byl zainstalowany) ani maszyny z wylaczonymi user namespaces
-  na poziomie jadra. Brak zautomatyzowanego testu w CI.
+  na poziomie jadra. Zautomatyzowany test: `tests/sandbox.sh` (w `scripts/verify.sh`).
 * [czesciowe] Remount RO obejmuje tylko `/` (nie osobne montowania).
-* [brak] Izolacja PID/IPC, limity zasobow, filtr seccomp, Windows/macOS.
+* [x] (0.6) Filtr seccomp (denylista ~27 wywolan + kontrola architektury i x32,
+  `no_new_privs`) dla metod 1 i 2 oraz limity zasobow `HKS_SANDBOX_CPU`/
+  `_MEM_MB`/`_NPROC`/`_FSIZE_MB`/`_NOFILE`; test `tests/sandbox.sh` (pomija sie
+  bez izolacji w srodowisku). Szczegoly: `docs/SANDBOX.md`.
+* [brak] Izolacja PID/IPC, filtr seccomp dla `bwrap`, allowlista zamiast
+  denylisty, Windows/macOS.
 
 ## FFI i backendy
 
@@ -144,10 +173,15 @@ struct/enum/impl, listy. **Nieobslugiwane** (czytelny blad `H0xxx`):
 ## Biblioteka standardowa
 
 * [czesciowe] `std:http`: brak klienta strumieniujacego (cale cialo naraz).
-* [czesciowe] `std:term`: brak odczytu rozmiaru terminala i trybu raw.
+* [czesciowe] `std:term`: rozmiar przez `ioctl(TIOCGWINSZ)` i prawdziwy tryb raw
+  (termios + RAII, `term_raw_enter`/`term_raw_leave`/`term_read_byte`),
+  sprawdzone w PTY (Linux). Brak: Windows, wejscia nieblokujacego/timeoutu,
+  parsowania sekwencji klawiszy (strzalki to surowe bajty 27,91,A..D).
 * [czesciowe] `std:cybersecurity`: dostepne skroty (SHA-1/2/3, BLAKE2, MD5,
-  CRC32), HMAC, PBKDF2, OsRng, base64, porownania w stalym czasie.
-  Brak: szyfrow (AES/ChaCha), podpisow (Ed25519 poza `hlib`), KDF
+  CRC32), HMAC, PBKDF2, OsRng, base64, porownania w stalym czasie oraz (0.6)
+  szyfrowanie AEAD `cipher` (ChaCha20-Poly1305, AES-256-GCM, losowy nonce,
+  testy z wektorami z niezaleznej implementacji) i `random`.
+  Brak: podpisow (Ed25519 poza `hlib`), KDF
   pamieciochlonnych (argon2/scrypt), HKDF.
 * [czesciowe] `std:process`: uchwyty z odczytem linii na zywo i zapisem
   do stdin (zrobione). Brak: odczytu surowych bajtow (tylko linie), grup
@@ -164,3 +198,27 @@ flagi `hackerc build` (`-o`, `--crate-name`, `--library`, `--bin-name`,
 `--version-map`, `--libs-root`, `--bootstrap-root`, `--bit-root`),
 rozwiazywanie `get <bit:...>` (`BIT_LIBS`, `cache/libs/<nazwa>/`,
 `~/.hackeros/libs/<nazwa>/current/`) i format manifestu `Bit.hk`.
+
+## Plan wielosesyjny (numeracja pozostaje 0.6)
+
+Kolejnosc wg dzwigni i ryzyka; kazda sesja konczy sie testami w
+`scripts/verify.sh` i wpisem w `CHANGELOG.md`. Status: [x] zrobione,
+[~] w toku, [ ] przed nami.
+
+* [x] **S1** Testy i skrypty z CI, pozycje diagnostyk wg kursora, `List<Float>.sort()`,
+  `std:cybersecurity::cipher`/`random`, `std:term` (ioctl + raw/RAII), poprawki dokumentacji `fast direct`.
+* [x] **S2** `direct`/`fast direct`: `std:python` (bledy jako `Result`, wymiana wartosci,
+  wspolny stan z `direct`), traceback Pythona w komunikacie bledu bloku, benchmark
+  `scripts/bench_direct.sh` (wyniki w `docs/FAST_DIRECT.md`), klasyfikacja backendow
+  (zawezenie tylko w dokumentacji - aliasy zostaja dla zgodnosci). Poprawka regresji
+  zdublowanych zaleznosci Cargo (`libc`/`pyo3`...). Nadal: `direct` jako instrukcja nie
+  zwraca wartosci i panikuje przy bledzie; `{pypy}` bez wymiany danych.
+* [~] **S3** Pozycje instrukcji z parsera w `Program` + typecheck (patrz wyzej), naprawa przesuniec
+  linii po blokach i ekstraktorow. Otwarte: pozycje wyrazen/identyfikatorow, LSP na AST.
+* [~] **S4** Generyki z adnotacja (`Wrapper<Int>`) - gotowe w zakresie opisanym wyzej. Otwarte: krotki.
+* [ ] **S5** `hack3rc`: `Dict` (tablica mieszajaca w runtime C + lowering), `for` po nie-listach,
+  test roznicowy z hackerc (hack3rc nie byl budowany lokalnie). Uwaga: interpolacji napisow
+  NIE MA w jezyku (ani w `hackerc`, ani w `SYNTAX.md`) - to nowa funkcja jezyka, nie uzupelnienie hack3rc.
+* [~] **S6** Wydzielono `codegen_sandbox.hcs`. Otwarte: plik bazowy z `CodeGen`, podzial
+  emiterow `native`/`direct`, `project.hcs`; czas samohostowania niezmierzony (tu: build bez optymalizacji).
+* [x] **S7** Sandbox `$ ... $`: seccomp, limity zasobow, `tests/sandbox.sh`, `docs/SANDBOX.md`.
