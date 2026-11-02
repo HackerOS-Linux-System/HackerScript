@@ -507,24 +507,75 @@ struct DirectExtraction [
 !!! Reczne skanowanie zamiast `re.compile(r"\bdirect\b").search` -
 !!! sprawdza znak przed/po dopasowaniu przez `is_direct_ident_char`
 !!! (parytet granicy slowa `\b` dla `[a-zA-Z0-9_]`).
+!!! 0.6: indeks (w `source`) pierwszego wystapienia slowa kluczowego `kw` w KODZIE
+!!! (cale slowo), od pozycji `from`; -1 gdy brak. Pomija literaly napisow
+!!! `"..."` (z `\\` i `\"`) oraz komentarze `!!`/`!!!` do konca linii - tak jak
+!!! `sandbox_dollar_scan`. Wczesniej `direct`/`fast direct`/`native` byly
+!!! znajdowane w surowym tekscie, wiec napis zawierajacy slowo kluczowe i nawias
+!!! (formatter.hcs, transpiler.hcs) byl brany za poczatek bloku i wycinal
+!!! fragment kodu. `from` musi lezec poza napisem/komentarzem.
+fun find_code_keyword(source: Str, from: Int, kw: Str) -> Int [
+    let n = source.len()
+    let kn = kw.len()
+    let in_string = false
+    let escape_next = false
+    let k = from
+    while k < n [
+        let c = source.char_at(k)
+        if in_string [
+            if escape_next [
+                escape_next = false
+            ] elif c == "\\" [
+                escape_next = true
+            ] elif c == "\"" [
+                in_string = false
+            ]
+        ] else [
+            if c == "\"" [
+                in_string = true
+            ] elif c == "!" and k + 1 < n and source.char_at(k + 1) == "!" [
+                let eol = k
+                while eol < n and source.char_at(eol) != "\n" [
+                    eol = eol + 1
+                ]
+                k = eol
+            ] elif k + kn <= n and source.slice(k, k + kn) == kw [
+                let before_ok = k == 0 or not is_direct_ident_char(source.char_at(k - 1))
+                let after_ok = k + kn >= n or not is_direct_ident_char(source.char_at(k + kn))
+                if before_ok and after_ok [
+                    end k
+                ]
+            ]
+        ]
+        k = k + 1
+    ]
+    end -1
+]
+
+!!! 0.6: ile znakow nowej linii jest w `source[from..to)`, jako napis z tyloma
+!!! "\n". Ekstrakcja blokow (`direct`, `fast direct`, `native`, `$ ... $`) zastepuje
+!!! wielolinijkowy blok jednym tokenem `__x__(N)`; bez dopisania tych newline'ow
+!!! KAZDA linia po bloku w tokenach (a wiec w bledach parsera i pozycjach AST)
+!!! przesuwala sie o liczbe linii bloku.
+fun newline_padding(source: Str, from: Int, to: Int) -> Str [
+    let pad = ""
+    let k = from
+    while k < to [
+        if source.char_at(k) == "\n" [
+            pad = pad + "\n"
+        ]
+        k = k + 1
+    ]
+    end pad
+]
+
 fun extract_direct_blocks(source: Str) -> DirectExtraction [
     let blocks: List<Str> = []
     let out = ""
     let i = 0
     let n = source.len()
     while i < n [
-        let found_at = -1
-        let scan = i
-        while scan < n and found_at == -1 [
-            if scan + 6 <= n and source.slice(scan, scan + 6) == "direct" [
-                let before_ok = scan == 0 or not is_direct_ident_char(source.char_at(scan - 1))
-                let after_ok = scan + 6 >= n or not is_direct_ident_char(source.char_at(scan + 6))
-                if before_ok and after_ok [
-                    found_at = scan
-                ]
-            ]
-            scan = scan + 1
-        ]
+        let found_at = find_code_keyword(source, i, "direct")
         if found_at == -1 [
             out = out + source.slice(i, n)
             i = n
@@ -562,7 +613,7 @@ fun extract_direct_blocks(source: Str) -> DirectExtraction [
                     let dedented = dedent_text(raw)
                     let idx = blocks.len()
                     blocks.push(dedented)
-                    out = out + "__direct__(" + (idx as Str) + ")"
+                    out = out + "__direct__(" + (idx as Str) + ")" + newline_padding(source, start, closed_at + 1)
                     i = closed_at + 1
                 ]
             ]
@@ -619,18 +670,7 @@ fun extract_fast_direct_blocks(source: Str) -> FastDirectExtraction [
     let i = 0
     let n = source.len()
     while i < n [
-        let found_at = -1
-        let scan = i
-        while scan < n and found_at == -1 [
-            if scan + 4 <= n and source.slice(scan, scan + 4) == "fast" [
-                let before_ok = scan == 0 or not is_direct_ident_char(source.char_at(scan - 1))
-                let after_ok = scan + 4 >= n or not is_direct_ident_char(source.char_at(scan + 4))
-                if before_ok and after_ok [
-                    found_at = scan
-                ]
-            ]
-            scan = scan + 1
-        ]
+        let found_at = find_code_keyword(source, i, "fast")
         if found_at == -1 [
             out = out + source.slice(i, n)
             i = n
@@ -712,7 +752,7 @@ fun extract_fast_direct_blocks(source: Str) -> FastDirectExtraction [
                                 let idx = blocks.len()
                                 blocks.push(dedented)
                                 backends.push(backend)
-                                out = out + "__fast_direct__(" + (idx as Str) + ")"
+                                out = out + "__fast_direct__(" + (idx as Str) + ")" + newline_padding(source, start, closed_at + 1)
                                 i = closed_at + 1
                             ]
                         ]
@@ -752,18 +792,7 @@ fun extract_native_blocks(source: Str, base_dir: Str) -> NativeExtraction [
     let i = 0
     let n = source.len()
     while i < n [
-        let found_at = -1
-        let scan = i
-        while scan < n and found_at == -1 [
-            if scan + 6 <= n and source.slice(scan, scan + 6) == "native" [
-                let before_ok = scan == 0 or not is_direct_ident_char(source.char_at(scan - 1))
-                let after_ok = scan + 6 >= n or not is_direct_ident_char(source.char_at(scan + 6))
-                if before_ok and after_ok [
-                    found_at = scan
-                ]
-            ]
-            scan = scan + 1
-        ]
+        let found_at = find_code_keyword(source, i, "native")
         if found_at == -1 [
             out = out + source.slice(i, n)
             i = n
@@ -844,7 +873,7 @@ fun extract_native_blocks(source: Str, base_dir: Str) -> NativeExtraction [
                             let idx = blocks.len()
                             blocks.push(imported)
                             engines.push(engine)
-                            out = out + "__native__(" + (idx as Str) + ")"
+                            out = out + "__native__(" + (idx as Str) + ")" + newline_padding(source, start, k2)
                             i = k2
                         ] else [
                             out = out + source.slice(start, k2)
@@ -879,7 +908,7 @@ fun extract_native_blocks(source: Str, base_dir: Str) -> NativeExtraction [
                             let idx = blocks.len()
                             blocks.push(combined)
                             engines.push(engine)
-                            out = out + "__native__(" + (idx as Str) + ")"
+                            out = out + "__native__(" + (idx as Str) + ")" + newline_padding(source, start, closed_at + 1)
                             i = closed_at + 1
                         ]
                     ]
@@ -1172,7 +1201,7 @@ fun extract_sandbox_blocks(source: Str) -> SandboxExtraction [
                 let dedented = trim_str_local(dedent_text(raw))
                 let idx = blocks.len()
                 blocks.push(dedented)
-                out = out + "__sandbox__(" + (idx as Str) + ")"
+                out = out + "__sandbox__(" + (idx as Str) + ")" + newline_padding(source, dollar_at, close_at + 1)
                 i = close_at + 1
             ]
         ]
