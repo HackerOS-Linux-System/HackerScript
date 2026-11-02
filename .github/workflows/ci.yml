@@ -35,10 +35,10 @@ jobs:
       - name: cargo build --release (hackerc)
         working-directory: /tmp/hackerc-crate
         run: cargo build --release
-      - name: Testy (tests/run.sh) swiezo zbudowanym hackerc
+      - name: Weryfikacja (scripts/verify.sh = check wszystkich .hcs + tests/run.sh) swiezo zbudowanym hackerc
         env:
           HACKERC: /tmp/hackerc-crate/target/release/hackerscript_app
-        run: bash tests/run.sh
+        run: bash scripts/verify.sh
       - name: Samohostowanie - swiezy hackerc transpiluje sam siebie (musi dac identyczny wynik)
         env:
           HACKERC: /tmp/hackerc-crate/target/release/hackerscript_app
