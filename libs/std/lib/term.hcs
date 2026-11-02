@@ -1,3 +1,4 @@
+get <crates:libc::0.2>
 get <std:env> import <env_var_present::env_var_or>
 get <std:string> import <str_to_int::str_trim::str_split>
 get <std:process> import <run_command_inherit_ok>
@@ -237,18 +238,208 @@ fun term_size() -> Option<TermSize> [
     ]
 ]
 
-!!! Wlacza (`enable = true`) albo wylacza (`false`) tryb "raw" (+ bez
-!!! echa) terminala PRZEZ `stty raw -echo` / `stty sane` - `true` przy
-!!! sukcesie. UWAGA: zmiana dotyczy CALEGO terminala (deskryptora
-!!! stdin procesu), nie da sie jej cofnac automatycznie przy
-!!! zakonczeniu procesu (w odroznieniu od bibliotek typu `crossterm`,
-!!! ktore robia to za pomoca RAII) - kazdy kod wlaczajacy `term_set_raw
-!!! (true)` MUSI sam wywolac `term_set_raw(false)` przed zakonczeniem
-!!! (rowniez na sciezkach bledu!), inaczej terminal uzytkownika
-!!! zostanie w trybie raw po wyjsciu z programu.
+!! -- tryb raw (0.6, termios + RAII) -----------------------------------------
+!!
+!! Prawdziwy tryb raw przez `tcgetattr`/`cfmakeraw`/`tcsetattr` (libc), bez
+!! podprocesu `stty`. ORYGINALNE ustawienia terminala sa zapamietane i
+!! PRZYWRACANE AUTOMATYCZNIE:
+!!   * przy normalnym zakonczeniu procesu (`atexit`),
+!!   * przy panice (hook przywraca terminal PRZED wypisaniem komunikatu),
+!!   * przy SIGINT/SIGTERM/SIGHUP wyslanych z zewnatrz (handler przywraca
+!!     terminal i ponawia sygnal z domyslna obsluga).
+!! Nie ratuje przed SIGKILL ani zawieszeniem procesu - wtedy `stty sane`/`reset`.
+!!
+!! W raw Ctrl-C przychodzi jako bajt 3 (ISIG wylaczone). Przetwarzanie
+!! wyjscia (OPOST) zostaje WLACZONE, wiec `log` nadal konczy linie poprawnie
+!! (bez "schodkow").
+
+native {Rust} [
+    use std::sync::{Mutex, Once};
+
+    static HKS_TERM_ORIG: Mutex<Option<libc::termios>> = Mutex::new(None);
+    static HKS_TERM_ONCE: Once = Once::new();
+
+    fn hks_term_restore_guard(g: &mut Option<libc::termios>) -> bool {
+        if let Some(t) = g.take() {
+            unsafe {
+                return libc::tcsetattr(0, libc::TCSAFLUSH, &t) == 0;
+            }
+        }
+        false
+    }
+
+    pub fn hks_term_restore() -> bool {
+        match HKS_TERM_ORIG.lock() {
+            Ok(mut g) => hks_term_restore_guard(&mut g),
+            Err(p) => hks_term_restore_guard(&mut p.into_inner()),
+        }
+    }
+
+    extern "C" fn hks_term_atexit() {
+        hks_term_restore();
+    }
+
+    extern "C" fn hks_term_on_signal(sig: libc::c_int) {
+        // try_lock: handler nie moze blokowac, gdy sygnal przerwal zakladanie blokady
+        if let Ok(mut g) = HKS_TERM_ORIG.try_lock() {
+            hks_term_restore_guard(&mut g);
+        }
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
+
+    pub fn hks_term_raw_enter() -> Result<(), String> {
+        let mut g = match HKS_TERM_ORIG.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if g.is_some() {
+            return Ok(());
+        }
+        unsafe {
+            if libc::isatty(0) == 0 {
+                return Err("stdin nie jest terminalem".to_string());
+            }
+            let mut t: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(0, &mut t) != 0 {
+                return Err("tcgetattr nie powiodlo sie".to_string());
+            }
+            let orig = t;
+            libc::cfmakeraw(&mut t);
+            t.c_oflag |= libc::OPOST;
+            if libc::tcsetattr(0, libc::TCSAFLUSH, &t) != 0 {
+                return Err("tcsetattr nie powiodlo sie".to_string());
+            }
+            *g = Some(orig);
+        }
+        HKS_TERM_ONCE.call_once(|| unsafe {
+            libc::atexit(hks_term_atexit);
+            for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+                libc::signal(sig, hks_term_on_signal as usize as libc::sighandler_t);
+            }
+            let prev = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                hks_term_restore();
+                prev(info);
+            }));
+        });
+        Ok(())
+    }
+
+    pub fn hks_term_is_raw() -> bool {
+        match HKS_TERM_ORIG.lock() {
+            Ok(g) => g.is_some(),
+            Err(p) => p.into_inner().is_some(),
+        }
+    }
+
+    pub fn hks_term_ioctl_size() -> Option<(i64, i64)> {
+        for fd in [1, 2, 0] {
+            unsafe {
+                let mut ws: libc::winsize = std::mem::zeroed();
+                if libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
+                    return Some((ws.ws_col as i64, ws.ws_row as i64));
+                }
+            }
+        }
+        None
+    }
+
+    pub fn hks_term_read_byte() -> i64 {
+        let mut b = [0u8; 1];
+        let n = unsafe { libc::read(0, b.as_mut_ptr() as *mut libc::c_void, 1) };
+        if n == 1 { b[0] as i64 } else { -1 }
+    }
+]
+
+!! Wlacza tryb raw (bez echa i kanonicznego buforowania). `Err` gdy stdin
+!! nie jest terminalem albo wywolanie systemowe zawiodlo. Wielokrotne
+!! wywolanie jest bezpieczne (nic nie robi, gdy raw juz wlaczony).
+!! Terminal wraca do stanu poczatkowego sam - patrz opis wyzej.
+fun term_raw_enter() -> Result<Bool, Str> [
+    let good = false
+    let msg = ""
+    native {Rust} [
+        match hks_term_raw_enter() {
+            Ok(()) => { good = true; }
+            Err(e) => { msg = e; }
+        }
+    ]
+    if good [
+        end ok(true)
+    ]
+    end err(msg)
+]
+
+!! Wylacza tryb raw i przywraca zapamietane ustawienia. `true` gdy cos
+!! przywrocono; `false` gdy raw nie byl wlaczony przez `term_raw_enter`.
+fun term_raw_leave() -> Bool [
+    let r = false
+    native {Rust} [
+        r = hks_term_restore();
+    ]
+    end r
+]
+
+!! Czy tryb raw jest teraz wlaczony przez `term_raw_enter`.
+fun term_is_raw() -> Bool [
+    let r = false
+    native {Rust} [
+        r = hks_term_is_raw();
+    ]
+    end r
+]
+
+!! Czyta JEDEN bajt ze stdin (blokujaco). -1 przy EOF/bledzie. W trybie raw
+!! daje pojedyncze klawisze (strzalki to sekwencje 3 bajtow: 27, 91, A..D).
+fun term_read_byte() -> Int [
+    let b = 0
+    native {Rust} [
+        b = hks_term_read_byte();
+    ]
+    end b
+]
+
+!! Rozmiar terminala przez `ioctl(TIOCGWINSZ)` (stdout, potem stderr, potem
+!! stdin) - bez podprocesow i bez /dev/tty. `none()` gdy zaden deskryptor nie
+!! jest terminalem.
+fun term_size_ioctl() -> Option<TermSize> [
+    let found = false
+    let c = 0
+    let r = 0
+    native {Rust} [
+        if let Some((cc, rr)) = hks_term_ioctl_size() {
+            c = cc;
+            r = rr;
+            found = true;
+        }
+    ]
+    if found [
+        end some(TermSize(c, r))
+    ]
+    end none()
+]
+
+!!! Wlacza (`true`) albo wylacza (`false`) tryb raw. Od 0.6 oparte o
+!!! `term_raw_enter`/`term_raw_leave` (termios, RAII - terminal wraca sam
+!!! przy wyjsciu, panice i sygnalach). Gdy stdin nie jest terminalem, wlaczenie
+!!! zwraca `false`. Wylaczenie, gdy raw nie byl wlaczony tym API, wola `stty sane`
+!!! (zachowanie sprzed 0.6).
 fun term_set_raw(enable: Bool) -> Bool [
     if enable [
-        end run_command_inherit_ok("stty", ["raw", "-echo"])
+        match term_raw_enter() [
+            Ok(_v) -> [
+                end true
+            ]
+            Err(_e) -> [
+                end false
+            ]
+        ]
+    ]
+    if term_raw_leave() [
+        end true
     ]
     end run_command_inherit_ok("stty", ["sane"])
 ]
@@ -316,6 +507,13 @@ fun term_width() -> Int [
         None -> [
         ]
     ]
+    match term_size_ioctl() [
+        Some(sz) -> [
+            end sz.cols
+        ]
+        None -> [
+        ]
+    ]
     let w = term_size_from_stty(1)
     if w > 0 [
         end w
@@ -329,6 +527,13 @@ fun term_height() -> Int [
             if n > 0 [
                 end n
             ]
+        ]
+        None -> [
+        ]
+    ]
+    match term_size_ioctl() [
+        Some(sz) -> [
+            end sz.rows
         ]
         None -> [
         ]
