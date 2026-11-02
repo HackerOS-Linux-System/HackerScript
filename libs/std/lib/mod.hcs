@@ -6,6 +6,9 @@
 !!   get <std:cybersecurity::hash>           - 0.6: md5/sha1/sha2/sha3/blake2/crc32 (tekst, bajty, plik)
 !!   get <std:cybersecurity::mac>            - 0.6: HMAC (sha1/256/384/512) + PBKDF2
 !!   get <std:cybersecurity::random>         - 0.6: bezpieczne bajty/tokeny/liczby (OsRng)
+!!   get <std:python>                       - 0.6: osadzony CPython, bledy jako Result, py_set_*/py_eval*
+!!   get <std:cybersecurity::cipher>         - 0.6: AEAD (chacha20poly1305, aes256gcm), losowy nonce,
+!!                                              cipher_encrypt_hex/cipher_decrypt_hex/cipher_generate_key_hex
 !!   get <std:cybersecurity::encoding>       - hex, base64/base64url (tekst i bajty), HMAC-SHA256
 !!   get <std:io>                            - pliki (read_file_or/file_readable/write_file_ok);
 !!                                              read_file()/write_file() sa wbudowane w kompilator
@@ -47,7 +50,7 @@
 !!                                              kompilator, WYMAGA `get <crates:ureq::2>`
 !!
 !! Przyklady uruchamiane w weryfikacji repozytorium: docs/std-examples/.
-!! Czego jeszcze brakuje (szyfry, podpisy, klient HTTP strumieniujacy...) -
+!! Czego jeszcze brakuje (podpisy, KDF pamieciochlonne, klient HTTP strumieniujacy...) -
 !! patrz docs/ROADMAP.md.
 
 !! Wersja biblioteki standardowej (zgodna z wersja kompilatora).
