@@ -1,4 +1,4 @@
-# `fast direct {backend} [ ... ]` — przyspieszony Python, statycznie linkowany
+# `fast direct {backend} [ ... ]` — wybór backendu Pythona (docelowo: statycznie linkowany)
 
 Status: **zaimplementowane w wersji DYNAMICZNEJ — statyczne linkowanie NIE jest zrobione** (patrz "Stan implementacji" na końcu). Rozszerza istniejące
 `direct [ ... ]` (patrz `docs/SYNTAX.md`) o wybór **backendu
@@ -44,7 +44,11 @@ istnieje** — backend jest zawsze obowiązkowy, żeby uniknąć niejawnego
 wyboru linkowanego wariantu (w przeciwieństwie do zwykłego `direct`,
 gdzie backend "systemowy CPython" jest jeden i nie ma dwuznaczności).
 
-## 20 backendów — kategorie i co każdy statycznie linkuje
+## 20 backendów — kategorie i co każdy statycznie linkuje (PROJEKT DOCELOWY)
+
+> Ta sekcja opisuje **zamierzony** model. Obecna implementacja uruchamia 17 z 20 backendów
+> jako zwykły CPython przez PyO3 (z kontrolą importu), `pypy` jako podproces, a `cython`/`pythran`
+> kompilują się w runtime. Patrz "Stan implementacji" na końcu.
 
 | Backend | Kategoria | Co jest linkowane statycznie do binarki |
 |---|---|---|
@@ -144,9 +148,52 @@ zlinkowania** (`bit build`), a nie tylko jako pakiet instalowany w
   projektu, na wzór tego jak dziś działa `get <extern:...> use
   <static>`.
 
+## Pomiary i klasyfikacja backendów (0.6)
+
+`scripts/bench_direct.sh` mierzy tę samą pętlę (`sum += (i*i) % 7`, N = 10 000 000)
+w czterech wariantach i sprawdza, że każdy daje tę samą sumę kontrolną. Wynik z
+jednego uruchomienia (1 vCPU, CPython 3.12.3, PyPy 7.3.15, numba 0.68.1; czas
+całego procesu, najlepszy z 3):
+
+| wariant | całość | start | praca |
+|---|---:|---:|---:|
+| natywny HackerScript | 0,014 s | 0,004 s | 0,010 s |
+| `direct [ ... ]` (CPython) | 1,571 s | 0,015 s | 1,556 s |
+| `fast direct {pypy}` | 0,055 s | 0,028 s | 0,026 s |
+| `fast direct {numba}` (`@njit`) | 0,720 s | 0,710 s | 0,009 s |
+
+Wnioski (dla tego jednego obciążenia; liczby zależą od maszyny): PyPy jest ok.
+60x szybszy od CPythona i opłaca się od razu; numba liczy równie szybko jak kod
+natywny, ale płaci ok. 0,7 s za import i JIT, więc zwraca się dopiero przy
+dłuższej pracy; **czysty, numeryczny kod najlepiej napisać po prostu w
+HackerScript** (ok. 150x szybciej od `direct`). `fast direct` ma sens, gdy
+potrzebujesz ekosystemu Pythona, a nie samej szybkości pętli.
+
+Które backendy faktycznie zmieniają sposób wykonania:
+
+* **Zmieniają wykonanie:** `pypy` (osobny proces, bez wspólnego stanu), `numba`
+  (JIT w procesie), `cython` i `pythran` (kompilacja w runtime, wymagają
+  kompilatora C/C++).
+* **Aliasy bibliotek na zwykłym CPythonie** (kontrola importu + preambuła, brak
+  różnicy wydajności względem `direct`): `numpy`, `polars`, `scipy`, `asyncio`,
+  `uvloop`, `multiprocessing`, `jax`, `duckdb`, `cupy`, `vaex`, `numexpr`,
+  `trio`, `aiohttp`, `granian`, `httpx`, `ray`. Zostają dla zgodności; zalecany
+  zapis to `direct [ ... ]` z `get <pypi:...>`.
+
+## Błędy i wymiana danych: `std:python`
+
+Blok `direct [ ... ]` nie zwraca wartości, a wyjątek Pythona kończy program
+(od 0.6 z tracebackiem Pythona zamiast samego `expect`). Do obsługi błędów i
+przekazywania wartości służy biblioteka `get <std:python>`: `py_run`, `py_eval`,
+`py_eval_int/float/bool` zwracają `Result<_, Str>` (komunikat `TypLedu: treść`),
+`py_set_str/int/float/bool` przekazują wartości do Pythona, a stan jest wspólny
+z blokami `direct` (jedna przestrzeń nazw `__main__`). Przykład i test:
+`docs/std-examples/python.hcs`. Bloki `fast direct {pypy}` działają w osobnym
+procesie i z tej wymiany nie korzystają.
+
 ## Kolejność wdrożenia (Faza 3 → 4, patrz `docs/ROADMAP.md`)
 
-Nie wszystkie 19 naraz — plan zakłada wdrożenie w grupach, każda z
+Nie wszystkie 20 naraz — plan zakłada wdrożenie w grupach, każda z
 realnym, przetestowanym przykładem w `docs/showcase`, zanim ruszy
 kolejna:
 
