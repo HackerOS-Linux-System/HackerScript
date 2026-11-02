@@ -414,7 +414,7 @@ fun cmd_js(src_path: Str, out_path: Str, site: Bool) -> Int [
     if not site and site_css.len() > 0 [
         elog(c_bold_yellow("hackerc:") + " bloki `style { ... }` dzialaja tylko w `use <mode:website>` - pominieto")
     ]
-    match transpile_js_native(Program(body), site, loader.native_blocks.clone(), loader.native_engines.clone()) [
+    match transpile_js_native(Program(body, [], [], []), site, loader.native_blocks.clone(), loader.native_engines.clone()) [
         Err(msgs) -> [
             elog(c_red("hackerc js:") + " " + src_path)
             elog(msgs)
