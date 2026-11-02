@@ -20,7 +20,10 @@ struct Parser [
     !! wywolujacy MOZE je teraz wykryc i pokazac przez `render_many`
     !! (ten sam kolorowy renderer co bledy typechecka), zamiast je
     !! przeoczyc pomiedzy zwyklym `log()` budowy.
-    errors: List<Diagnostic>
+    errors: List<Diagnostic>,
+    stmt_lines: List<Int>,
+    stmt_cols: List<Int>,
+    stmt_tags: List<Str>
 ]
 
 impl Parser [
@@ -136,7 +139,7 @@ impl Parser [
             body.push(stmt)
             self.skip_newlines_collect_comments()
         ]
-        end Program(body)
+        end Program(body, self.stmt_lines.clone(), self.stmt_cols.clone(), self.stmt_tags.clone())
     ]
 
     !!! -- instrukcje -------------------------------------------------------
@@ -154,7 +157,21 @@ impl Parser [
         end stmts
     ]
 
+    !!! 0.6: opakowanie zapisujace pozycje instrukcji (pre-order). Slot jest
+    !!! rezerwowany PRZED parsowaniem, wiec zagniezdzone instrukcje trafiaja po
+    !!! swoim rodzicu; tag uzupelniany po zbudowaniu wezla.
     fun parse_statement(self) -> Stmt [
+        let first = self.cur()
+        let slot = self.stmt_lines.len()
+        self.stmt_lines.push(first.line)
+        self.stmt_cols.push(first.col)
+        self.stmt_tags.push("")
+        let parsed = self.parse_statement_inner()
+        self.stmt_tags[slot] = stmt_tag(parsed.clone())
+        end parsed
+    ]
+
+    fun parse_statement_inner(self) -> Stmt [
         let t = self.cur()
 
         if t.kind == DocComment [
@@ -202,7 +219,8 @@ impl Parser [
             ]
             if kw == "pub" [
                 self.advance()
-                let inner = self.parse_statement()
+                !! `pub` jest czescia TEJ SAMEJ instrukcji - bez nowego slotu pozycji.
+                let inner = self.parse_statement_inner()
                 match inner [
                     FunDecl(name, params, ret_type, body, is_pub, type_params, fn_is_async) -> [
                         end FunDecl(name, params, ret_type, body, true, type_params, fn_is_async)
@@ -737,6 +755,14 @@ impl Parser [
                 !! wolala `parse_fun()` BEZPOSREDNIO (z pominieciem
                 !! `parse_statement()`), wiec wiodace `pub` nie bylo w
                 !! ogole konsumowane.
+                !! 0.6 (pozycje AST): metoda jest instrukcja drzewa (`FunDecl` w `ImplDecl`),
+                !! ale parsowana tu BEZPOSREDNIO - slot pozycji rezerwujemy recznie, od
+                !! pierwszego tokenu (`pub`/`async`/`fun`), tak jak robi to `parse_statement`.
+                let first_tok = self.cur()
+                let method_slot = self.stmt_lines.len()
+                self.stmt_lines.push(first_tok.line)
+                self.stmt_cols.push(first_tok.col)
+                self.stmt_tags.push("fun")
                 let is_pub_method = false
                 if self.check(Keyword, some("pub")) [
                     self.advance()
@@ -991,7 +1017,7 @@ impl Parser [
 !!! `parse_checked()` ponizej zamiast tego.
 fun parse(source: Str) -> Program [
     let tokens = tokenize(source)
-    let p = Parser(tokens, 0, [])
+    let p = Parser(tokens, 0, [], [], [], [])
     end p.parse_program()
 ]
 
@@ -1015,7 +1041,7 @@ struct ParseResult [
 !!! niepuste).
 fun parse_checked(source: Str) -> ParseResult [
     let tokens = tokenize(source)
-    let p = Parser(tokens, 0, [])
+    let p = Parser(tokens, 0, [], [], [], [])
     let prog = p.parse_program()
     end ParseResult(prog, p.errors)
 ]
