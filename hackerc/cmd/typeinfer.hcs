@@ -316,6 +316,38 @@ fun types_equal(a: Option<TypeRef>, b: Option<TypeRef>) -> Bool [
     ]
 ]
 
+!!! 0.6 (generyki): liczba parametrow typu zadeklarowanego `struct`/`enum`
+!!! o nazwie `name` (0 gdy typ nie jest generyczny albo nieznany).
+fun user_type_param_count(sigs: Signatures, name: Str) -> Int [
+    match sigs.structs.fetch(name.clone()) [
+        Some(sd) -> [
+            match sd [
+                StructDecl(_sn, _sf, stp) -> [
+                    end stp.len()
+                ]
+                _ -> [
+                ]
+            ]
+        ]
+        None -> [
+        ]
+    ]
+    match sigs.enums.fetch(name.clone()) [
+        Some(ed) -> [
+            match ed [
+                EnumDecl(_en, _ev, etp) -> [
+                    end etp.len()
+                ]
+                _ -> [
+                ]
+            ]
+        ]
+        None -> [
+        ]
+    ]
+    end 0
+]
+
 !!! -- Wywolania (Call) --------------------------------------------------
 
 !!! Zwraca nazwe identyfikatora, jesli `e` to `IdentExpr`, inaczej
@@ -790,7 +822,7 @@ fun main() [
     let point_fields: List<Param> = [Param("x", some(make_type0("Int")), none()), Param("y", some(make_type0("Int")), none())]
     let point_decl = StructDecl("Point", point_fields, [])
     let make_decl = FunDecl("make", [], some(make_type0("Point")), [], false, [], false)
-    let prog = Program([point_decl, make_decl])
+    let prog = Program([point_decl, make_decl], [], [], [])
     let sigs = collect_signatures(prog)
     let vars: Dict<Str, Option<TypeRef>> = dict()
     let env = TypeEnv(sigs, vars)
