@@ -1,5 +1,6 @@
 include <ast_nodes>
 include <typeinfer>
+include <codegen_sandbox>
 include <typecheck>
 
 fun list_contains_str(xs: List<Str>, s: Str) -> Bool [
@@ -2465,7 +2466,7 @@ impl CodeGen [
                 if t.name == "List" [
                     match t.generic.clone() [
                         Some(elem) -> [
-                            if self.is_refable_type(elem) [
+                            if self.is_refable_type(elem.clone()) or list_contains_str(self.current_type_params, elem.name.clone()) [
                                 end base + ".clone()"
                             ]
                         ]
@@ -2718,6 +2719,29 @@ impl CodeGen [
         let shape = self.gen_method_call_shape(callee.clone())
         if shape.is_method_call and shape.method_name == "len" and args.len() == 0 [
             end "(" + shape.target_rendered + ".len() as i64)"
+        ]
+        !!! 0.6 NAPRAWA: `List<Float>.sort()` generowalo `xs.sort()`, ktore sie nie
+        !!! kompiluje w Rust (`f64` nie implementuje `Ord`). Dla list liczb
+        !!! zmiennoprzecinkowych uzywamy `sort_by` z `partial_cmp` (NaN traktowany
+        !!! jak rownosc, wiec sortowanie nigdy nie panikuje).
+        if shape.is_method_call and shape.method_name == "sort" and args.len() == 0 [
+            match shape.target_type.clone() [
+                Some(sort_tt) -> [
+                    if sort_tt.name == "List" [
+                        match sort_tt.generic.clone() [
+                            Some(sort_elem) -> [
+                                if sort_elem.name == "Float" [
+                                    end shape.target_rendered + ".sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))"
+                                ]
+                            ]
+                            None -> [
+                            ]
+                        ]
+                    ]
+                ]
+                None -> [
+                ]
+            ]
         ]
         if shape.is_method_call and (shape.method_name == "char_at" or shape.method_name == "slice") [
             match shape.target_type.clone() [
@@ -3207,7 +3231,11 @@ impl CodeGen [
         let hint = ""
         match inferred_type.clone() [
             Some(t) -> [
-                if not type_contains_any(t.clone()) [
+                !! 0.6 (generyki): wywnioskowany typ generycznego struct/enum bez
+                !! argumentow (np. `Wrapper` z `Wrapper(5)`) nie moze byc wypisany jako
+                !! `let w: Wrapper` - Rust wymaga argumentow, wiec zostawiamy wnioskowanie rustc.
+                let bare_generic = user_type_param_count(self.sigs, t.name.clone()) > 0 and not type_ref_has_generic(t.clone())
+                if not type_contains_any(t.clone()) and not bare_generic [
                     hint = ": " + rust_type_name(t, self.sigs, self.current_type_params)
                 ]
             ]
@@ -3413,7 +3441,7 @@ impl CodeGen [
         self.emit("py.run_bound(" + python_raw_string(raw) + ", None, None)?;")
         self.emit("Ok(())")
         self.indent = self.indent - 1
-        self.emit("}).expect(\"direct[ ... ] (Python) block failed\");")
+        self.emit("}).unwrap_or_else(|e| { Python::with_gil(|py| e.print(py)); panic!(\"direct[ ... ] (Python) block failed\"); });")
         self.indent = self.indent - 1
         self.emit("}")
     ]
@@ -3480,7 +3508,7 @@ impl CodeGen [
             self.emit("py.run_bound(" + python_raw_string(fast_direct_compiled_driver(backend.clone())) + ", Some(&__hks_g), None)?;")
             self.emit("Ok(())")
             self.indent = self.indent - 1
-            self.emit("}).expect(\"fast direct {" + backend + "} block failed\");")
+            self.emit("}).unwrap_or_else(|e| { Python::with_gil(|py| e.print(py)); panic!(\"{}\", \"fast direct {" + backend + "} block failed\"); });")
             self.indent = self.indent - 1
             self.emit("}")
             end
@@ -3495,7 +3523,7 @@ impl CodeGen [
             self.emit("py.run_bound(" + python_raw_string(full_py) + ", None, None)?;")
             self.emit("Ok(())")
             self.indent = self.indent - 1
-            self.emit("}).expect(\"fast direct {" + backend + "} block failed\");")
+            self.emit("}).unwrap_or_else(|e| { Python::with_gil(|py| e.print(py)); panic!(\"{}\", \"fast direct {" + backend + "} block failed\"); });")
             self.indent = self.indent - 1
             self.emit("}")
             end
@@ -3841,24 +3869,8 @@ impl CodeGen [
         self.emit("}")
     ]
 
-    !!! `$ polecenie $` - Zero-Cost Sandbox (patrz docs/SANDBOX.md).
-    !!! Polecenie jest uruchamiane przez `sh -c` w izolacji sieci (proces
-    !!! widzi tylko `lo`) i systemu plikow (`/` zamontowane tylko-do-odczytu).
-    !!! 0.6: izolacje probowane PO KOLEI (pierwsza, ktora sie uda):
-    !!!   1. `unshare(CLONE_NEWNET)` + `unshare(CLONE_NEWNS)` + bind-remount
-    !!!      `/` jako RO (wymaga CAP_SYS_ADMIN - jak w poprzednich wersjach);
-    !!!   2. to samo przez `CLONE_NEWUSER` (user namespace + mapowanie uid/gid)
-    !!!      - dziala BEZ roota i BEZ capabilities na wiekszosci dystrybucji;
-    !!!   3. `bwrap` (bubblewrap), jesli jest zainstalowany i dziala.
-    !!! Bledy izolacji sa wykrywane jako BLAD `spawn` (Err z `pre_exec`), a nie
-    !!! po kodzie wyjscia - polecenie, ktore samo zwraca 111, nie jest mylone z
-    !!! awaria piaskownicy i nie uruchomi sie dwa razy.
-    !!! Gdy zadna izolacja nie dziala: domyslnie (`HKS_SANDBOX` nieustawione
-    !!! albo `strict`) panic - polecenie NIE jest wykonywane (fail-closed).
-    !!! `HKS_SANDBOX=best-effort` pozwala JAWNIE uruchomic je bez izolacji
-    !!! (z ostrzezeniem na stderr), `HKS_SANDBOX=off` pomija izolacje w ogole.
-    !!! Znane ograniczenie: remount RO dotyczy tylko montowania `/`, osobne
-    !!! montowania (np. osobny `/home`) moga pozostac zapisywalne.
+    !!! Sandbox `$ polecenie $`. Emitowany Rust, seccomp, limity i izolacja: patrz
+    !!! `codegen_sandbox.hcs::sandbox_emit_lines` i `docs/SANDBOX.md`.
     fun gen_sandbox(self, idx_text: Str) [
         let raw = ""
         match self.sandbox_blocks.fetch(idx_text) [
@@ -3869,83 +3881,10 @@ impl CodeGen [
             ]
         ]
         self.needs_sandbox = true
-        self.emit("{")
-        self.emit("    let __hks_cmd: String = " + python_raw_string(raw) + ".to_string();")
-        self.emit("    let __hks_mode = std::env::var(\"HKS_SANDBOX\").unwrap_or_default().to_lowercase();")
-        self.emit("    let __hks_run = |__lvl: u8| -> std::io::Result<std::process::ExitStatus> {")
-        self.emit("        use std::os::unix::process::CommandExt;")
-        self.emit("        let mut __c = if __lvl == 3 {")
-        self.emit("            let mut __b = std::process::Command::new(\"bwrap\");")
-        self.emit("            __b.args([\"--unshare-net\", \"--ro-bind\", \"/\", \"/\", \"--dev\", \"/dev\", \"--proc\", \"/proc\", \"sh\", \"-c\"]).arg(&__hks_cmd);")
-        self.emit("            __b")
-        self.emit("        } else {")
-        self.emit("            let mut __s = std::process::Command::new(\"sh\");")
-        self.emit("            __s.arg(\"-c\").arg(&__hks_cmd);")
-        self.emit("            __s")
-        self.emit("        };")
-        self.emit("        if __lvl == 1 || __lvl == 2 {")
-        self.emit("            let __uid = unsafe { libc::geteuid() };")
-        self.emit("            let __gid = unsafe { libc::getegid() };")
-        self.emit("            let __uid_map = format!(\"{} {} 1\", __uid, __uid).into_bytes();")
-        self.emit("            let __gid_map = format!(\"{} {} 1\", __gid, __gid).into_bytes();")
-        self.emit("            unsafe {")
-        self.emit("                __c.pre_exec(move || {")
-        self.emit("                    unsafe fn __w(path: &[u8], data: &[u8]) -> bool {")
-        self.emit("                        let fd = libc::open(path.as_ptr() as *const libc::c_char, libc::O_WRONLY);")
-        self.emit("                        if fd < 0 { return false; }")
-        self.emit("                        let n = libc::write(fd, data.as_ptr() as *const libc::c_void, data.len());")
-        self.emit("                        libc::close(fd);")
-        self.emit("                        n == data.len() as isize")
-        self.emit("                    }")
-        self.emit("                    if __lvl == 1 {")
-        self.emit("                        if libc::unshare(libc::CLONE_NEWNET) != 0 || libc::unshare(libc::CLONE_NEWNS) != 0 {")
-        self.emit("                            return Err(std::io::Error::last_os_error());")
-        self.emit("                        }")
-        self.emit("                    } else {")
-        self.emit("                        if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNET | libc::CLONE_NEWNS) != 0 {")
-        self.emit("                            return Err(std::io::Error::last_os_error());")
-        self.emit("                        }")
-        self.emit("                        if !__w(b\"/proc/self/setgroups\\0\", b\"deny\") || !__w(b\"/proc/self/uid_map\\0\", &__uid_map) || !__w(b\"/proc/self/gid_map\\0\", &__gid_map) {")
-        self.emit("                            return Err(std::io::Error::last_os_error());")
-        self.emit("                        }")
-        self.emit("                    }")
-        self.emit("                    let __root = b\"/\\0\";")
-        self.emit("                    if libc::mount(__root.as_ptr() as *const libc::c_char, __root.as_ptr() as *const libc::c_char, std::ptr::null(), libc::MS_BIND | libc::MS_REC, std::ptr::null()) != 0")
-        self.emit("                        || libc::mount(std::ptr::null(), __root.as_ptr() as *const libc::c_char, std::ptr::null(), libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY, std::ptr::null()) != 0 {")
-        self.emit("                        return Err(std::io::Error::last_os_error());")
-        self.emit("                    }")
-        self.emit("                    Ok(())")
-        self.emit("                });")
-        self.emit("            }")
-        self.emit("        }")
-        self.emit("        __c.status()")
-        self.emit("    };")
-        self.emit("    let mut __hks_done = false;")
-        self.emit("    let mut __hks_errs: Vec<String> = Vec::new();")
-        self.emit("    if __hks_mode != \"off\" {")
-        self.emit("        for __lvl in [1u8, 2u8, 3u8] {")
-        self.emit("            if __lvl == 3 {")
-        self.emit("                let __ok = std::process::Command::new(\"bwrap\").args([\"--unshare-net\", \"--ro-bind\", \"/\", \"/\", \"true\"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false);")
-        self.emit("                if !__ok {")
-        self.emit("                    __hks_errs.push(\"bwrap: niedostepny albo nie dziala\".to_string());")
-        self.emit("                    continue;")
-        self.emit("                }")
-        self.emit("            }")
-        self.emit("            match __hks_run(__lvl) {")
-        self.emit("                Ok(_) => { __hks_done = true; break; }")
-        self.emit("                Err(e) => { __hks_errs.push(format!(\"metoda {}: {}\", __lvl, e)); }")
-        self.emit("            }")
-        self.emit("        }")
-        self.emit("    }")
-        self.emit("    if !__hks_done {")
-        self.emit("        if __hks_mode == \"off\" || __hks_mode == \"best-effort\" {")
-        self.emit("            eprintln!(\"[hackerc-sandbox] OSTRZEZENIE: uruchamiam polecenie BEZ izolacji (HKS_SANDBOX={}). Proby: {:?}\", __hks_mode, __hks_errs);")
-        self.emit("            std::process::Command::new(\"sh\").arg(\"-c\").arg(&__hks_cmd).status().expect(\"$ ... $ (Zero-Cost Sandbox) blok: nie udalo sie uruchomic polecenia\");")
-        self.emit("        } else {")
-        self.emit("            panic!(\"$ ... $ (Zero-Cost Sandbox) blok: izolacja niedostepna w tym srodowisku ({:?}) - polecenie NIE zostalo uruchomione (fail-closed). Mozesz jawnie zezwolic na uruchomienie bez izolacji: HKS_SANDBOX=best-effort. Patrz docs/SANDBOX.md\", __hks_errs);")
-        self.emit("        }")
-        self.emit("    }")
-        self.emit("}")
+        let sandbox_lines = sandbox_emit_lines(python_raw_string(raw))
+        for sandbox_line in sandbox_lines [
+            self.emit(sandbox_line)
+        ]
     ]
 
     fun gen_expr_stmt(self, e: Expr) [
@@ -4253,6 +4192,27 @@ impl CodeGen [
         self.indent = self.indent - 1
         self.emit("}")
         self.emit("")
+    ]
+
+    !!! 0.6 (generyki): jak `generic_head`, ale kazdy parametr z ograniczeniem
+    !!! `Clone` (`<T: Clone>`) - elementy typu `T` sa klonowane przy indeksowaniu
+    !!! i odczycie pol, wiec funkcje/`impl` generyczne tego wymagaja.
+    fun generic_head_clone(self, type_params: List<Str>) -> Str [
+        if type_params.len() == 0 [
+            end ""
+        ]
+        let out = "<"
+        let i = 0
+        let n = type_params.len()
+        while i < n [
+            if i > 0 [
+                out = out + ", "
+            ]
+            out = out + type_params[i].clone() + ": Clone"
+            i = i + 1
+        ]
+        out = out + ">"
+        end out
     ]
 
     fun generic_head(self, type_params: List<Str>) -> Str [
@@ -4599,7 +4559,7 @@ impl CodeGen [
             ]
         ]
         self.current_type_params = type_params.clone()
-        let gen_head = self.generic_head(type_params)
+        let gen_head = self.generic_head_clone(type_params)
         self.env_vars = dict()
 
         !! NOWOSC 0.4 - `@wasm_export` (patrz
@@ -4830,8 +4790,9 @@ impl CodeGen [
 
     fun gen_impl(self, struct_name: Str, methods: List<Stmt>, type_params: List<Str>) [
         self.current_type_params = type_params.clone()
-        let gen_head = self.generic_head(type_params)
-        self.emit("impl" + gen_head.clone() + " " + struct_name.clone() + gen_head + " {")
+        let plain_head = self.generic_head(type_params.clone())
+        let gen_head = self.generic_head_clone(type_params)
+        self.emit("impl" + gen_head + " " + struct_name.clone() + plain_head + " {")
         self.indent = self.indent + 1
         let i = 0
         let n = methods.len()
@@ -5424,7 +5385,7 @@ fun main() [
     let b_fields: List<Param> = [Param("a", some(TypeRef("Option", some(TypeRef("A", none(), none())), none())), none())]
     let b_decl = StructDecl("B", b_fields, [])
 
-    let prog = Program([node_decl, a_decl, b_decl])
+    let prog = Program([node_decl, a_decl, b_decl], [], [], [])
     let sigs = collect_signatures(prog)
     let info = build_recursion_info(sigs)
 
@@ -5437,7 +5398,7 @@ fun main() [
     !! else [ msg = "niedodatnie" ] end msg ]` recznie zbudowane jako
     !! List<Stmt>, i wypisuje wygenerowany tekst Rust linia po linii.
     let body: List<Stmt> = [LetStmt("msg", none(), some(StringLit("", false)), false), IfStmt(BinOp(">", IdentExpr("n"), NumberLit("0")), [AssignStmt(IdentExpr("msg"), "=", StringLit("dodatnie", false))], [], some([AssignStmt(IdentExpr("msg"), "=", StringLit("niedodatnie", false))])), ReturnStmt(some(IdentExpr("msg")))]
-    let empty_sigs = collect_signatures(Program([]))
+    let empty_sigs = collect_signatures(Program([], [], [], []))
     let empty_dict1: Dict<Str, Int> = dict()
     let empty_dict2: Dict<Str, Str> = dict()
     let empty_dict3: Dict<Str, Bool> = dict()
@@ -5468,7 +5429,7 @@ fun main() [
     let point_decl = StructDecl("Point", point_fields, [])
     let sum_body: List<Stmt> = [ReturnStmt(some(BinOp("+", NumberLit("1"), NumberLit("2"))))]
     let sum_fun = FunDecl("add_one_two", [], some(TypeRef("Int", none(), none())), sum_body, false, [], false)
-    let demo_prog = Program([point_decl, sum_fun])
+    let demo_prog = Program([point_decl, sum_fun], [], [], [])
     let generated = gen_program(demo_prog)
     let gi = 0
     let gn = generated.len()
