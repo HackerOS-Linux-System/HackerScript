@@ -106,7 +106,7 @@ HackerScript/
     PERFORMANCE.md            wydajnosc transpilacji + cache budowania (0.6)
     BIT.md                    kontrakt bit <-> hackerc
     HACK3RC.md                kompilator AOT (Cranelift)
-    FAST_DIRECT.md            direct {backend} - 19 backendow
+    FAST_DIRECT.md            fast direct {backend} - 20 backendow (dynamicznie, bez statycznego linkowania)
     LSP.md                    Language Server (hackerc lsp)
     MULTI_VERSION.md          using <wersja> per plik
     JAVA.md / KOTLIN.md / GO.md   FFI do JVM i Go
