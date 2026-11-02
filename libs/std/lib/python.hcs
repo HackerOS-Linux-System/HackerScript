@@ -1,0 +1,271 @@
+get <crates:pyo3::0.22+auto-initialize>
+
+!! python - osadzony CPython z bledami jako `Result` i wymiana wartosci (0.6).
+!! Uzycie: get <std:python>
+!!
+!! Uzupelnia blok `direct [ ... ]`: tamten nie zwraca wartosci i przy bledzie Pythona
+!! konczy program (panic z tracebackiem). Tutaj kazde wywolanie zwraca
+!! `Result<_, Str>`, a komunikat bledu ma postac `TypLedu: tresc`
+!! (np. `ValueError: boom`), wiec mozna go obsluzyc przez `match`/`?`.
+!!
+!! Stan jest WSPOLNY z blokami `direct [ ... ]`: zmienne ustawione przez `py_set_*`
+!! sa widoczne w `direct`, a zmienne utworzone w `direct` mozna odczytac przez
+!! `py_eval*` (jedna globalna przestrzen nazw modulu `__main__`). Wartosci
+!! przekazujemy kopiami (Str/Int/Float/Bool) - nie ma wspolnych referencji do obiektow.
+!!
+!! Wymaga libpython w systemie (jak `direct`). Interpreter inicjuje sie leniwie
+!! przy pierwszym wywolaniu. Wywolania sa serializowane przez GIL.
+
+native {Rust} [
+    use pyo3::prelude::*;
+
+    pub fn hks_py_run(code: &str) -> Result<(), String> {
+        Python::with_gil(|py| py.run_bound(code, None, None).map_err(|e| e.to_string()))
+    }
+
+    pub fn hks_py_eval_str(expr: &str) -> Result<String, String> {
+        Python::with_gil(|py| {
+            let v = py.eval_bound(expr, None, None).map_err(|e| e.to_string())?;
+            let s = v.str().map_err(|e| e.to_string())?;
+            s.extract::<String>().map_err(|e| e.to_string())
+        })
+    }
+
+    pub fn hks_py_eval_int(expr: &str) -> Result<i64, String> {
+        Python::with_gil(|py| {
+            let v = py.eval_bound(expr, None, None).map_err(|e| e.to_string())?;
+            v.extract::<i64>().map_err(|e| e.to_string())
+        })
+    }
+
+    pub fn hks_py_eval_float(expr: &str) -> Result<f64, String> {
+        Python::with_gil(|py| {
+            let v = py.eval_bound(expr, None, None).map_err(|e| e.to_string())?;
+            v.extract::<f64>().map_err(|e| e.to_string())
+        })
+    }
+
+    pub fn hks_py_eval_bool(expr: &str) -> Result<bool, String> {
+        Python::with_gil(|py| {
+            let v = py.eval_bound(expr, None, None).map_err(|e| e.to_string())?;
+            v.is_truthy().map_err(|e| e.to_string())
+        })
+    }
+
+    pub fn hks_py_valid_name(name: &str) -> bool {
+        let mut chars = name.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+            _ => return false,
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    pub fn hks_py_set_str(name: &str, v: &str) -> Result<(), String> {
+        if !hks_py_valid_name(name) {
+            return Err(format!("niepoprawna nazwa zmiennej Pythona: {}", name));
+        }
+        Python::with_gil(|py| {
+            let m = py.import_bound("__main__").map_err(|e| e.to_string())?;
+            m.setattr(name, v).map_err(|e| e.to_string())
+        })
+    }
+
+    pub fn hks_py_set_int(name: &str, v: i64) -> Result<(), String> {
+        if !hks_py_valid_name(name) {
+            return Err(format!("niepoprawna nazwa zmiennej Pythona: {}", name));
+        }
+        Python::with_gil(|py| {
+            let m = py.import_bound("__main__").map_err(|e| e.to_string())?;
+            m.setattr(name, v).map_err(|e| e.to_string())
+        })
+    }
+
+    pub fn hks_py_set_float(name: &str, v: f64) -> Result<(), String> {
+        if !hks_py_valid_name(name) {
+            return Err(format!("niepoprawna nazwa zmiennej Pythona: {}", name));
+        }
+        Python::with_gil(|py| {
+            let m = py.import_bound("__main__").map_err(|e| e.to_string())?;
+            m.setattr(name, v).map_err(|e| e.to_string())
+        })
+    }
+
+    pub fn hks_py_set_bool(name: &str, v: bool) -> Result<(), String> {
+        if !hks_py_valid_name(name) {
+            return Err(format!("niepoprawna nazwa zmiennej Pythona: {}", name));
+        }
+        Python::with_gil(|py| {
+            let m = py.import_bound("__main__").map_err(|e| e.to_string())?;
+            m.setattr(name, v).map_err(|e| e.to_string())
+        })
+    }
+]
+
+!! Wykonuje kod Pythona (jak `exec`). `Err("TypLedu: tresc")` przy wyjatku.
+fun py_run(code: Str) -> Result<Bool, Str> [
+    let good = false
+    let msg = ""
+    native {Rust} [
+        match hks_py_run(&code) {
+            Ok(()) => { good = true; }
+            Err(e) => { msg = e; }
+        }
+    ]
+    if good [
+        end ok(true)
+    ]
+    end err(msg)
+]
+
+!! Oblicza wyrazenie Pythona i zwraca `str(wynik)`.
+fun py_eval(expr: Str) -> Result<Str, Str> [
+    let good = false
+    let out = ""
+    native {Rust} [
+        match hks_py_eval_str(&expr) {
+            Ok(s) => { out = s; good = true; }
+            Err(e) => { out = e; }
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err(out)
+]
+
+!! Oblicza wyrazenie i zwraca wynik jako Int (Err, gdy wynik nie jest liczba
+!! calkowita mieszczaca sie w i64).
+fun py_eval_int(expr: Str) -> Result<Int, Str> [
+    let good = false
+    let val = 0
+    let msg = ""
+    native {Rust} [
+        match hks_py_eval_int(&expr) {
+            Ok(n) => { val = n; good = true; }
+            Err(e) => { msg = e; }
+        }
+    ]
+    if good [
+        end ok(val)
+    ]
+    end err(msg)
+]
+
+!! Jak `py_eval_int`, ale dla liczby zmiennoprzecinkowej (Python `int` tez przejdzie).
+fun py_eval_float(expr: Str) -> Result<Float, Str> [
+    let good = false
+    let val = 0.0
+    let msg = ""
+    native {Rust} [
+        match hks_py_eval_float(&expr) {
+            Ok(n) => { val = n; good = true; }
+            Err(e) => { msg = e; }
+        }
+    ]
+    if good [
+        end ok(val)
+    ]
+    end err(msg)
+]
+
+!! Prawdziwosc wyrazenia wg Pythona (`bool(wynik)`).
+fun py_eval_bool(expr: Str) -> Result<Bool, Str> [
+    let good = false
+    let val = false
+    let msg = ""
+    native {Rust} [
+        match hks_py_eval_bool(&expr) {
+            Ok(b) => { val = b; good = true; }
+            Err(e) => { msg = e; }
+        }
+    ]
+    if good [
+        end ok(val)
+    ]
+    end err(msg)
+]
+
+!! Ustawia globalna zmienna Pythona (`nazwa` musi byc poprawnym identyfikatorem).
+fun py_set_str(name: Str, value: Str) -> Result<Bool, Str> [
+    let good = false
+    let msg = ""
+    native {Rust} [
+        match hks_py_set_str(&name, &value) {
+            Ok(()) => { good = true; }
+            Err(e) => { msg = e; }
+        }
+    ]
+    if good [
+        end ok(true)
+    ]
+    end err(msg)
+]
+
+fun py_set_int(name: Str, value: Int) -> Result<Bool, Str> [
+    let good = false
+    let msg = ""
+    native {Rust} [
+        match hks_py_set_int(&name, value) {
+            Ok(()) => { good = true; }
+            Err(e) => { msg = e; }
+        }
+    ]
+    if good [
+        end ok(true)
+    ]
+    end err(msg)
+]
+
+fun py_set_float(name: Str, value: Float) -> Result<Bool, Str> [
+    let good = false
+    let msg = ""
+    native {Rust} [
+        match hks_py_set_float(&name, value) {
+            Ok(()) => { good = true; }
+            Err(e) => { msg = e; }
+        }
+    ]
+    if good [
+        end ok(true)
+    ]
+    end err(msg)
+]
+
+fun py_set_bool(name: Str, value: Bool) -> Result<Bool, Str> [
+    let good = false
+    let msg = ""
+    native {Rust} [
+        match hks_py_set_bool(&name, value) {
+            Ok(()) => { good = true; }
+            Err(e) => { msg = e; }
+        }
+    ]
+    if good [
+        end ok(true)
+    ]
+    end err(msg)
+]
+
+!! Odczyt globalnej zmiennej jako tekst (`str(zmienna)`).
+fun py_get_str(name: Str) -> Result<Str, Str> [
+    end py_eval(name)
+]
+
+!! Czy modul da sie zaimportowac (np. "numpy"). Nie rzuca - `false` przy braku.
+fun py_has_module(module: Str) -> Bool [
+    let found = false
+    native {Rust} [
+        found = Python::with_gil(|py| py.import_bound(module.as_str()).is_ok());
+    ]
+    end found
+]
+
+!! Wersja osadzonego interpretera, np. "3.12.3".
+fun py_version() -> Str [
+    let v = ""
+    native {Rust} [
+        v = Python::with_gil(|py| py.version().split_whitespace().next().unwrap_or("?").to_string());
+    ]
+    end v
+]
