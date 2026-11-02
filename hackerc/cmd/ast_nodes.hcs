@@ -133,8 +133,19 @@ enum Stmt [
 ]
 
 !!! Caly program - lista instrukcji/deklaracji najwyzszego poziomu.
+!!! 0.6 - POZYCJE: `lines`/`cols`/`tags` to tabela pozycji WSZYSTKICH instrukcji
+!!! w kolejnosci pre-order (instrukcja, potem jej zagniezdzone instrukcje w
+!!! kolejnosci zrodla): 1-based linia i kolumna pierwszego tokenu oraz krotki
+!!! tag rodzaju (`stmt_tag`). Tabela jest rownolegla do drzewa, a nie
+!!! wpleciona w warianty `Stmt` - dzieki temu ~30 miejsc dopasowujacych `Stmt`
+!!! zostaje bez zmian. Puste listy = pozycje nieznane (program zbudowany recznie
+!!! albo przeksztalcony po parsowaniu); konsument MUSI sprawdzic `tags` (zgodnosc
+!!! rodzaju z drzewem) i przy niezgodnosci uzyc wyszukiwania tekstowego.
 struct Program [
-    body: List<Stmt>
+    body: List<Stmt>,
+    lines: List<Int>,
+    cols: List<Int>,
+    tags: List<Str>
 ]
 
 !!! Demonstracyjne uzycie - buduje reczne AST dla `fun add(a: Int, b:
@@ -147,7 +158,7 @@ fun main() [
     let b_param = Param("b", some(int_type.clone()), none())
     let body: List<Stmt> = [ReturnStmt(some(BinOp("+", IdentExpr("a"), IdentExpr("b"))))]
     let f = FunDecl("add", [a_param, b_param], some(int_type), body, false, [], false)
-    let prog = Program([f])
+    let prog = Program([f], [], [], [])
     log("instrukcje w programie:", prog.body.len())
 ]
 
@@ -173,4 +184,77 @@ fun for_var_names(var: Str) -> List<Str> [
     ]
     out.push(cur.clone())
     end out
+]
+
+!!! 0.6: krotki tag rodzaju instrukcji - klucz kontrolny tabeli pozycji
+!!! `Program.tags` (patrz wyzej). Nie zawiera pol instrukcji, tylko jej wariant.
+fun stmt_tag(s: Stmt) -> Str [
+    match s [
+        LetStmt(_n, _t, _v, _c) -> [
+            end "let"
+        ]
+        AssignStmt(_t, _o, _v) -> [
+            end "assign"
+        ]
+        FunDecl(_n, _p, _r, _b, _pub, _tp, _as) -> [
+            end "fun"
+        ]
+        RegionBlock(_s) -> [
+            end "region"
+        ]
+        IfStmt(_c, _b, _e, _eb) -> [
+            end "if"
+        ]
+        WhileStmt(_c, _b) -> [
+            end "while"
+        ]
+        ForStmt(_v, _i, _b) -> [
+            end "for"
+        ]
+        ReturnStmt(_v) -> [
+            end "return"
+        ]
+        BreakStmt -> [
+            end "break"
+        ]
+        ContinueStmt -> [
+            end "continue"
+        ]
+        ExprStmt(_e) -> [
+            end "expr"
+        ]
+        GetImportStmt(_a, _b, _c, _d) -> [
+            end "get"
+        ]
+        IncludeStmt(_p) -> [
+            end "include"
+        ]
+        UsingStmt(_v) -> [
+            end "using"
+        ]
+        UseStmt(_k, _v) -> [
+            end "use"
+        ]
+        DirectBlock(_l) -> [
+            end "direct"
+        ]
+        ManualBlock(_b) -> [
+            end "manual"
+        ]
+        GcPragma(_m) -> [
+            end "gc"
+        ]
+        StructDecl(_n, _f, _d) -> [
+            end "struct"
+        ]
+        EnumDecl(_n, _v, _d) -> [
+            end "enum"
+        ]
+        MatchStmt(_s, _a) -> [
+            end "match"
+        ]
+        ImplDecl(_n, _b, _d) -> [
+            end "impl"
+        ]
+    ]
 ]
