@@ -7,6 +7,7 @@ include <formatter>
 include <transpiler>
 include <project>
 include <hlib>
+include <ffi>
 include <lsp>
 include <kotlin_backend>
 include <javascript_backend>
@@ -771,7 +772,7 @@ fun cmd_hlib(argv: List<Str>) -> Int [
     let _drop = rest.remove(0)
 
     if action == "build" [
-        let src = first_positional(rest, ["-o", "--output", "--lib-version", "--sign"])
+        let src = first_positional(rest, ["-o", "--output", "--lib-version", "--sign", "--name", "--ffi-target", "--ffi-inst"])
         if src == "" [
             elog(c_red("hackerc hlib build:") + " brak wymaganego argumentu 'source' (plik .hcs)")
             end 1
@@ -811,6 +812,24 @@ fun cmd_hlib(argv: List<Str>) -> Int [
         !!! rozszerzenie na potem (manifest/hlib_build juz to obslugujom
         !!! - parametr `so_path` - brakuje tylko wpiecia go tutaj w CLI
         !!! do istniejacego `build_project()`/cargo).
+        !!! `--ffi` (ffi.hcs): dodatkowo buduje fasade C-ABI jako `static_lib` i wpisuje `manifest.exports`,
+        !!! dzieki czemu H# (i inne jezyki bez czytania `.hcs`) moga uzyc tej biblioteki:
+        !!!   hackerc hlib build <bundle.hcs> --ffi [--ffi-target <triple>] [--ffi-keep] -o x.hlib --name x
+        if has_flag(rest, "--ffi") [
+            let ffi_target = ""
+            match find_flag_value(rest, "", "--ffi-target") [
+                Some(v) -> [ ffi_target = v ]
+                None -> [ ]
+            ]
+            !!! `--ffi-inst "ident<Int>,Pair<Int,Str>"` - instancje generykow (funkcje i typy), bo przez C-ABI
+            !!! mozna wyeksportowac tylko konkretne typy
+            let ffi_inst = ""
+            match find_flag_value(rest, "", "--ffi-inst") [
+                Some(v) -> [ ffi_inst = v ]
+                None -> [ ]
+            ]
+            end ffi_build_hlib(src, out_hlib, lib_name, lib_version, sign_key_path, ffi_target, has_flag(rest, "--ffi-keep"), VERSION.to_string(), ffi_inst)
+        ]
         let result = hlib_build(src, "", out_hlib, lib_name, lib_version, sign_key_path)
         if result.ok [
             log(c_bold_green("hackerc hlib build:") + " " + result.message)
@@ -1018,7 +1037,7 @@ fun print_usage() [
     log("    fmt                 formatuje kod .hcs")
     log("    lsp                 Language Server (LSP) po stdio - patrz docs/LSP.md (Etap 2a: diagnostyka)")
     log("    hlib                buduj/sprawdzaj archiwa .hlib (HackerOS Lib) - patrz hlib.hcs")
-    log("      hlib build <plik.hcs> [-o wyjscie.hlib] [--lib-version W] [--sign klucz]")
+    log("      hlib build <plik.hcs> [-o wyjscie.hlib] [--lib-version W] [--sign klucz] [--ffi [--ffi-target TRIPLE] [--ffi-inst f<Int>,T<Str>] [--ffi-keep]]")
     log("      hlib inspect <plik.hlib>")
     log("      hlib verify <plik.hlib> [--pubkey HEX]")
     log("      hlib keygen [-o klucz.key]")
