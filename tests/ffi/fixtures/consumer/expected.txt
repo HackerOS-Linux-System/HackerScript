@@ -1,0 +1,24 @@
+label=root
+tags len via fresh getter=2
+tags[1]=b
+meta[k]=5
+meta keys=1
+set insert=true again=false
+set len=1
+rect tag=1 b=4 area=12
+named tag=3 v=hey wrong=0
+ident=9 z
+pair left=1 b=q
+first=1.5
+norm=6
+bump=7 x=7
+fetch ok=true v=7
+fetch err=false bad no
+sent=true
+recv some=true v=42
+recv after close some=false
+next some=true
+opt_len=4
+sum=7
+cfg=1
+done
