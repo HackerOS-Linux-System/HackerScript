@@ -1,0 +1,149 @@
+include <harness>
+include <work:hackerc::ffi_gen>
+get <std:string> import <str_split::str_join>
+get <std:json> import <JsonValue::JsonEntry::json_parse>
+
+!!! Testy generatora fasady C-ABI (`hackerc/cmd/ffi_gen.hcs`).
+!!!
+!!! Wzorce w `golden/gen/` zostaly wygenerowane przez ORYGINALNY generator napisany w Rust (dawny `ffi_gen.rs`);
+!!! wersja HackerScript odtwarza je bajt w bajt, wiec testy pilnuja rownowaznosci przepisania i braku regresji.
+!!! `--update` przepisuje wzorce z biezacego wyjscia (uzywac tylko swiadomie, po przejrzeniu roznic).
+
+!!! Ile razy `needle` wystepuje w `hay` (rozlaczne wystapienia).
+fun gen_count(hay: Str, needle: Str) -> Int [
+    let parts: List<Str> = str_split(hay, needle)
+    end parts.len() - 1
+]
+
+fun suite_gen(dir: Str, update: Bool) -> TestRun [
+    let t = t_new()
+    t.section("generator fasady C-ABI (ffi_gen.hcs)")
+    t = t_merge(t, gen_golden_cases(dir.clone(), update))
+    if not update [
+        t = t_merge(t, gen_unit_tests(dir.clone()))
+    ]
+    end t
+]
+
+!!! Kazdy eksport w `exports` ma w fasadzie funkcje o nazwie `api`, a liczba eksportow = liczbie `#[no_mangle]`.
+fun gen_check_consistency(name: Str, out: FfgOut) -> TestRun [
+    let t = t_new()
+    let ok = true
+    let n_exports = 0
+    match json_parse(out.exports.clone()) [
+        Ok(v) -> [
+            match v [
+                JsonArray(items) -> [
+                    n_exports = items.len()
+                    let i = 0
+                    while i < items.len() [
+                        match items[i].clone() [
+                            JsonObject(entries) -> [
+                                let k = 0
+                                while k < entries.len() [
+                                    if entries[k].key == "api" [
+                                        match entries[k].value.clone() [
+                                            JsonString(api) -> [
+                                                if gen_count(out.rust.clone(), "fn " + api + "(") != 1 [
+                                                    ok = false
+                                                    elog("        symbol `" + api + "` nie wystepuje dokladnie raz w fasadzie")
+                                                ]
+                                            ]
+                                            _ -> [
+                                                ok = false
+                                            ]
+                                        ]
+                                    ]
+                                    k = k + 1
+                                ]
+                            ]
+                            _ -> [
+                                ok = false
+                            ]
+                        ]
+                        i = i + 1
+                    ]
+                ]
+                _ -> [
+                    ok = false
+                ]
+            ]
+        ]
+        Err(e) -> [
+            ok = false
+            elog("        exports nie jest poprawnym JSON: " + e)
+        ]
+    ]
+    t.check(name + ": exports to poprawny JSON, kazdy `api` jest w fasadzie", ok)
+    t.check(name + ": liczba eksportow == liczba #[no_mangle]", n_exports == gen_count(out.rust.clone(), "#[no_mangle]"))
+    end t
+]
+
+fun gen_golden_cases(dir: Str, update: Bool) -> TestRun [
+    let t = t_new()
+    let cases = t_lines(t_read(dir + "/fixtures/gen/cases.txt"))
+    let ci = 0
+    while ci < cases.len() [
+        let f: List<Str> = str_split(cases[ci].clone(), "|")
+        ci = ci + 1
+        let name: Str = f[0].clone()
+        let ir = t_read(dir + "/fixtures/gen/" + f[1])
+        let out = ffg_generate(ir, f[2].clone(), f[3].clone())
+        let base = dir + "/golden/gen/" + name
+        if update [
+            t_write(base + ".facade.rs", out.rust.clone())
+            t_write(base + ".exports.json", out.exports.clone())
+            t_write(base + ".skipped.txt", out.skipped.clone())
+            log("  zapisano wzorce: " + name)
+        ] else [
+            t.same(name + ": fasada (kod Rust) == wzorzec", out.rust.clone(), t_read(base + ".facade.rs"))
+            t.same(name + ": manifest.exports == wzorzec", out.exports.clone(), t_read(base + ".exports.json"))
+            t.same(name + ": lista pominietych == wzorzec", out.skipped.clone(), t_read(base + ".skipped.txt"))
+        ]
+        t = t_merge(t, gen_check_consistency(name, out))
+    ]
+    end t
+]
+
+fun gen_unit_tests(dir: Str) -> TestRun [
+    let t = t_new()
+    !! parsowanie i nazwy typow
+    let ty = ffg_parse_ty("List<Dict<Str,Pair<Int,Str>>>")
+    t.same("tname(List<Dict<Str,Pair<Int,Str>>>)", ffg_tname(ty.clone()), "List_Dict_Str_Pair_Int_Str")
+    t.same("rty(List<Dict<Str,Pair<Int,Str>>>)", ffg_rty(ty.clone()), "Vec<std::collections::HashMap<String, Pair<i64, String>>>")
+    t.same("rty(Set<Int>)", ffg_rty(ffg_parse_ty("Set<Int>")), "std::collections::HashSet<i64>")
+    t.same("rty(Chan<Str>)", ffg_rty(ffg_parse_ty("Chan<Str>")), "HksChan<String>")
+    t.same("rty(Result<Int,Str>)", ffg_rty(ffg_parse_ty("Result<Int,Str>")), "Result<i64, String>")
+    t.same("brakujacy argument -> Unit: tname(Result<Int>)", ffg_tname(ffg_parse_ty("Result<Int>")), "Result_Int_Unit")
+    t.same("pusty typ -> Unit", ffg_tname(ffg_parse_ty("")), "Unit")
+    t.same("typ wlasny z argumentami: rty(Pair<Int, Str>)", ffg_rty(ffg_parse_ty("Pair<Int, Str>")), "Pair<i64, String>")
+    t.check("is_handle: Int/Str to nie uchwyty, List/Named tak", not ffg_is_handle(ffg_parse_ty("Int")) and not ffg_is_handle(ffg_parse_ty("Str")) and ffg_is_handle(ffg_parse_ty("List<Int>")) and ffg_is_handle(ffg_parse_ty("Node")))
+    t.check("hashable: Int/Bool/Str tak, Float/List nie", ffg_hashable(ffg_parse_ty("Int")) and ffg_hashable(ffg_parse_ty("Bool")) and ffg_hashable(ffg_parse_ty("Str")) and not ffg_hashable(ffg_parse_ty("Float")) and not ffg_hashable(ffg_parse_ty("List<Int>")))
+    t.same("abi_json(Int)", ffg_abi_json(ffg_parse_ty("Int")), "{\"type\":\"i64\"}")
+    t.same("abi_json(Str)", ffg_abi_json(ffg_parse_ty("Str")), "{\"type\":\"cstr\"}")
+    t.same("abi_json(List<Int>)", ffg_abi_json(ffg_parse_ty("List<Int>")), "{\"type\":\"opaque\",\"struct_name\":\"List_Int\"}")
+
+    !! podstawianie parametrow typowych
+    let names: List<Str> = ["T"]
+    let args: List<FfgTy> = [ffg_parse_ty("Str")]
+    t.same("subst(List<T>, T=Str)", ffg_tname(ffg_subst(ffg_parse_ty("List<T>"), names.clone(), args.clone())), "List_Str")
+    t.same("subst nie rusza typow z argumentami (T<Int> zostaje)", ffg_tname(ffg_subst(ffg_parse_ty("T<Int>"), names.clone(), args.clone())), "T_Int")
+
+    !! dzielenie po przecinkach na poziomie 0 nawiasow
+    t.same("split_top", str_join(ffg_split_top("A<B,C>,D, E", ","), "|"), "A<B,C>|D|E")
+    t.same("split_top pusty", str_join(ffg_split_top("", ","), "|"), "")
+    t.same("csv", str_join(ffg_csv("T, U,,V"), "|"), "T|U|V")
+    t.same("ident", ffg_ident("we ird-lib.9"), "we_ird_lib_9")
+
+    !! nazwa biblioteki trafia (po sanityzacji) do symboli
+    let ir = t_read(dir + "/fixtures/gen/main.ir")
+    let weird = ffg_generate(ir, "we ird-lib.9", "")
+    t.has("symbole zawieraja oczyszczona nazwe biblioteki", weird.rust.clone(), "fn hksffi_we_ird_lib_9_make_node(")
+
+    !! pusty IR: tylko kod pomocniczy, zero eksportow
+    let empty = ffg_generate("", "t", "")
+    t.same("pusty IR: exports == []", empty.exports.clone(), "[]")
+    t.same("pusty IR: nic nie pominieto", empty.skipped.clone(), "")
+    t.has("pusty IR: kod pomocniczy obecny", empty.rust.clone(), "unsafe fn hks_cstr(")
+    end t
+]
