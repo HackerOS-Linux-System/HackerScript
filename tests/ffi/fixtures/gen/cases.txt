@@ -1,0 +1,5 @@
+main|main.ir|t|ident<Int>,ident<Str>,first<Float>,Pair<Int,Str>
+skips|skips.ir|t|Gen<Int>,Gen2<Int,Str>,GenE<Str>,gen_wrong_arity<Int>,gen_no_inst<Foo>,Foo<Int>,List<Int>,Gen<Int,Int>,Gen<Bad>
+deep|deep.ir|t|ident<Int>,ident<Cfg>,pair_swap<Int,Str>,Pair<Float,Bool>,Pair<Int,Cfg>,Pair<Set,Int>
+spaces|spaces.ir|t|Gen<Int,Str>,g<Int,Str>, Gen<Str,Str> 
+empty|empty.ir|t|
