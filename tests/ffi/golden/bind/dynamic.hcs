@@ -1,0 +1,322 @@
+get <extern:/opt/x/librich.so> use <dynamic>
+region [
+    fun hksh_rich_add(a0: Int, a1: Int) -> Int
+    fun hksh_rich_half(a0: Float) -> Float
+    fun hksh_rich_flip(a0: Bool) -> Bool
+    fun hksh_rich_greet(a0: Int) -> Int
+    fun hksh_rich_mk(a0: Int, a1: Int) -> Int
+    fun hksh_rich_Pt_get_x(a0: Int) -> Int
+    fun hksh_rich_Pt_set_x(a0: Int, a1: Int)
+    fun hksh_rich_Pt_get_name(a0: Int) -> Int
+    fun hksh_rich_Pt_set_name(a0: Int, a1: Int)
+    fun hksh_rich_Pt_get_tags(a0: Int) -> Int
+    fun hksh_rich_Pt_get_next(a0: Int) -> Int
+    fun hksh_rich_Pt_set_next(a0: Int, a1: Int)
+    fun hksh_rich_Pt_dist2(a0: Int, a1: Int) -> Int
+    fun hksh_rich_Arr_int_new() -> Int
+    fun hksh_rich_Arr_int_len(a0: Int) -> Int
+    fun hksh_rich_Arr_int_get(a0: Int, a1: Int) -> Int
+    fun hksh_rich_Arr_int_push(a0: Int, a1: Int)
+    fun hksh_rich_Arr_string_new() -> Int
+    fun hksh_rich_Arr_string_len(a0: Int) -> Int
+    fun hksh_rich_Arr_string_get(a0: Int, a1: Int) -> Int
+    fun hksh_rich_Arr_string_push(a0: Int, a1: Int)
+    fun hksh_rich_Opt_Pt_none() -> Int
+    fun hksh_rich_Opt_Pt_some(a0: Int) -> Int
+    fun hksh_rich_Opt_Pt_is_some(a0: Int) -> Bool
+    fun hksh_rich_Opt_Pt_get(a0: Int) -> Int
+    fun hksh_rich_Opt_int_is_some(a0: Int) -> Bool
+    fun hksh_rich_evens(a0: Int) -> Int
+    fun hksh_rich_sum(a0: Int) -> Int
+    fun hksh_rich_find(a0: Int, a1: Int) -> Int
+    fun hksh_rich_Shape_Circle(a0: Int) -> Int
+    fun hksh_rich_Shape_Rect(a0: Int, a1: Int) -> Int
+    fun hksh_rich_Shape_Empty() -> Int
+    fun hksh_rich_Shape_tag(a0: Int) -> Int
+    fun hksh_rich_Shape_Rect_get_1(a0: Int) -> Int
+    fun hksh_rich_area(a0: Int) -> Int
+    fun hksh_rich_ident_int(a0: Int) -> Int
+    fun hksh_rich_Pair_int_string_new(a0: Int, a1: Int) -> Int
+    fun hksh_rich_Pair_int_string_get_b(a0: Int) -> Int
+    fun hksh_rich_noret(a0: Int)
+]
+
+pub struct Pt [
+    h: Int
+]
+
+pub struct Arr_string [
+    h: Int
+]
+
+pub struct Opt_Pt [
+    h: Int
+]
+
+pub struct Arr_int [
+    h: Int
+]
+
+pub struct Opt_int [
+    h: Int
+]
+
+pub struct Shape [
+    h: Int
+]
+
+pub struct Pair_int_string [
+    h: Int
+]
+
+pub fun add(a0: Int, a1: Int) -> Int [
+    end hksh_rich_add(a0, a1)
+]
+
+pub fun half(a0: Float) -> Float [
+    end hksh_rich_half(a0)
+]
+
+pub fun flip(a0: Bool) -> Bool [
+    end hksh_rich_flip(a0)
+]
+
+pub fun greet(a0: Str) -> Str [
+    let rv = ""
+    native {Rust} [
+        let c0 = std::ffi::CString::new(a0.to_string()).unwrap_or_default();
+        let p: i64 = unsafe { hksh_rich_greet(c0.as_ptr() as i64) };
+        rv = if p == 0 { String::new() } else { unsafe { std::ffi::CStr::from_ptr(p as *const std::os::raw::c_char) }.to_string_lossy().into_owned() };
+    ]
+    end rv
+]
+
+pub fun mk(a0: Int, a1: Int) -> Pt [
+    end Pt(hksh_rich_mk(a0, a1))
+]
+
+pub fun Pt_get_x(a0: Pt) -> Int [
+    end hksh_rich_Pt_get_x(a0.h)
+]
+
+pub fun Pt_set_x(a0: Pt, a1: Int) [
+    hksh_rich_Pt_set_x(a0.h, a1)
+]
+
+pub fun Pt_get_name(a0: Pt) -> Str [
+    let rv = ""
+    native {Rust} [
+        let p: i64 = unsafe { hksh_rich_Pt_get_name(a0.h) };
+        rv = if p == 0 { String::new() } else { unsafe { std::ffi::CStr::from_ptr(p as *const std::os::raw::c_char) }.to_string_lossy().into_owned() };
+    ]
+    end rv
+]
+
+pub fun Pt_set_name(a0: Pt, a1: Str) [
+    native {Rust} [
+        let c1 = std::ffi::CString::new(a1.to_string()).unwrap_or_default();
+        let _ = unsafe { hksh_rich_Pt_set_name(a0.h, c1.as_ptr() as i64) };
+    ]
+]
+
+pub fun Pt_get_tags(a0: Pt) -> Arr_string [
+    end Arr_string(hksh_rich_Pt_get_tags(a0.h))
+]
+
+pub fun Pt_get_next(a0: Pt) -> Opt_Pt [
+    end Opt_Pt(hksh_rich_Pt_get_next(a0.h))
+]
+
+pub fun Pt_set_next(a0: Pt, a1: Opt_Pt) [
+    hksh_rich_Pt_set_next(a0.h, a1.h)
+]
+
+pub fun Pt_dist2(a0: Pt, a1: Pt) -> Int [
+    end hksh_rich_Pt_dist2(a0.h, a1.h)
+]
+
+pub fun Arr_int_new() -> Arr_int [
+    end Arr_int(hksh_rich_Arr_int_new())
+]
+
+pub fun Arr_int_len(a0: Arr_int) -> Int [
+    end hksh_rich_Arr_int_len(a0.h)
+]
+
+pub fun Arr_int_get(a0: Arr_int, a1: Int) -> Int [
+    end hksh_rich_Arr_int_get(a0.h, a1)
+]
+
+pub fun Arr_int_push(a0: Arr_int, a1: Int) [
+    hksh_rich_Arr_int_push(a0.h, a1)
+]
+
+pub fun Arr_string_new() -> Arr_string [
+    end Arr_string(hksh_rich_Arr_string_new())
+]
+
+pub fun Arr_string_len(a0: Arr_string) -> Int [
+    end hksh_rich_Arr_string_len(a0.h)
+]
+
+pub fun Arr_string_get(a0: Arr_string, a1: Int) -> Str [
+    let rv = ""
+    native {Rust} [
+        let p: i64 = unsafe { hksh_rich_Arr_string_get(a0.h, a1) };
+        rv = if p == 0 { String::new() } else { unsafe { std::ffi::CStr::from_ptr(p as *const std::os::raw::c_char) }.to_string_lossy().into_owned() };
+    ]
+    end rv
+]
+
+pub fun Arr_string_push(a0: Arr_string, a1: Str) [
+    native {Rust} [
+        let c1 = std::ffi::CString::new(a1.to_string()).unwrap_or_default();
+        let _ = unsafe { hksh_rich_Arr_string_push(a0.h, c1.as_ptr() as i64) };
+    ]
+]
+
+pub fun Opt_Pt_none() -> Opt_Pt [
+    end Opt_Pt(hksh_rich_Opt_Pt_none())
+]
+
+pub fun Opt_Pt_some(a0: Pt) -> Opt_Pt [
+    end Opt_Pt(hksh_rich_Opt_Pt_some(a0.h))
+]
+
+pub fun Opt_Pt_is_some(a0: Opt_Pt) -> Bool [
+    end hksh_rich_Opt_Pt_is_some(a0.h)
+]
+
+pub fun Opt_Pt_get(a0: Opt_Pt) -> Pt [
+    end Pt(hksh_rich_Opt_Pt_get(a0.h))
+]
+
+pub fun Opt_int_is_some(a0: Opt_int) -> Bool [
+    end hksh_rich_Opt_int_is_some(a0.h)
+]
+
+pub fun evens(a0: Int) -> Arr_int [
+    end Arr_int(hksh_rich_evens(a0))
+]
+
+pub fun sum(a0: Arr_int) -> Int [
+    end hksh_rich_sum(a0.h)
+]
+
+pub fun find(a0: Arr_int, a1: Int) -> Opt_int [
+    end Opt_int(hksh_rich_find(a0.h, a1))
+]
+
+pub fun Shape_Circle(a0: Int) -> Shape [
+    end Shape(hksh_rich_Shape_Circle(a0))
+]
+
+pub fun Shape_Rect(a0: Int, a1: Int) -> Shape [
+    end Shape(hksh_rich_Shape_Rect(a0, a1))
+]
+
+pub fun Shape_Empty() -> Shape [
+    end Shape(hksh_rich_Shape_Empty())
+]
+
+pub fun Shape_tag(a0: Shape) -> Int [
+    end hksh_rich_Shape_tag(a0.h)
+]
+
+pub fun Shape_Rect_get_1(a0: Shape) -> Int [
+    end hksh_rich_Shape_Rect_get_1(a0.h)
+]
+
+pub fun area(a0: Shape) -> Int [
+    end hksh_rich_area(a0.h)
+]
+
+pub fun ident_int(a0: Int) -> Int [
+    end hksh_rich_ident_int(a0)
+]
+
+pub fun Pair_int_string_new(a0: Int, a1: Str) -> Pair_int_string [
+    let rv = 0
+    native {Rust} [
+        let c1 = std::ffi::CString::new(a1.to_string()).unwrap_or_default();
+        rv = unsafe { hksh_rich_Pair_int_string_new(a0, c1.as_ptr() as i64) };
+    ]
+    end Pair_int_string(rv)
+]
+
+pub fun Pair_int_string_get_b(a0: Pair_int_string) -> Str [
+    let rv = ""
+    native {Rust} [
+        let p: i64 = unsafe { hksh_rich_Pair_int_string_get_b(a0.h) };
+        rv = if p == 0 { String::new() } else { unsafe { std::ffi::CStr::from_ptr(p as *const std::os::raw::c_char) }.to_string_lossy().into_owned() };
+    ]
+    end rv
+]
+
+pub fun noret(a0: Int) [
+    hksh_rich_noret(a0)
+]
+
+pub fun Arr_string_from_list(xs: List<Str>) -> Arr_string [
+    let a = Arr_string_new()
+    let i = 0
+    let n = xs.len()
+    while i < n [
+        Arr_string_push(a, xs[i].clone())
+        i = i + 1
+    ]
+    end a
+]
+
+pub fun Arr_string_to_list(a: Arr_string) -> List<Str> [
+    let out: List<Str> = []
+    let i = 0
+    let n = Arr_string_len(a)
+    while i < n [
+        out.push(Arr_string_get(a, i))
+        i = i + 1
+    ]
+    end out
+]
+
+pub fun Opt_Pt_from_option(o: Option<Pt>) -> Opt_Pt [
+    let r = Opt_Pt_none()
+    match o [
+        Some(v) -> [
+            r = Opt_Pt_some(v)
+        ]
+        None -> [
+        ]
+    ]
+    end r
+]
+
+pub fun Opt_Pt_to_option(o: Opt_Pt) -> Option<Pt> [
+    let r: Option<Pt> = none()
+    if Opt_Pt_is_some(o) [
+        r = some(Opt_Pt_get(o))
+    ]
+    end r
+]
+
+pub fun Arr_int_from_list(xs: List<Int>) -> Arr_int [
+    let a = Arr_int_new()
+    let i = 0
+    let n = xs.len()
+    while i < n [
+        Arr_int_push(a, xs[i].clone())
+        i = i + 1
+    ]
+    end a
+]
+
+pub fun Arr_int_to_list(a: Arr_int) -> List<Int> [
+    let out: List<Int> = []
+    let i = 0
+    let n = Arr_int_len(a)
+    while i < n [
+        out.push(Arr_int_get(a, i))
+        i = i + 1
+    ]
+    end out
+]
