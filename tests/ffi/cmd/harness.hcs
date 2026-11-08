@@ -1,0 +1,131 @@
+get <std:string> import <str_split>
+
+!!! harness.hcs - minimalny harness testow napisanych w HackerScript (bez zewnetrznych narzedzi).
+!!! Kazdy zestaw (`suite_*`) tworzy wlasny `TestRun` i zwraca go; `main.hcs` sumuje wyniki.
+
+struct TestRun [
+    passed: Int,
+    failed: Int
+]
+
+fun t_new() -> TestRun [
+    end TestRun(0, 0)
+]
+
+!!! Skraca dlugi tekst do podgladu w komunikacie bledu.
+fun t_clip(s: Str, n: Int) -> Str [
+    if s.len() <= n [
+        end s
+    ]
+    end s.slice(0, n) + "... (" + s.len() + " znakow)"
+]
+
+!!! Opis pierwszej roznicy miedzy dwoma tekstami (numer linii + obie linie).
+fun t_first_diff(got: Str, want: Str) -> Str [
+    let a: List<Str> = str_split(got, "\n")
+    let b: List<Str> = str_split(want, "\n")
+    let i = 0
+    while i < a.len() and i < b.len() [
+        if a[i] != b[i] [
+            end "linia " + (i + 1) + ":\n         jest:       " + t_clip(a[i].clone(), 160) + "\n         oczekiwano: " + t_clip(b[i].clone(), 160)
+        ]
+        i = i + 1
+    ]
+    if a.len() != b.len() [
+        end "rozna liczba linii: " + a.len() + " vs " + b.len()
+    ]
+    end "teksty rozne (" + got.len() + " vs " + want.len() + " znakow)"
+]
+
+!!! Czyta plik albo konczy proces z kodem 2 (brak fixture'a to blad srodowiska testow, nie testu).
+fun t_read(path: Str) -> Str [
+    let text = ""
+    match read_file(path.clone()) [
+        Ok(t) -> [
+            text = t
+        ]
+        Err(e) -> [
+            elog("BLAD: nie moge czytac " + path + ": " + e)
+            exit(2)
+        ]
+    ]
+    end text
+]
+
+fun t_write(path: Str, text: Str) [
+    match write_file(path.clone(), text) [
+        Ok(_w) -> [
+        ]
+        Err(e) -> [
+            elog("BLAD: nie moge pisac " + path + ": " + e)
+            exit(2)
+        ]
+    ]
+]
+
+!!! Niepuste linie pliku.
+fun t_lines(text: Str) -> List<Str> [
+    let out: List<Str> = []
+    let parts: List<Str> = str_split(text, "\n")
+    let i = 0
+    while i < parts.len() [
+        if parts[i] != "" [
+            out.push(parts[i].clone())
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+impl TestRun [
+    fun section(self, title: Str) [
+        log("")
+        log("== " + title)
+    ]
+
+    fun check(self, name: Str, ok: Bool) [
+        if ok [
+            self.passed = self.passed + 1
+            log("  ok    " + name)
+        ] else [
+            self.failed = self.failed + 1
+            elog("  FAIL  " + name)
+        ]
+    ]
+
+    !!! Rownosc tekstow; przy bledzie pokazuje pierwsza roznice.
+    fun same(self, name: Str, got: Str, want: Str) [
+        if got == want [
+            self.passed = self.passed + 1
+            log("  ok    " + name)
+        ] else [
+            self.failed = self.failed + 1
+            elog("  FAIL  " + name)
+            elog("        " + t_first_diff(got, want))
+        ]
+    ]
+
+    fun has(self, name: Str, hay: Str, needle: Str) [
+        let found = false
+        let n = needle.len()
+        let i = 0
+        while i + n <= hay.len() and not found [
+            if hay.slice(i, i + n) == needle [
+                found = true
+            ]
+            i = i + 1
+        ]
+        if found [
+            self.passed = self.passed + 1
+            log("  ok    " + name)
+        ] else [
+            self.failed = self.failed + 1
+            elog("  FAIL  " + name + " - brak: " + t_clip(needle, 120))
+        ]
+    ]
+]
+
+!!! Dodaje wyniki `b` do `a`.
+fun t_merge(a: TestRun, b: TestRun) -> TestRun [
+    end TestRun(a.passed + b.passed, a.failed + b.failed)
+]
