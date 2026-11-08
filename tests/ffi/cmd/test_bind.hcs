@@ -1,0 +1,200 @@
+include <harness>
+include <work:hackerc::hlib_bind>
+get <std:string> import <str_split::str_join::str_contains>
+get <std:fs> import <create_dir_ok::remove_dir_all_ok>
+
+!!! Testy importera fasad C-ABI (`hackerc/cmd/hlib_bind.hcs`).
+!!!
+!!! * `golden/bind/*` - stuby wygenerowane przez ORYGINALNY importer w Rust (dawny `hlib_bind.rs`) z manifestu
+!!!   w stylu H# (`fixtures/bind/rich_manifest.json`): uchwyty `Arr_`/`Opt_`, typy pomijane, duplikaty;
+!!!   wersja HackerScript odtwarza je bajt w bajt.
+!!! * wybor artefaktu, cache zadresowany haszem, bezpieczenstwo sciezek i starsza sciezka `.so` sa testowane na
+!!!   recznie zbudowanych "rozpakowanych archiwach" w katalogu roboczym.
+
+!!! Zapisuje plik (tworzac katalog nadrzedny) - dla fixture'ow budowanych w locie.
+fun bind_put(root: Str, rel: Str, text: Str) [
+    let parts: List<Str> = str_split(rel, "/")
+    let acc = root.clone()
+    let _mk0 = create_dir_ok(root.clone())
+    let i = 0
+    while i < parts.len() - 1 [
+        acc = acc + "/" + parts[i]
+        let _mk = create_dir_ok(acc.clone())
+        i = i + 1
+    ]
+    t_write(root + "/" + rel, text)
+]
+
+!!! Manifest z jednym eksportem (`api` ustawione) i podanymi artefaktami (gotowy fragment JSON).
+fun bind_manifest(artifacts_json: Str) -> Str [
+    end "{\"exports\":[{\"name\":\"f\",\"kind\":\"function\",\"params\":[],\"returns\":{\"type\":\"i64\"},\"generic\":false,\"is_macro\":false,\"api\":\"hksh_x_f\"},{\"name\":\"g\",\"kind\":\"function\",\"params\":[],\"generic\":true,\"is_macro\":false,\"api\":\"hksh_x_g\"}],\"artifacts\":[" + artifacts_json + "]}"
+]
+
+fun suite_bind(dir: Str, work: Str, update: Bool) -> TestRun [
+    let t = t_new()
+    t.section("importer fasad C-ABI (hlib_bind.hcs)")
+    t = t_merge(t, bind_golden_cases(dir.clone(), update))
+    if not update [
+        t = t_merge(t, bind_unit_tests())
+        let w = work + "/bind"
+        let _rm = remove_dir_all_ok(w.clone())
+        let _mk = create_dir_ok(w.clone())
+        t = t_merge(t, bind_sha_test(w.clone()))
+        t = t_merge(t, bind_import_tests(w.clone()))
+        t = t_merge(t, bind_legacy_tests(w.clone()))
+    ]
+    end t
+]
+
+fun bind_golden_cases(dir: Str, update: Bool) -> TestRun [
+    let t = t_new()
+    let manifest = t_read(dir + "/fixtures/bind/rich_manifest.json")
+    let cases = t_lines(t_read(dir + "/fixtures/bind/cases.txt"))
+    let ci = 0
+    while ci < cases.len() [
+        let f: List<Str> = str_split(cases[ci].clone(), "|")
+        ci = ci + 1
+        let name: Str = f[0].clone()
+        let libs: List<Str> = []
+        let raw: List<Str> = str_split(f[3].clone(), ",")
+        let li = 0
+        while li < raw.len() [
+            if raw[li] != "" [
+                libs.push(raw[li].clone())
+            ]
+            li = li + 1
+        ]
+        let res = hks_bind_stub(manifest.clone(), "rich", f[1].clone(), f[2].clone(), libs)
+        let base = dir + "/golden/bind/" + name
+        let skipped = str_join(res.skipped.clone(), "\n")
+        if update [
+            t_write(base + ".hcs", res.stub.clone())
+            t_write(base + ".skipped.txt", skipped)
+            log("  zapisano wzorce: " + name)
+        ] else [
+            t.same("stub (" + name + ") == wzorzec", res.stub.clone(), t_read(base + ".hcs"))
+            t.same("pominiete (" + name + ") == wzorzec", skipped, t_read(base + ".skipped.txt"))
+        ]
+        if name == "static" [
+            t.has("opaque -> struct uchwytu", res.stub.clone(), "pub struct Pt [\n    h: Int\n]")
+            t.has("Arr_int ma konwersje from_list", res.stub.clone(), "pub fun Arr_int_from_list(xs: List<Int>) -> Arr_int [")
+            t.has("Arr_string ma konwersje to_list", res.stub.clone(), "pub fun Arr_string_to_list(a: Arr_string) -> List<Str> [")
+            t.has("Opt_Pt ma konwersje from_option", res.stub.clone(), "pub fun Opt_Pt_from_option(o: Option<Pt>) -> Opt_Pt [")
+            t.has("Opt_Pt ma konwersje to_option", res.stub.clone(), "pub fun Opt_Pt_to_option(o: Opt_Pt) -> Option<Pt> [")
+            t.check("niekompletny Opt_int NIE dostaje konwersji", not str_contains(res.stub.clone(), "Opt_int_from_option"))
+            t.has("wrapper ze Str idzie przez blok natywny", res.stub.clone(), "    native {Rust} [\n        let c0 = std::ffi::CString::new(a0.to_string()).unwrap_or_default();")
+            t.has("link_libs -> get <c:...>", res.stub.clone(), "get <c:stdc++>\nget <c:m>\nget <c:pthread>\nget <c:dl>\n\n")
+            t.check("duplikat `add` tylko raz", str_split(res.stub.clone(), "pub fun add(").len() == 2)
+        ]
+    ]
+    end t
+]
+
+fun bind_unit_tests() -> TestRun [
+    let t = t_new()
+    t.same("hb_ty(i32)", hb_ty("i32"), "Int")
+    t.same("hb_ty(f32)", hb_ty("f32"), "Float")
+    t.same("hb_ty(cstr)", hb_ty("cstr"), "Str")
+    t.same("hb_ty(opaque:Pt)", hb_ty("opaque:Pt"), "Pt")
+    t.same("hb_ty(i128) nieobslugiwany", hb_ty("i128"), "")
+    t.same("hb_ty(opaque:) nieobslugiwany", hb_ty("opaque:"), "")
+    t.same("hb_raw_ty(cstr) -> Int", hb_raw_ty("cstr"), "Int")
+    t.same("hb_raw_ty(f64)", hb_raw_ty("f64"), "Float")
+    t.same("hb_raw_ty(void)", hb_raw_ty("void"), "")
+    t.same("hb_lit(bool)", hb_lit("bool"), "false")
+    t.check("safe_rel: zwykla sciezka ok", hbd_safe_rel("native/x/lib.a"))
+    t.check("safe_rel: `..` odrzucone", not hbd_safe_rel("../evil") and not hbd_safe_rel("a/../../b"))
+    t.check("safe_rel: absolutna i pusta odrzucone", not hbd_safe_rel("/etc/passwd") and not hbd_safe_rel(""))
+    !! wektor testowy SHA-256 z FIPS 180-2: SHA-256("abc")
+    end t
+]
+
+fun bind_sha_test(work: Str) -> TestRun [
+    let t = t_new()
+    bind_put(work, "sha/abc.txt", "abc")
+    t.same("SHA-256(\"abc\") - wektor FIPS 180-2", hbd_sha256_file(work + "/sha/abc.txt"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    t.same("SHA-256 nieistniejacego pliku -> pusty", hbd_sha256_file(work + "/sha/brak"), "")
+    end t
+]
+
+fun bind_import_tests(work: Str) -> TestRun [
+    let t = t_new()
+    let arts = "{\"kind\":\"static_lib\",\"target\":\"x86_64-unknown-linux-gnu\",\"path\":\"native/x86_64-unknown-linux-gnu/libx.a\",\"link_libs\":[\"m\",\"dl\"]},{\"kind\":\"static_lib\",\"target\":\"aarch64-unknown-linux-gnu\",\"path\":\"native/aarch64-unknown-linux-gnu/libx.a\"},{\"kind\":\"shared_object\",\"target\":\"x86_64-unknown-linux-gnu\",\"path\":\"native/x86_64-unknown-linux-gnu/libx.so\"}"
+
+    !! 1) wybor static_lib dla celu + cache zadresowany haszem zawartosci
+    let u1 = work + "/u1"
+    bind_put(u1, "manifest.json", bind_manifest(arts.clone()))
+    bind_put(u1, "native/x86_64-unknown-linux-gnu/libx.a", "X86-ARCHIVE")
+    bind_put(u1, "native/aarch64-unknown-linux-gnu/libx.a", "ARM-ARCHIVE")
+    bind_put(u1, "native/x86_64-unknown-linux-gnu/libx.so", "X86-SO")
+    let into1 = work + "/into1"
+    let p1 = hks_bind_import(u1.clone(), "x.hlib", "x", into1.clone(), "aarch64-unknown-linux-gnu")
+    t.same("static_lib dla celu: sciezka stubu", p1.clone(), into1 + "/x_hlib_bind.hcs")
+    let sum_arm: Str = hbd_sha256_file(u1 + "/native/aarch64-unknown-linux-gnu/libx.a")
+    let stub1 = t_read(p1)
+    t.has("stub linkuje archiwum ARM z cache o kluczu = hash zawartosci", stub1.clone(), "get <extern:" + into1 + "/native-cache/" + sum_arm.slice(0, 12) + "/libx.a> use <static>\n")
+    t.same("zawartosc skopiowanego archiwum == zrodlo", t_read(into1 + "/native-cache/" + sum_arm.slice(0, 12) + "/libx.a"), "ARM-ARCHIVE")
+    t.has("pominiety eksport generyczny trafia do komentarza", stub1.clone(), "!!   - g (generic/makro)")
+    t.has("region zawiera surowy symbol", stub1.clone(), "    fun hksh_x_f() -> Int\n")
+
+    !! 2) brak artefaktu dla celu -> pierwszy static_lib (z ostrzezeniem na stderr)
+    let p2 = hks_bind_import(u1.clone(), "x.hlib", "x", work + "/into2", "riscv64-unknown-linux-gnu")
+    let sum_x86: Str = hbd_sha256_file(u1 + "/native/x86_64-unknown-linux-gnu/libx.a")
+    t.has("nieznany cel: wybrany pierwszy static_lib", t_read(p2), "native-cache/" + sum_x86.slice(0, 12) + "/libx.a> use <static>")
+
+    !! 3) tylko shared_object -> tryb dynamic i plik libx.so
+    let u3 = work + "/u3"
+    bind_put(u3, "manifest.json", bind_manifest("{\"kind\":\"shared_object\",\"target\":\"x86_64-unknown-linux-gnu\",\"path\":\"native/libx.so\"}"))
+    bind_put(u3, "native/libx.so", "SO-ONLY")
+    let p3 = hks_bind_import(u3, "x.hlib", "x", work + "/into3", "x86_64-unknown-linux-gnu")
+    let stub3 = t_read(p3)
+    t.has("shared_object: use <dynamic>", stub3.clone(), "/libx.so> use <dynamic>\n")
+    t.check("shared_object: brak get <c:...> bez link_libs", not str_contains(stub3.clone(), "get <c:"))
+
+    !! 4) brak fasady (zaden eksport nie ma `api`) -> "" (wolajacy wraca do starej sciezki)
+    let u4 = work + "/u4"
+    bind_put(u4, "manifest.json", "{\"exports\":[{\"name\":\"f\",\"kind\":\"function\",\"params\":[]}],\"artifacts\":[{\"kind\":\"static_lib\",\"target\":\"t\",\"path\":\"native/libx.a\"}]}")
+    bind_put(u4, "native/libx.a", "A")
+    t.same("bez fasady -> pusty wynik", hks_bind_import(u4, "x.hlib", "x", work + "/into4", "t"), "")
+
+    !! 5) sciezka artefaktu wychodzaca poza archiwum jest odrzucana (path traversal)
+    let u5 = work + "/u5"
+    bind_put(u5, "manifest.json", bind_manifest("{\"kind\":\"static_lib\",\"target\":\"t\",\"path\":\"../u1/native/x86_64-unknown-linux-gnu/libx.a\"}"))
+    t.same("path traversal w manifescie -> pusty wynik", hks_bind_import(u5, "x.hlib", "x", work + "/into5", "t"), "")
+
+    !! 6) fasada bez artefaktu natywnego -> ""
+    let u6 = work + "/u6"
+    bind_put(u6, "manifest.json", bind_manifest(""))
+    t.same("fasada bez artefaktow -> pusty wynik", hks_bind_import(u6, "x.hlib", "x", work + "/into6", "t"), "")
+
+    !! 7) brak manifestu -> ""
+    t.same("brak manifest.json -> pusty wynik", hks_bind_import(work + "/nie-ma", "x.hlib", "x", work + "/into7", "t"), "")
+    end t
+]
+
+fun bind_legacy_tests(work: Str) -> TestRun [
+    let t = t_new()
+    let exports = "{\"exports\":[{\"name\":\"add\",\"kind\":\"function\",\"params\":[{\"type\":\"i64\"},{\"type\":\"i32\"}],\"returns\":{\"type\":\"i64\"}},{\"name\":\"name_of\",\"kind\":\"function\",\"params\":[{\"type\":\"ptr\"}],\"returns\":{\"type\":\"ptr\"}},{\"name\":\"reset\",\"kind\":\"function\",\"params\":[]},{\"name\":\"gen\",\"kind\":\"function\",\"generic\":true,\"params\":[]},{\"name\":\"mac\",\"kind\":\"function\",\"is_macro\":true,\"params\":[]},{\"name\":\"K\",\"kind\":\"const\"},{\"name\":\"blob\",\"kind\":\"function\",\"params\":[{\"type\":\"opaque\"}]},{\"name\":\"weird_ret\",\"kind\":\"function\",\"params\":[],\"returns\":{\"type\":\"opaque\"}}]}"
+    let u = work + "/legacy"
+    bind_put(u, "manifest.json", exports)
+    bind_put(u, "native/linux-x86_64/libold.so", "OLD-SO")
+    let into = work + "/legacy-into"
+    let p = hbd_legacy_import(u.clone(), "old.hlib", "old", into.clone())
+    t.same("legacy: sciezka stubu", p.clone(), into.clone() + "/old_hlib_bind.hcs")
+    let stub = t_read(p)
+    t.has("legacy: naglowek z extern dynamic", stub.clone(), "get <extern:" + into + "/native-cache/libold.so> use <dynamic>\nregion [\n")
+    t.has("legacy: add(i64,i32)->i64", stub.clone(), "    fun add(p0: Int, p1: Int) -> Int\n")
+    t.has("legacy: ptr -> Str", stub.clone(), "    fun name_of(p0: Str) -> Str\n")
+    t.has("legacy: void bez strzalki", stub.clone(), "    fun reset()\n")
+    t.has("legacy: generyk pominiety z powodem", stub.clone(), "!!   - gen (kind=function, generic=true, is_macro=false - patrz docs/HLIB_FORMAT.md sekcja 6")
+    t.has("legacy: makro pominiete", stub.clone(), "!!   - mac (kind=function, generic=false, is_macro=true")
+    t.has("legacy: stala pominieta", stub.clone(), "!!   - K (kind=const")
+    t.has("legacy: parametr spoza AbiType", stub.clone(), "!!   - blob (parametr spoza wspieranego AbiType")
+    t.has("legacy: zwracany typ spoza AbiType", stub.clone(), "!!   - weird_ret (typ zwracany 'opaque' spoza wspieranego AbiType)")
+    t.same("legacy: .so skopiowane do cache", t_read(into + "/native-cache/libold.so"), "OLD-SO")
+
+    let u2 = work + "/legacy-none"
+    bind_put(u2, "manifest.json", exports)
+    t.same("legacy: brak .so -> pusty wynik", hbd_legacy_import(u2, "old.hlib", "old", work + "/legacy-none-into"), "")
+    end t
+]
