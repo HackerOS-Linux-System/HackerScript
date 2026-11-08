@@ -1,0 +1,77 @@
+using <0.6>
+
+get <hlib:t>
+
+!!! Konsument fasady C-ABI: importuje biblioteke `t` (tests/ffi/fixtures/mocklib) przez `get <hlib:t>`, czyli przez stub
+!!! z `hlib_bind.hcs`, i ćwiczy ja przez typowane wrappery. Wypisuje linie porownywane z `expected.txt`
+!!! (`tests/ffi/cmd/test_e2e.hcs`).
+fun main() [
+    let n = make_node("root")
+    log("label=" + Node_get_label(n))
+
+    !! aliasing: push przez pozyczony uchwyt pola zmienia oryginal
+    let tags = Node_get_tags(n)
+    List_Str_push(tags, "a")
+    List_Str_push(tags, "b")
+    log("tags len via fresh getter=" + List_Str_len(Node_get_tags(n)))
+    log("tags[1]=" + List_Str_get(tags, 1))
+
+    let m = Node_get_meta(n)
+    Dict_Str_Int_insert(m, "k", 5)
+    log("meta[k]=" + Dict_Str_Int_get(Node_get_meta(n), "k"))
+    log("meta keys=" + List_Str_len(Dict_Str_Int_keys(m)))
+
+    let sn = Node_get_seen(n)
+    log("set insert=" + Set_Str_insert(sn, "x") + " again=" + Set_Str_insert(sn, "x"))
+    log("set len=" + Set_Str_len(Node_get_seen(n)))
+
+    !! enum
+    let r = Shape_Rect(3, 4)
+    log("rect tag=" + Shape_tag(r) + " b=" + Shape_Rect_get_1(r) + " area=" + area(r))
+    let nm = Shape_Named("hey")
+    log("named tag=" + Shape_tag(nm) + " v=" + Shape_Named_get_0(nm) + " wrong=" + Shape_Rect_get_1(nm))
+
+    !! generyki
+    log("ident=" + ident_Int(9) + " " + ident_Str("z"))
+    let p = Pair_Int_Str_new(1, "q")
+    log("pair left=" + Pair_Int_Str_left(p) + " b=" + Pair_Int_Str_get_b(p))
+    let fl = List_Float_new()
+    List_Float_push(fl, 1.5)
+    log("first=" + first_Float(fl))
+
+    !! metody
+    let o = Point_new_origin()
+    Point_set_x(o, 3)
+    let o2 = Point_add(o, o)
+    log("norm=" + Point_norm(o2))
+    log("bump=" + bump(o, 4) + " x=" + Point_get_x(o))
+
+    !! async + Result
+    let ok1 = fetch("ok")
+    log("fetch ok=" + Result_Int_Str_is_ok(ok1) + " v=" + Result_Int_Str_ok_value(ok1))
+    let er = fetch("no")
+    log("fetch err=" + Result_Int_Str_is_ok(er) + " " + Result_Int_Str_err_value(er))
+
+    !! kanal
+    let ch = mk_chan(2)
+    log("sent=" + Chan_Int_send(ch, 42))
+    let rv = Chan_Int_recv(ch)
+    log("recv some=" + Option_Int_is_some(rv) + " v=" + Option_Int_get(rv))
+    Chan_Int_close(ch)
+    log("recv after close some=" + Option_Int_is_some(Chan_Int_recv(ch)))
+
+    !! Option<struct> (pole rekurencyjne), Option jako parametr, listy
+    let kid = make_node("kid")
+    Node_set_next(n, Option_Node_some(kid))
+    log("next some=" + Option_Node_is_some(Node_get_next(n)))
+    log("opt_len=" + opt_len(Option_Str_some("four")))
+    let li = List_Int_new()
+    List_Int_push(li, 2)
+    List_Int_push(li, 5)
+    log("sum=" + sum_list(li))
+    let d = Dict_Str_List_Int_new()
+    Dict_Str_List_Int_insert(d, "k", li)
+    log("cfg=" + cfg(d))
+    Node_free(n)
+    log("done")
+]
