@@ -1,0 +1,149 @@
+include <harness>
+include <work:hackerc::hlib>
+get <std:string> import <str_split::str_contains::str_starts_with::str_ends_with::str_replace>
+get <std:fs> import <create_dir_ok::remove_dir_all_ok::copy_file_ok>
+get <std:path> import <path_dirname>
+get <std:process> import <run_capture::CmdOutput>
+
+!!! Test end-to-end calego mostu C-ABI, po stronie HackerScript (wymaga `--e2e`, cargo w PATH i zbudowanego `hackerc`):
+!!!
+!!!   1. `hackerc hlib build --ffi` buduje `fixtures/mocklib/mocklib.hcs` -> `.hlib` z fasada (generator: ffi_gen.hcs),
+!!!   2. `hlib_extract_for_import` na tym archiwum zwraca zrodlo `ast` (zwykla sciezka dla bibliotek HackerScript),
+!!!   3. po usunieciu `ast` archiwum wyglada jak biblioteka z H#: `hks_bind_import` (hlib_bind.hcs) generuje stub,
+!!!   4. ten sam program konsumujacy (`fixtures/consumer`) jest budowany dwiema drogami - przez `get <hlib:t>` (zrodlo)
+!!!      i przez stub z linkowaniem `libt.a` - i oba musza wypisac to, co w `expected.txt`.
+!!!
+!!! Kompilacje maja wylaczone LTO i optymalizacje (tylko szybkosc testu).
+
+fun e2e_sh(cmd: Str) -> CmdOutput [
+    let fast = "export CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_OPT_LEVEL=0 CARGO_PROFILE_RELEASE_CODEGEN_UNITS=64 CARGO_PROFILE_RELEASE_DEBUG=0; "
+    match run_capture("sh", ["-c", fast + cmd]) [
+        Ok(o) -> [
+            end o
+        ]
+        Err(e) -> [
+            end CmdOutput(0 - 1, "", e)
+        ]
+    ]
+]
+
+!!! Pokazuje koniec stderr przy bledzie kroku.
+fun e2e_fail_detail(step: Str, o: CmdOutput) [
+    elog("        krok `" + step + "` zakonczony kodem " + o.code)
+    let lines: List<Str> = str_split(o.stderr.clone(), "\n")
+    let from = lines.len() - 12
+    if from < 0 [
+        from = 0
+    ]
+    let i = from
+    while i < lines.len() [
+        elog("        | " + lines[i])
+        i = i + 1
+    ]
+]
+
+!!! Wynik `e2e_build_run`: stdout programu + wlasny `TestRun` z krokow budowania.
+struct E2eRun [
+    out: Str,
+    run: TestRun
+]
+
+!!! Buduje i uruchamia konsumenta z katalogu `consumer` (z `cmd/main.hcs`); zwraca stdout programu.
+!!! `rustflags` - flagi linkera (dla stubu: -L i biblioteki systemowe).
+fun e2e_build_run(label: Str, hackerc: Str, consumer: Str, rustflags: Str) -> E2eRun [
+    let t = t_new()
+    let b1 = e2e_sh("cd " + consumer + " && " + hackerc + " build cmd/main.hcs -o out")
+    t.check(label + ": hackerc build (transpilacja)", b1.code == 0)
+    if b1.code != 0 [
+        e2e_fail_detail("hackerc build", b1)
+        end E2eRun("", t)
+    ]
+    let b2 = e2e_sh("cd " + consumer + "/out && RUSTFLAGS=\"" + rustflags + "\" cargo build --release -q")
+    t.check(label + ": cargo build (kompilacja i linkowanie)", b2.code == 0)
+    if b2.code != 0 [
+        e2e_fail_detail("cargo build", b2)
+        end E2eRun("", t)
+    ]
+    let r = e2e_sh(consumer + "/out/target/release/hackerscript_app")
+    t.check(label + ": program konczy sie kodem 0", r.code == 0)
+    if r.code != 0 [
+        e2e_fail_detail("uruchomienie", r)
+    ]
+    end E2eRun(r.stdout.clone(), t)
+]
+
+fun suite_e2e(dir: Str, work: Str, hackerc: Str) -> TestRun [
+    let t = t_new()
+    t.section("end-to-end: biblioteka -> .hlib z fasada -> import -> program")
+    let w = work + "/e2e"
+    let _rm = remove_dir_all_ok(w.clone())
+    let _mk0 = create_dir_ok(work.clone())
+    let _mk = create_dir_ok(w.clone())
+    let inst = "ident<Int>,ident<Str>,first<Float>,Pair<Int,Str>"
+    let hlib = w + "/t.hlib"
+
+    let b = e2e_sh(hackerc + " hlib build " + dir + "/fixtures/mocklib/mocklib.hcs --ffi --name t -o " + hlib + " --ffi-inst \"" + inst + "\"")
+    t.check("hlib build --ffi buduje archiwum", b.code == 0 and path_exists(hlib.clone()))
+    if b.code != 0 [
+        e2e_fail_detail("hlib build --ffi", b)
+        end t
+    ]
+
+    !! (2) ast -> zrodlo
+    let ex = hlib_extract_for_import(hlib.clone(), "t", w.clone() + "/extract")
+    t.check("hlib_extract_for_import zwraca t.hcs (artefakt ast)", str_ends_with(ex.clone(), "/extract/t.hcs") and path_exists(ex.clone()))
+    t.has("wypakowane zrodlo to biblioteka testowa", t_read(ex), "fun make_node(")
+
+    !! (3) archiwum "bez ast" -> stub fasady
+    let unp = w.clone() + "/unp"
+    t.check("hbd_unpack rozpakowuje archiwum", hbd_unpack(hlib.clone(), unp.clone()))
+    let _rma = remove_dir_all_ok(unp.clone() + "/ast")
+    let into = w.clone() + "/into"
+    let stub_path = hks_bind_import(unp, hlib.clone(), "t", into, hks_bind_target())
+    t.check("hks_bind_import zwraca sciezke stubu", stub_path != "")
+    if stub_path == "" [
+        end t
+    ]
+    let stub = t_read(stub_path.clone())
+    let slines: List<Str> = str_split(stub.clone(), "\n")
+    let pre = "get <extern:"
+    let suf = "> use <static>"
+    let ext: Str = slines[1].clone()
+    t.check("stub zaczyna sie od get <extern:...> use <static>", str_starts_with(ext.clone(), pre.clone()) and str_ends_with(ext.clone(), suf.clone()))
+    let lib_path: Str = ext.slice(pre.len(), ext.len() - suf.len())
+    t.check("zlinkowane archiwum istnieje w cache", path_exists(lib_path.clone()))
+    let flags = "-L native=" + path_dirname(lib_path)
+    let si = 0
+    while si < slines.len() [
+        let ln: Str = slines[si].clone()
+        if str_starts_with(ln.clone(), "get <c:") [
+            flags = flags + " -C link-arg=-l" + ln.slice(7, ln.len() - 1)
+        ]
+        si = si + 1
+    ]
+
+    let main_src = t_read(dir + "/fixtures/consumer/cmd/main.hcs")
+    let expected = t_read(dir + "/fixtures/consumer/expected.txt")
+    let src_main = t_read(dir + "/fixtures/consumer-src/cmd/main.hcs")
+    let src_expected = t_read(dir + "/fixtures/consumer-src/expected.txt")
+
+    !! (4a) konsument przez `get <hlib:t>` (zrodlo z artefaktu ast)
+    let ca = w.clone() + "/consumer-ast"
+    let _a1 = create_dir_ok(ca.clone() + "/cmd")
+    let _a2 = create_dir_ok(ca.clone() + "/hlibs")
+    t_write(ca.clone() + "/cmd/main.hcs", src_main)
+    t.check("kopia .hlib do hlibs/", copy_file_ok(hlib.clone(), ca.clone() + "/hlibs/t.hlib"))
+    let ra = e2e_build_run("konsument (get <hlib:t>, zrodlo)", hackerc.clone(), ca, "")
+    t = t_merge(t, ra.run.clone())
+    t.same("konsument (zrodlo): wyjscie == expected.txt", ra.out.clone(), src_expected)
+
+    !! (4b) konsument przez stub fasady + linkowanie libt.a
+    let cb = w.clone() + "/consumer-ffi"
+    let _b1 = create_dir_ok(cb.clone() + "/cmd")
+    t_write(cb.clone() + "/cmd/main.hcs", str_replace(main_src, "get <hlib:t>", "include <t_hlib_bind>"))
+    t_write(cb.clone() + "/cmd/t_hlib_bind.hcs", stub)
+    let rb = e2e_build_run("konsument (stub fasady C-ABI)", hackerc.clone(), cb, flags)
+    t = t_merge(t, rb.run.clone())
+    t.same("konsument (fasada C-ABI): wyjscie == expected.txt", rb.out.clone(), expected)
+    end t
+]
