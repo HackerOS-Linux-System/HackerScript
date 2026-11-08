@@ -1,0 +1,19 @@
+using <0.6>
+
+get <hlib:t>
+
+!!! Konsument "zrodlowy": biblioteka `t` (tests/ffi/fixtures/mocklib) zawiera artefakt `ast`, wiec `get <hlib:t>`
+!!! wlacza jej zwykle zrodlo - bez fasady C-ABI, z normalnymi strukturami i metodami. Wyjscie jest porownywane
+!!! z `expected.txt` w `tests/ffi/cmd/test_e2e.hcs` (druga sciezka importu obok stubu fasady).
+fun main() [
+    let n = make_node("root")
+    log("label=" + n.label)
+    n.tags.push("a")
+    log("tags=" + n.tags.len())
+    let p = Point(3, 4)
+    log("norm=" + p.norm())
+    log("area=" + area(Rect(3, 4)))
+    log("sum=" + sum_list([2, 5]))
+    log("opt_len=" + opt_len(some("four")))
+    log("ident=" + ident(9))
+]
