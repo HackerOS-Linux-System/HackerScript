@@ -1,0 +1,5 @@
+generic_fn (generic/makro)
+a_macro (generic/makro)
+no_api (bez symbolu `api` - to nie jest fasada C-ABI)
+wide (typ spoza AbiType)
+bad_ret (typ spoza AbiType)
