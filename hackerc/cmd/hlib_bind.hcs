@@ -1,0 +1,779 @@
+get <crates:tar::0.4>
+get <crates:zstd::0.13>
+get <crates:sha2::0.10>
+get <std:string> import <str_trim::str_starts_with::str_ends_with::str_contains::str_join>
+get <std:fs> import <list_dir_or_empty::copy_file_ok::create_dir_ok::remove_dir_all_ok>
+get <std:json> import <JsonValue::JsonEntry::json_parse>
+
+!!! hlib_bind.hcs - polowka IMPORTUJACA mostu C-ABI (czysty HackerScript; zastepuje dawne `hlib_bind.rs`, ktory byl
+!!! wklejany do bloku `native {Rust}` w `hlib.hcs` przez `scripts/ffi_splice.py` - tamten mechanizm juz nie istnieje).
+!!!
+!!! Zamienia `exports` obcego `.hlib` z fasada (kazdy eksport ma symbol `api`; patrz docs/HLIB_FORMAT.md sekcje 10/11)
+!!! w stub HackerScript, ktory
+!!!   * linkuje archiwum natywne (`get <extern:SCIEZKA> use <static|dynamic>` + `region` z surowymi sygnaturami),
+!!!   * definiuje typowana strukture `X [ h: Int ]` dla kazdego nieprzezroczystego uchwytu,
+!!!   * definiuje typowany wrapper `fun nazwa(...)` dla kazdego eksportu (Str <-> C-string w bloku natywnym stubu),
+!!!   * definiuje konwersje list/Option dla kazdego uchwytu `Arr_T` / `Opt_T`.
+!!!
+!!! Jedyny kod natywny w tym pliku to dwa male helpery I/O (`hbd_unpack`, `hbd_sha256_file`) - parsowanie JSON
+!!! (`std:json`), wybor artefaktu, cache i generowanie stubow sa HackerScriptem. Testy: `tests/ffi` (`hackerc/cmd`
+!!! nie zawiera juz zadnych zrodel Rust do wklejania).
+
+struct HbFn [
+    name: Str,
+    api: Str,
+    params: List<Str>,
+    ret: Str
+]
+
+struct HbStub [
+    stub: Str,
+    skipped: List<Str>
+]
+
+!!! ---------- natywne helpery I/O ----------
+
+!!! Rozpakowuje `.hlib` (zstd + tar) do `dest_dir`. Wpisy ze sciezka absolutna albo z `..` sa POMIJANE (ochrona
+!!! przed path traversal); zwraca `false`, gdy archiwum jest nieczytelne.
+fun hbd_unpack(hlib_path: Str, dest_dir: Str) -> Bool [
+    let ok = false
+    native {Rust} [
+        match std::fs::read(&hlib_path).ok().and_then(|c| zstd::stream::decode_all(c.as_slice()).ok()) {
+            None => {}
+            Some(tar_bytes) => {
+                let mut archive = tar::Archive::new(tar_bytes.as_slice());
+                if let Ok(entries) = archive.entries() {
+                    ok = true;
+                    for entry in entries.flatten() {
+                        let mut e = entry;
+                        let rel = match e.path() { Ok(p) => p.to_path_buf(), Err(_) => continue };
+                        let safe = rel.components().all(|c| matches!(c, std::path::Component::Normal(_)));
+                        if !safe || !e.header().entry_type().is_file() { continue; }
+                        let dest = std::path::Path::new(&dest_dir).join(&rel);
+                        if let Some(parent) = dest.parent() { let _ = std::fs::create_dir_all(parent); }
+                        let mut buf = Vec::new();
+                        use std::io::Read;
+                        let _ = e.read_to_end(&mut buf);
+                        let _ = std::fs::write(&dest, &buf);
+                    }
+                }
+            }
+        }
+    ]
+    end ok
+]
+
+!!! SHA-256 pliku jako hex (pusty string, gdy pliku nie da sie odczytac).
+fun hbd_sha256_file(path: Str) -> Str [
+    let sum = ""
+    native {Rust} [
+        use sha2::Digest;
+        if let Ok(data) = std::fs::read(&path) {
+            let mut h = sha2::Sha256::new();
+            h.update(&data);
+            sum = h.finalize().iter().map(|b| format!("{:02x}", b)).collect::<String>();
+        }
+    ]
+    end sum
+]
+
+!!! Triple programu, ktory jest kompilowany: HKS_TARGET_TRIPLE (ustawia `bit` przy cross-buildach) albo host.
+fun hks_bind_target() -> Str [
+    let t = ""
+    native {Rust} [
+        t = match std::env::var("HKS_TARGET_TRIPLE") {
+            Ok(v) if !v.is_empty() => v,
+            _ => format!("{}-unknown-linux-gnu", std::env::consts::ARCH),
+        };
+    ]
+    end t
+]
+
+!!! ---------- dostep do JSON (std:json zwraca drzewo, bez akcesorow) ----------
+
+fun hbd_field(v: JsonValue, key: Str) -> Option<JsonValue> [
+    match v [
+        JsonObject(entries) -> [
+            let i = 0
+            while i < entries.len() [
+                if entries[i].key == key [
+                    end some(entries[i].value.clone())
+                ]
+                i = i + 1
+            ]
+            end none()
+        ]
+        _ -> [
+            end none()
+        ]
+    ]
+]
+
+!!! Tekst pola albo `dflt`, gdy brak pola / to nie string.
+fun hbd_str(o: Option<JsonValue>, dflt: Str) -> Str [
+    match o [
+        Some(v) -> [
+            match v [
+                JsonString(s) -> [
+                    end s
+                ]
+                _ -> [
+                    end dflt
+                ]
+            ]
+        ]
+        None -> [
+            end dflt
+        ]
+    ]
+]
+
+fun hbd_bool(o: Option<JsonValue>) -> Bool [
+    match o [
+        Some(v) -> [
+            match v [
+                JsonBool(b) -> [
+                    end b
+                ]
+                _ -> [
+                    end false
+                ]
+            ]
+        ]
+        None -> [
+            end false
+        ]
+    ]
+]
+
+fun hbd_arr(o: Option<JsonValue>) -> List<JsonValue> [
+    match o [
+        Some(v) -> [
+            match v [
+                JsonArray(xs) -> [
+                    end xs
+                ]
+                _ -> [
+                    end []
+                ]
+            ]
+        ]
+        None -> [
+            end []
+        ]
+    ]
+]
+
+!!! ---------- typy ABI -> typy HackerScript ----------
+
+!!! Typ HackerScript parametru/wyniku wrappera (`opaque:Nazwa` -> `Nazwa`); pusty string = nieobslugiwany.
+fun hb_ty(abi: Str) -> Str [
+    if abi == "i8" or abi == "i16" or abi == "i32" or abi == "i64" or abi == "u8" or abi == "u16" or abi == "u32" or abi == "u64" [
+        end "Int"
+    ]
+    if abi == "f32" or abi == "f64" [
+        end "Float"
+    ]
+    if abi == "bool" [
+        end "Bool"
+    ]
+    if abi == "cstr" or abi == "ptr" [
+        end "Str"
+    ]
+    if str_starts_with(abi, "opaque:") [
+        end abi.slice(7, abi.len())
+    ]
+    end ""
+]
+
+!!! Surowy typ w `region` (Str i uchwyty podrozuja jako Int); pusty string = void.
+fun hb_raw_ty(abi: Str) -> Str [
+    if abi == "f32" or abi == "f64" [
+        end "Float"
+    ]
+    if abi == "bool" [
+        end "Bool"
+    ]
+    if abi == "void" or abi == "" [
+        end ""
+    ]
+    end "Int"
+]
+
+fun hb_abi_of(v: JsonValue) -> Str [
+    let t = hbd_str(hbd_field(v.clone(), "type"), "")
+    if t == "opaque" [
+        end "opaque:" + hbd_str(hbd_field(v.clone(), "struct_name"), "")
+    ]
+    end t
+]
+
+fun hb_lit(abi: Str) -> Str [
+    if abi == "f32" or abi == "f64" [
+        end "0.0"
+    ]
+    if abi == "bool" [
+        end "false"
+    ]
+    if abi == "cstr" or abi == "ptr" [
+        end "\"\""
+    ]
+    end "0"
+]
+
+fun hb_list_has(xs: List<Str>, s: Str) -> Bool [
+    let i = 0
+    while i < xs.len() [
+        if xs[i] == s [
+            end true
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+fun hb_has_fn(fns: List<HbFn>, name: Str) -> Bool [
+    let i = 0
+    while i < fns.len() [
+        if fns[i].name == name [
+            end true
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+!!! Zwracany typ ABI funkcji `name` (pusty string, gdy takiej funkcji nie ma).
+fun hb_fn_ret(fns: List<HbFn>, name: Str) -> Str [
+    let i = 0
+    while i < fns.len() [
+        if fns[i].name == name [
+            end fns[i].ret.clone()
+        ]
+        i = i + 1
+    ]
+    end ""
+]
+
+!!! ---------- generator stubu ----------
+
+!!! Buduje stub z `manifest.json`. `link_path` = bezwzgledna sciezka wypakowanego archiwum, `mode` = "static" |
+!!! "dynamic", `link_libs` = biblioteki systemowe dolinkowywane po nim.
+fun hks_bind_stub(manifest_json: Str, lib: Str, link_path: Str, mode: Str, link_libs: List<Str>) -> HbStub [
+    let skipped: List<Str> = []
+    let exports: List<JsonValue> = []
+    match json_parse(manifest_json) [
+        Ok(mf) -> [
+            exports = hbd_arr(hbd_field(mf, "exports"))
+        ]
+        Err(_e) -> [
+        ]
+    ]
+    let fns: List<HbFn> = []
+    let seen: List<Str> = []
+    let types: List<Str> = []
+    let ei = 0
+    while ei < exports.len() [
+        let e = exports[ei].clone()
+        ei = ei + 1
+        let name = hbd_str(hbd_field(e.clone(), "name"), "")
+        let api = hbd_str(hbd_field(e.clone(), "api"), "")
+        let kind = hbd_str(hbd_field(e.clone(), "kind"), "function")
+        if name == "" or kind != "function" [
+            continue
+        ]
+        if api == "" [
+            skipped.push(name + " (bez symbolu `api` - to nie jest fasada C-ABI)")
+            continue
+        ]
+        if hbd_bool(hbd_field(e.clone(), "generic")) or hbd_bool(hbd_field(e.clone(), "is_macro")) [
+            skipped.push(name + " (generic/makro)")
+            continue
+        ]
+        if hb_list_has(seen.clone(), name.clone()) [
+            continue
+        ]
+        seen.push(name.clone())
+        let params: List<Str> = []
+        let ok = true
+        let ps = hbd_arr(hbd_field(e.clone(), "params"))
+        let pi = 0
+        while pi < ps.len() [
+            let abi = hb_abi_of(ps[pi].clone())
+            if hb_ty(abi.clone()) == "" [
+                ok = false
+            ]
+            params.push(abi)
+            pi = pi + 1
+        ]
+        let ret = "void"
+        match hbd_field(e.clone(), "returns") [
+            Some(rv) -> [
+                ret = hb_abi_of(rv)
+            ]
+            None -> [
+            ]
+        ]
+        if ret != "void" and hb_ty(ret.clone()) == "" [
+            ok = false
+        ]
+        if not ok [
+            skipped.push(name + " (typ spoza AbiType)")
+            continue
+        ]
+        let ai = 0
+        let all_abi: List<Str> = params.clone()
+        all_abi.push(ret.clone())
+        while ai < all_abi.len() [
+            if str_starts_with(all_abi[ai].clone(), "opaque:") [
+                let tn = all_abi[ai].slice(7, all_abi[ai].len())
+                if not hb_list_has(types.clone(), tn.clone()) [
+                    types.push(tn)
+                ]
+            ]
+            ai = ai + 1
+        ]
+        fns.push(HbFn(name, api, params, ret))
+    ]
+
+    let out = "!!! auto-wygenerowane przez hackerc (hlib_bind) z biblioteki '" + lib + "' - nie edytuj recznie\n"
+    out = out + "get <extern:" + link_path + "> use <" + mode + ">\n"
+    out = out + "region [\n"
+    let fi = 0
+    while fi < fns.len() [
+        let f = fns[fi].clone()
+        let rps: List<Str> = []
+        let k = 0
+        while k < f.params.len() [
+            rps.push("a" + k + ": " + hb_raw_ty(f.params[k].clone()))
+            k = k + 1
+        ]
+        let r = hb_raw_ty(f.ret.clone())
+        if r == "" [
+            out = out + "    fun " + f.api + "(" + str_join(rps, ", ") + ")\n"
+        ] else [
+            out = out + "    fun " + f.api + "(" + str_join(rps, ", ") + ") -> " + r + "\n"
+        ]
+        fi = fi + 1
+    ]
+    out = out + "]\n"
+    let li = 0
+    while li < link_libs.len() [
+        out = out + "get <c:" + link_libs[li] + ">\n"
+        li = li + 1
+    ]
+    out = out + "\n"
+
+    let ti = 0
+    while ti < types.len() [
+        out = out + "pub struct " + types[ti] + " [\n    h: Int\n]\n\n"
+        ti = ti + 1
+    ]
+
+    fi = 0
+    while fi < fns.len() [
+        let f = fns[fi].clone()
+        fi = fi + 1
+        let has_str = f.ret == "cstr" or f.ret == "ptr"
+        let ps2: List<Str> = []
+        let hargs: List<Str> = []
+        let rargs: List<Str> = []
+        let pre = ""
+        let k = 0
+        while k < f.params.len() [
+            let a = f.params[k].clone()
+            ps2.push("a" + k + ": " + hb_ty(a.clone()))
+            if str_starts_with(a.clone(), "opaque:") [
+                hargs.push("a" + k + ".h")
+                rargs.push("a" + k + ".h")
+            ] elif a == "cstr" or a == "ptr" [
+                has_str = true
+                hargs.push("a" + k)
+                pre = pre + "        let c" + k + " = std::ffi::CString::new(a" + k + ".to_string()).unwrap_or_default();\n"
+                rargs.push("c" + k + ".as_ptr() as i64")
+            ] else [
+                hargs.push("a" + k)
+                rargs.push("a" + k)
+            ]
+            k = k + 1
+        ]
+        let ret_ty = ""
+        if f.ret != "void" [
+            ret_ty = " -> " + hb_ty(f.ret.clone())
+        ]
+        out = out + "pub fun " + f.name + "(" + str_join(ps2, ", ") + ")" + ret_ty + " [\n"
+        if not has_str [
+            let call = f.api + "(" + str_join(hargs, ", ") + ")"
+            if f.ret == "void" [
+                out = out + "    " + call + "\n"
+            ] elif str_starts_with(f.ret.clone(), "opaque:") [
+                out = out + "    end " + hb_ty(f.ret.clone()) + "(" + call + ")\n"
+            ] else [
+                out = out + "    end " + call + "\n"
+            ]
+        ] else [
+            let is_s = f.ret == "cstr" or f.ret == "ptr"
+            if f.ret != "void" [
+                let lit = hb_lit(f.ret.clone())
+                if is_s [
+                    lit = "\"\""
+                ]
+                out = out + "    let rv = " + lit + "\n"
+            ]
+            out = out + "    native {Rust} [\n"
+            out = out + pre
+            let call = "unsafe { " + f.api + "(" + str_join(rargs, ", ") + ") }"
+            if f.ret == "void" [
+                out = out + "        let _ = " + call + ";\n"
+            ] elif is_s [
+                out = out + "        let p: i64 = " + call + ";\n"
+                out = out + "        rv = if p == 0 { String::new() } else { unsafe { std::ffi::CStr::from_ptr(p as *const std::os::raw::c_char) }.to_string_lossy().into_owned() };\n"
+            ] else [
+                out = out + "        rv = " + call + ";\n"
+            ]
+            out = out + "    ]\n"
+            if f.ret != "void" [
+                if str_starts_with(f.ret.clone(), "opaque:") [
+                    out = out + "    end " + hb_ty(f.ret.clone()) + "(rv)\n"
+                ] else [
+                    out = out + "    end rv\n"
+                ]
+            ]
+        ]
+        out = out + "]\n\n"
+    ]
+
+    !! konwersje list / Option dla uchwytow `Arr_T` / `Opt_T`
+    ti = 0
+    while ti < types.len() [
+        let t = types[ti].clone()
+        ti = ti + 1
+        if str_starts_with(t.clone(), "Arr_") [
+            if not (hb_has_fn(fns.clone(), t + "_new") and hb_has_fn(fns.clone(), t + "_len") and hb_has_fn(fns.clone(), t + "_get") and hb_has_fn(fns.clone(), t + "_push")) [
+                continue
+            ]
+            let ety = hb_ty(hb_fn_ret(fns.clone(), t + "_get"))
+            if ety == "" [
+                continue
+            ]
+            out = out + "pub fun " + t + "_from_list(xs: List<" + ety + ">) -> " + t + " [\n    let a = " + t + "_new()\n    let i = 0\n    let n = xs.len()\n    while i < n [\n        " + t + "_push(a, xs[i].clone())\n        i = i + 1\n    ]\n    end a\n]\n\n"
+            out = out + "pub fun " + t + "_to_list(a: " + t + ") -> List<" + ety + "> [\n    let out: List<" + ety + "> = []\n    let i = 0\n    let n = " + t + "_len(a)\n    while i < n [\n        out.push(" + t + "_get(a, i))\n        i = i + 1\n    ]\n    end out\n]\n\n"
+        ] elif str_starts_with(t.clone(), "Opt_") [
+            if not (hb_has_fn(fns.clone(), t + "_none") and hb_has_fn(fns.clone(), t + "_some") and hb_has_fn(fns.clone(), t + "_is_some") and hb_has_fn(fns.clone(), t + "_get")) [
+                continue
+            ]
+            let ety = hb_ty(hb_fn_ret(fns.clone(), t + "_get"))
+            if ety == "" [
+                continue
+            ]
+            out = out + "pub fun " + t + "_from_option(o: Option<" + ety + ">) -> " + t + " [\n    let r = " + t + "_none()\n    match o [\n        Some(v) -> [\n            r = " + t + "_some(v)\n        ]\n        None -> [\n        ]\n    ]\n    end r\n]\n\n"
+            out = out + "pub fun " + t + "_to_option(o: " + t + ") -> Option<" + ety + "> [\n    let r: Option<" + ety + "> = none()\n    if " + t + "_is_some(o) [\n        r = some(" + t + "_get(o))\n    ]\n    end r\n]\n\n"
+        ]
+    ]
+    end HbStub(out, skipped)
+]
+
+!!! ---------- wybor artefaktu i import ----------
+
+!!! Sciezka wzgledna wewnatrz wypakowanego archiwum (bez `..` i bez poczatkowego `/`).
+fun hbd_safe_rel(p: Str) -> Bool [
+    if p == "" or str_starts_with(p.clone(), "/") or str_contains(p.clone(), "..") [
+        end false
+    ]
+    end true
+]
+
+!!! Artefakt `kind` dla celu `want`; gdy takiego brak - pierwszy artefakt tego rodzaju.
+fun hbd_pick(arts: List<JsonValue>, kind: Str, want: Str) -> Option<JsonValue> [
+    let found: Option<JsonValue> = none()
+    let i = 0
+    while i < arts.len() [
+        let a = arts[i].clone()
+        i = i + 1
+        if hbd_str(hbd_field(a.clone(), "kind"), "") != kind [
+            continue
+        ]
+        if hbd_str(hbd_field(a.clone(), "target"), "") == want [
+            end some(a)
+        ]
+        match found.clone() [
+            Some(_x) -> [
+            ]
+            None -> [
+                found = some(a)
+            ]
+        ]
+    ]
+    end found
+]
+
+!!! Wybiera artefakt natywny biblioteki z fasada, wypakowuje go do `into_dir/native-cache/<sha12>/` (klucz = hash
+!!! zawartosci, wiec przebudowana biblioteka nigdy nie podlinkuje starego pliku) i zapisuje `<lib>_hlib_bind.hcs`.
+!!! `unpacked` = katalog z rozpakowanym archiwum. Zwraca sciezke stubu albo `""`, gdy archiwum nie ma fasady
+!!! (wolajacy wraca wtedy do starego wiazania surowego `.so`). `target` = triple budowanego programu.
+fun hks_bind_import(unpacked: Str, hlib_path: Str, lib: Str, into_dir: Str, target: Str) -> Str [
+    let mtext = ""
+    match read_file(unpacked + "/manifest.json") [
+        Ok(t) -> [
+            mtext = t
+        ]
+        Err(_e) -> [
+            end ""
+        ]
+    ]
+    let mf = JsonNull
+    match json_parse(mtext.clone()) [
+        Ok(v) -> [
+            mf = v
+        ]
+        Err(_e2) -> [
+            end ""
+        ]
+    ]
+    let exports = hbd_arr(hbd_field(mf.clone(), "exports"))
+    let has_facade = false
+    let xi = 0
+    while xi < exports.len() [
+        if hbd_str(hbd_field(exports[xi].clone(), "api"), "") != "" [
+            has_facade = true
+        ]
+        xi = xi + 1
+    ]
+    if not has_facade [
+        end ""
+    ]
+    let arts = hbd_arr(hbd_field(mf.clone(), "artifacts"))
+    let mode = "static"
+    let art = JsonNull
+    match hbd_pick(arts.clone(), "static_lib", target.clone()) [
+        Some(a) -> [
+            art = a
+        ]
+        None -> [
+            mode = "dynamic"
+            match hbd_pick(arts.clone(), "shared_object", target.clone()) [
+                Some(b) -> [
+                    art = b
+                ]
+                None -> [
+                    elog("hlib: '" + lib + "' ma fasade C-ABI, ale zadnego artefaktu natywnego (static_lib/shared_object)")
+                    end ""
+                ]
+            ]
+        ]
+    ]
+    let atarget = hbd_str(hbd_field(art.clone(), "target"), "")
+    if atarget != target [
+        elog("hlib: UWAGA '" + lib + "' zbudowano dla " + atarget + " a program budowany jest dla " + target + " - zbuduj biblioteke z `h# lib build --ffi --target ...` dla tego celu")
+    ]
+    let apath = hbd_str(hbd_field(art.clone(), "path"), "")
+    if not hbd_safe_rel(apath.clone()) [
+        end ""
+    ]
+    let src = unpacked + "/" + apath
+    let sum = hbd_sha256_file(src.clone())
+    if sum == "" [
+        end ""
+    ]
+    let dir = into_dir + "/native-cache/" + sum.slice(0, 12)
+    let _mk = create_dir_ok(dir.clone())
+    let fname = "lib" + lib + ".so"
+    if mode == "static" [
+        fname = "lib" + lib + ".a"
+    ]
+    let dest = dir + "/" + fname
+    if not copy_file_ok(src, dest.clone()) [
+        end ""
+    ]
+    let link_libs: List<Str> = []
+    let ll = hbd_arr(hbd_field(art.clone(), "link_libs"))
+    let li = 0
+    while li < ll.len() [
+        match ll[li].clone() [
+            JsonString(s) -> [
+                link_libs.push(s)
+            ]
+            _ -> [
+            ]
+        ]
+        li = li + 1
+    ]
+    let res = hks_bind_stub(mtext, lib.clone(), dest, mode, link_libs)
+    let stub = res.stub.clone()
+    if res.skipped.len() > 0 [
+        stub = stub + "\n!! Pominiete (nie da sie wyeksportowac przez C-ABI):\n"
+        let si = 0
+        while si < res.skipped.len() [
+            stub = stub + "!!   - " + res.skipped[si] + "\n"
+            si = si + 1
+        ]
+    ]
+    let sp = into_dir + "/" + lib + "_hlib_bind.hcs"
+    match write_file(sp.clone(), stub) [
+        Ok(_w) -> [
+            end sp
+        ]
+        Err(_e3) -> [
+            end ""
+        ]
+    ]
+]
+
+!!! AbiType (docs/HLIB_FORMAT.md sekcja 3) -> typ HackerScript dla starego wiazania surowego `.so`.
+!!! `none()` = nie da sie odwzorowac w typie prostym; `some("")` = void.
+fun hbd_legacy_abi_type(t: Str) -> Option<Str> [
+    if t == "i8" or t == "i16" or t == "i32" or t == "i64" or t == "u8" or t == "u16" or t == "u32" or t == "u64" [
+        end some("Int")
+    ]
+    if t == "f32" or t == "f64" [
+        end some("Float")
+    ]
+    if t == "bool" [
+        end some("Bool")
+    ]
+    if t == "ptr" [
+        end some("Str")
+    ]
+    if t == "void" [
+        end some("")
+    ]
+    end none()
+]
+
+!!! Szuka (rekurencyjnie) pliku `*<suffix>` w `dir`; pusty string, gdy brak.
+fun hbd_find_file(dir: Str, suffix: Str) -> Str [
+    let names = list_dir_or_empty(dir.clone())
+    let i = 0
+    while i < names.len() [
+        let p = dir + "/" + names[i]
+        if str_ends_with(names[i].clone(), suffix.clone()) and path_exists(p.clone()) and not dir_exists(p.clone()) [
+            end p
+        ]
+        if dir_exists(p.clone()) [
+            let sub = hbd_find_file(p.clone(), suffix.clone())
+            if sub != "" [
+                end sub
+            ]
+        ]
+        i = i + 1
+    ]
+    end ""
+]
+
+!!! Starsza sciezka: biblioteka bez artefaktu `ast` i bez fasady, ale z `.so` dla hosta - stub `region` z surowymi
+!!! sygnaturami zbudowanymi z `manifest.exports` (tylko eksporty niegeneryczne i bez makr; reszta trafia do
+!!! komentarza). Zwraca sciezke stubu albo `""`.
+fun hbd_legacy_import(unpacked: Str, hlib_path: Str, lib: Str, into_dir: Str) -> Str [
+    let so_src = ""
+    if dir_exists(unpacked + "/native") [
+        so_src = hbd_find_file(unpacked + "/native", lib + ".so")
+    ]
+    if so_src == "" [
+        elog("hlib: '" + lib + "' nie ma ani artefaktu ast, ani .so dla tego hosta - nic do zaimportowania")
+        end ""
+    ]
+    let cache_dir = into_dir + "/native-cache"
+    let _mk = create_dir_ok(cache_dir.clone())
+    let so_dest = cache_dir + "/lib" + lib + ".so"
+    let _cp = copy_file_ok(so_src, so_dest.clone())
+
+    let exports: List<JsonValue> = []
+    match read_file(unpacked + "/manifest.json") [
+        Ok(t) -> [
+            match json_parse(t) [
+                Ok(mf) -> [
+                    exports = hbd_arr(hbd_field(mf, "exports"))
+                ]
+                Err(_e) -> [
+                ]
+            ]
+        ]
+        Err(_e0) -> [
+        ]
+    ]
+    let region_body = ""
+    let skipped: List<Str> = []
+    let ei = 0
+    while ei < exports.len() [
+        let exp = exports[ei].clone()
+        ei = ei + 1
+        let name = hbd_str(hbd_field(exp.clone(), "name"), "")
+        if name == "" [
+            continue
+        ]
+        let kind = hbd_str(hbd_field(exp.clone(), "kind"), "function")
+        let is_generic = hbd_bool(hbd_field(exp.clone(), "generic"))
+        let is_macro = hbd_bool(hbd_field(exp.clone(), "is_macro"))
+        if kind != "function" or is_generic or is_macro [
+            skipped.push(name + " (kind=" + kind + ", generic=" + is_generic + ", is_macro=" + is_macro + " - patrz docs/HLIB_FORMAT.md sekcja 6, 'Only non-generic function exports')")
+            continue
+        ]
+        let hps: List<Str> = []
+        let param_ok = true
+        let ps = hbd_arr(hbd_field(exp.clone(), "params"))
+        let pi = 0
+        while pi < ps.len() [
+            let pty = hbd_str(hbd_field(ps[pi].clone(), "type"), "")
+            match hbd_legacy_abi_type(pty) [
+                Some(ht) -> [
+                    if ht != "" [
+                        hps.push("p" + pi + ": " + ht)
+                    ] else [
+                        param_ok = false
+                    ]
+                ]
+                None -> [
+                    param_ok = false
+                ]
+            ]
+            pi = pi + 1
+        ]
+        if not param_ok [
+            skipped.push(name + " (parametr spoza wspieranego AbiType - patrz docs/HLIB_FORMAT.md sekcja 3)")
+            continue
+        ]
+        let ret_ty = "void"
+        match hbd_field(exp.clone(), "returns") [
+            Some(rv) -> [
+                ret_ty = hbd_str(hbd_field(rv, "type"), "void")
+            ]
+            None -> [
+            ]
+        ]
+        let ret_clause = ""
+        match hbd_legacy_abi_type(ret_ty.clone()) [
+            Some(rt) -> [
+                if rt != "" [
+                    ret_clause = " -> " + rt
+                ]
+            ]
+            None -> [
+                skipped.push(name + " (typ zwracany '" + ret_ty + "' spoza wspieranego AbiType)")
+                continue
+            ]
+        ]
+        region_body = region_body + "    fun " + name + "(" + str_join(hps, ", ") + ")" + ret_clause + "\n"
+    ]
+    if region_body == "" [
+        region_body = "    !! Brak eksportow mozliwych do zwiazania automatycznie - patrz komentarz na koncu pliku.\n"
+    ]
+    let skip_comment = ""
+    if skipped.len() > 0 [
+        skip_comment = "\n!! Pominiete (nie da sie zwiazac automatycznie):\n"
+        let si = 0
+        while si < skipped.len() [
+            skip_comment = skip_comment + "!!   - " + skipped[si] + "\n"
+            si = si + 1
+        ]
+    ]
+    let stub = "!!! auto-wygenerowane przez hlib_extract_for_import z " + hlib_path + " - nie edytuj recznie\nget <extern:" + so_dest + "> use <dynamic>\nregion [\n" + region_body + "]\n" + skip_comment
+    let dest = into_dir + "/" + lib + "_hlib_bind.hcs"
+    match write_file(dest.clone(), stub) [
+        Ok(_w) -> [
+            end dest
+        ]
+        Err(_e2) -> [
+            end ""
+        ]
+    ]
+]
