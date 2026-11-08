@@ -1,0 +1,4 @@
+S|Sp||a: Int | b : Str
+S|Gen|T, U|x: T|y: U
+E|E1|| A: Int ; Str | B
+F|||g|0| T , U |x: T|y: U|=T
