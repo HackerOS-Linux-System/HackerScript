@@ -1,0 +1,72 @@
+using <0.6>
+
+include <harness>
+include <test_gen>
+include <test_bind>
+include <test_e2e>
+get <std:string> import <str_starts_with>
+get <std:env> import <env_var_or>
+
+!!! Testy mostu FFI napisane w HackerScript (generator fasady `ffi_gen.hcs` + importer `hlib_bind.hcs`).
+!!!
+!!!   tests/ffi/cmd/main.hcs [KATALOG_TESTOW] [--e2e] [--hackerc SCIEZKA] [--work KATALOG] [--update]
+!!!
+!!!   KATALOG_TESTOW  katalog z fixture'ami i wzorcami (domyslnie `tests/ffi`)
+!!!   --e2e           dodatkowo test end-to-end (potrzebuje cargo i hackerc; patrz test_e2e.hcs)
+!!!   --hackerc P     hackerc uzywany w tescie e2e (domyslnie $HACKERC, potem `hackerc` z PATH)
+!!!   --work D        katalog roboczy (domyslnie `<KATALOG_TESTOW>/.work`)
+!!!   --update        przepisz wzorce `golden/` z biezacego wyjscia (swiadomie!)
+!!!
+!!! Kod wyjscia: 0 = wszystko przeszlo, 1 = sa porazki, 2 = blad srodowiska (brak fixture'a).
+!!! Sciezka bezwzgledna (test e2e robi `cd` do katalogow roboczych, wiec sciezki wzgledne by sie rozjechaly).
+fun abs_path(p: Str) -> Str [
+    if str_starts_with(p.clone(), "/") [
+        end p
+    ]
+    end env_var_or("PWD", ".") + "/" + p
+]
+
+fun main() [
+    let argv = args()
+    let dir = "tests/ffi"
+    let work = ""
+    let hackerc = env_var_or("HACKERC", "hackerc")
+    let e2e = false
+    let update = false
+    let i = 0
+    while i < argv.len() [
+        let a: Str = argv[i].clone()
+        if a == "--e2e" [
+            e2e = true
+        ] elif a == "--update" [
+            update = true
+        ] elif a == "--hackerc" and i + 1 < argv.len() [
+            hackerc = argv[i + 1].clone()
+            i = i + 1
+        ] elif a == "--work" and i + 1 < argv.len() [
+            work = argv[i + 1].clone()
+            i = i + 1
+        ] elif not str_starts_with(a.clone(), "--") [
+            dir = a
+        ]
+        i = i + 1
+    ]
+    dir = abs_path(dir)
+    if work == "" [
+        work = dir.clone() + "/.work"
+    ]
+    work = abs_path(work)
+    let total = suite_gen(dir.clone(), update)
+    total = t_merge(total, suite_bind(dir.clone(), work.clone(), update))
+    if e2e and not update [
+        total = t_merge(total, suite_e2e(dir.clone(), work.clone(), hackerc))
+    ] elif not update [
+        log("")
+        log("(test end-to-end pominiety - dodaj --e2e)")
+    ]
+    log("")
+    log("wynik: " + total.passed + " ok, " + total.failed + " porazek")
+    if total.failed > 0 [
+        exit(1)
+    ]
+]
