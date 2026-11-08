@@ -1,0 +1,129 @@
+using <0.6>
+
+!!! mocklib.hcs - biblioteka testowa mostu C-ABI (`hackerc hlib build --ffi`). Odpowiada dawnemu "mockowi" z Rusta:
+!!! struktury z polami roznych rodzajow (Str, List, Dict, Set, Option, struktura zagniezdzona, rekurencja), enum,
+!!! generyki, metody `impl`, `async fun`, kanal. Uruchamiana przez `tests/ffi/cmd/test_e2e.hcs`.
+
+struct Point [
+    x: Int,
+    y: Int
+]
+
+impl Point [
+    pub fun new_origin() -> Point [
+        end Point(0, 0)
+    ]
+
+    pub fun norm(self) -> Int [
+        let ax = self.x
+        if ax < 0 [
+            ax = 0 - ax
+        ]
+        let ay = self.y
+        if ay < 0 [
+            ay = 0 - ay
+        ]
+        end ax + ay
+    ]
+
+    pub fun add(self, o: Point) -> Point [
+        end Point(self.x + o.x, self.y + o.y)
+    ]
+]
+
+struct Node [
+    label: Str,
+    kids: List<Node>,
+    next: Option<Node>,
+    tags: List<Str>,
+    pt: Point,
+    meta: Dict<Str, Int>,
+    seen: Set<Str>,
+    maybe: Option<Int>
+]
+
+struct Pair<A, B> [
+    a: A,
+    b: B
+]
+
+impl Pair<A, B> [
+    pub fun left(self) -> A [
+        end self.a.clone()
+    ]
+]
+
+enum Shape [
+    Circle(Int),
+    Rect(Int, Int),
+    Empty,
+    Named(Str),
+    Tree(Option<Node>)
+]
+
+pub fun make_node(label: Str) -> Node [
+    end Node(label, [], none(), [], Point(0, 0), dict(), set(), none())
+]
+
+pub fun bump(p: Point, d: Int) -> Int [
+    p.x = p.x + d
+    end p.x
+]
+
+pub fun sum_list(xs: List<Int>) -> Int [
+    let total = 0
+    let i = 0
+    while i < xs.len() [
+        total = total + xs[i]
+        i = i + 1
+    ]
+    end total
+]
+
+pub fun opt_len(o: Option<Str>) -> Int [
+    match o [
+        Some(s) -> [
+            end s.len()
+        ]
+        None -> [
+            end 0 - 1
+        ]
+    ]
+]
+
+pub async fun fetch(k: Str) -> Result<Int, Str> [
+    if k == "ok" [
+        end ok(7)
+    ]
+    end err("bad " + k)
+]
+
+pub fun ident<T>(x: T) -> T [
+    end x
+]
+
+pub fun first<T>(xs: List<T>) -> T [
+    end xs[0].clone()
+]
+
+pub fun mk_chan(n: Int) -> Chan<Int> [
+    end chan(n)
+]
+
+pub fun area(s: Shape) -> Int [
+    match s [
+        Circle(r) -> [
+            end 3 * r * r
+        ]
+        Rect(a, b) -> [
+            end a * b
+        ]
+        _ -> [
+            end 0
+        ]
+    ]
+]
+
+pub fun cfg(d: Dict<Str, List<Int>>) -> Int [
+    end d.len()
+]
