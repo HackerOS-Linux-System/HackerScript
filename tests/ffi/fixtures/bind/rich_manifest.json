@@ -1,0 +1,799 @@
+{
+ "name": "rich",
+ "version": "0.1.0",
+ "abi_version": 2,
+ "exports": [
+  {
+   "name": "add",
+   "kind": "function",
+   "signature": "fn add",
+   "params": [
+    {
+     "type": "i64"
+    },
+    {
+     "type": "i64"
+    }
+   ],
+   "returns": {
+    "type": "i64"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_add"
+  },
+  {
+   "name": "half",
+   "kind": "function",
+   "signature": "fn half",
+   "params": [
+    {
+     "type": "f64"
+    }
+   ],
+   "returns": {
+    "type": "f64"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_half"
+  },
+  {
+   "name": "flip",
+   "kind": "function",
+   "signature": "fn flip",
+   "params": [
+    {
+     "type": "bool"
+    }
+   ],
+   "returns": {
+    "type": "bool"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_flip"
+  },
+  {
+   "name": "greet",
+   "kind": "function",
+   "signature": "fn greet",
+   "params": [
+    {
+     "type": "cstr"
+    }
+   ],
+   "returns": {
+    "type": "cstr"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_greet"
+  },
+  {
+   "name": "mk",
+   "kind": "function",
+   "signature": "fn mk",
+   "params": [
+    {
+     "type": "i64"
+    },
+    {
+     "type": "i64"
+    }
+   ],
+   "returns": {
+    "type": "opaque",
+    "struct_name": "Pt"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_mk"
+  },
+  {
+   "name": "Pt_get_x",
+   "kind": "function",
+   "signature": "fn Pt_get_x",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Pt"
+    }
+   ],
+   "returns": {
+    "type": "i64"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Pt_get_x"
+  },
+  {
+   "name": "Pt_set_x",
+   "kind": "function",
+   "signature": "fn Pt_set_x",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Pt"
+    },
+    {
+     "type": "i64"
+    }
+   ],
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Pt_set_x"
+  },
+  {
+   "name": "Pt_get_name",
+   "kind": "function",
+   "signature": "fn Pt_get_name",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Pt"
+    }
+   ],
+   "returns": {
+    "type": "cstr"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Pt_get_name"
+  },
+  {
+   "name": "Pt_set_name",
+   "kind": "function",
+   "signature": "fn Pt_set_name",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Pt"
+    },
+    {
+     "type": "cstr"
+    }
+   ],
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Pt_set_name"
+  },
+  {
+   "name": "Pt_get_tags",
+   "kind": "function",
+   "signature": "fn Pt_get_tags",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Pt"
+    }
+   ],
+   "returns": {
+    "type": "opaque",
+    "struct_name": "Arr_string"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Pt_get_tags"
+  },
+  {
+   "name": "Pt_get_next",
+   "kind": "function",
+   "signature": "fn Pt_get_next",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Pt"
+    }
+   ],
+   "returns": {
+    "type": "opaque",
+    "struct_name": "Opt_Pt"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Pt_get_next"
+  },
+  {
+   "name": "Pt_set_next",
+   "kind": "function",
+   "signature": "fn Pt_set_next",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Pt"
+    },
+    {
+     "type": "opaque",
+     "struct_name": "Opt_Pt"
+    }
+   ],
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Pt_set_next"
+  },
+  {
+   "name": "Pt_dist2",
+   "kind": "function",
+   "signature": "fn Pt_dist2",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Pt"
+    },
+    {
+     "type": "opaque",
+     "struct_name": "Pt"
+    }
+   ],
+   "returns": {
+    "type": "i64"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Pt_dist2"
+  },
+  {
+   "name": "Arr_int_new",
+   "kind": "function",
+   "signature": "fn Arr_int_new",
+   "params": [],
+   "returns": {
+    "type": "opaque",
+    "struct_name": "Arr_int"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Arr_int_new"
+  },
+  {
+   "name": "Arr_int_len",
+   "kind": "function",
+   "signature": "fn Arr_int_len",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Arr_int"
+    }
+   ],
+   "returns": {
+    "type": "i64"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Arr_int_len"
+  },
+  {
+   "name": "Arr_int_get",
+   "kind": "function",
+   "signature": "fn Arr_int_get",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Arr_int"
+    },
+    {
+     "type": "i64"
+    }
+   ],
+   "returns": {
+    "type": "i64"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Arr_int_get"
+  },
+  {
+   "name": "Arr_int_push",
+   "kind": "function",
+   "signature": "fn Arr_int_push",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Arr_int"
+    },
+    {
+     "type": "i64"
+    }
+   ],
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Arr_int_push"
+  },
+  {
+   "name": "Arr_string_new",
+   "kind": "function",
+   "signature": "fn Arr_string_new",
+   "params": [],
+   "returns": {
+    "type": "opaque",
+    "struct_name": "Arr_string"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Arr_string_new"
+  },
+  {
+   "name": "Arr_string_len",
+   "kind": "function",
+   "signature": "fn Arr_string_len",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Arr_string"
+    }
+   ],
+   "returns": {
+    "type": "i64"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Arr_string_len"
+  },
+  {
+   "name": "Arr_string_get",
+   "kind": "function",
+   "signature": "fn Arr_string_get",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Arr_string"
+    },
+    {
+     "type": "i64"
+    }
+   ],
+   "returns": {
+    "type": "cstr"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Arr_string_get"
+  },
+  {
+   "name": "Arr_string_push",
+   "kind": "function",
+   "signature": "fn Arr_string_push",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Arr_string"
+    },
+    {
+     "type": "cstr"
+    }
+   ],
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Arr_string_push"
+  },
+  {
+   "name": "Opt_Pt_none",
+   "kind": "function",
+   "signature": "fn Opt_Pt_none",
+   "params": [],
+   "returns": {
+    "type": "opaque",
+    "struct_name": "Opt_Pt"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Opt_Pt_none"
+  },
+  {
+   "name": "Opt_Pt_some",
+   "kind": "function",
+   "signature": "fn Opt_Pt_some",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Pt"
+    }
+   ],
+   "returns": {
+    "type": "opaque",
+    "struct_name": "Opt_Pt"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Opt_Pt_some"
+  },
+  {
+   "name": "Opt_Pt_is_some",
+   "kind": "function",
+   "signature": "fn Opt_Pt_is_some",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Opt_Pt"
+    }
+   ],
+   "returns": {
+    "type": "bool"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Opt_Pt_is_some"
+  },
+  {
+   "name": "Opt_Pt_get",
+   "kind": "function",
+   "signature": "fn Opt_Pt_get",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Opt_Pt"
+    }
+   ],
+   "returns": {
+    "type": "opaque",
+    "struct_name": "Pt"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Opt_Pt_get"
+  },
+  {
+   "name": "Opt_int_is_some",
+   "kind": "function",
+   "signature": "fn Opt_int_is_some",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Opt_int"
+    }
+   ],
+   "returns": {
+    "type": "bool"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Opt_int_is_some"
+  },
+  {
+   "name": "evens",
+   "kind": "function",
+   "signature": "fn evens",
+   "params": [
+    {
+     "type": "i64"
+    }
+   ],
+   "returns": {
+    "type": "opaque",
+    "struct_name": "Arr_int"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_evens"
+  },
+  {
+   "name": "sum",
+   "kind": "function",
+   "signature": "fn sum",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Arr_int"
+    }
+   ],
+   "returns": {
+    "type": "i64"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_sum"
+  },
+  {
+   "name": "find",
+   "kind": "function",
+   "signature": "fn find",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Arr_int"
+    },
+    {
+     "type": "i64"
+    }
+   ],
+   "returns": {
+    "type": "opaque",
+    "struct_name": "Opt_int"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_find"
+  },
+  {
+   "name": "Shape_Circle",
+   "kind": "function",
+   "signature": "fn Shape_Circle",
+   "params": [
+    {
+     "type": "i64"
+    }
+   ],
+   "returns": {
+    "type": "opaque",
+    "struct_name": "Shape"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Shape_Circle"
+  },
+  {
+   "name": "Shape_Rect",
+   "kind": "function",
+   "signature": "fn Shape_Rect",
+   "params": [
+    {
+     "type": "i64"
+    },
+    {
+     "type": "i64"
+    }
+   ],
+   "returns": {
+    "type": "opaque",
+    "struct_name": "Shape"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Shape_Rect"
+  },
+  {
+   "name": "Shape_Empty",
+   "kind": "function",
+   "signature": "fn Shape_Empty",
+   "params": [],
+   "returns": {
+    "type": "opaque",
+    "struct_name": "Shape"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Shape_Empty"
+  },
+  {
+   "name": "Shape_tag",
+   "kind": "function",
+   "signature": "fn Shape_tag",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Shape"
+    }
+   ],
+   "returns": {
+    "type": "i64"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Shape_tag"
+  },
+  {
+   "name": "Shape_Rect_get_1",
+   "kind": "function",
+   "signature": "fn Shape_Rect_get_1",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Shape"
+    }
+   ],
+   "returns": {
+    "type": "i64"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Shape_Rect_get_1"
+  },
+  {
+   "name": "area",
+   "kind": "function",
+   "signature": "fn area",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Shape"
+    }
+   ],
+   "returns": {
+    "type": "i64"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_area"
+  },
+  {
+   "name": "ident_int",
+   "kind": "function",
+   "signature": "fn ident_int",
+   "params": [
+    {
+     "type": "i64"
+    }
+   ],
+   "returns": {
+    "type": "i64"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_ident_int"
+  },
+  {
+   "name": "Pair_int_string_new",
+   "kind": "function",
+   "signature": "fn Pair_int_string_new",
+   "params": [
+    {
+     "type": "i64"
+    },
+    {
+     "type": "cstr"
+    }
+   ],
+   "returns": {
+    "type": "opaque",
+    "struct_name": "Pair_int_string"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Pair_int_string_new"
+  },
+  {
+   "name": "Pair_int_string_get_b",
+   "kind": "function",
+   "signature": "fn Pair_int_string_get_b",
+   "params": [
+    {
+     "type": "opaque",
+     "struct_name": "Pair_int_string"
+    }
+   ],
+   "returns": {
+    "type": "cstr"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_Pair_int_string_get_b"
+  },
+  {
+   "name": "generic_fn",
+   "kind": "function",
+   "signature": "fn generic_fn",
+   "params": [
+    {
+     "type": "i64"
+    }
+   ],
+   "returns": {
+    "type": "i64"
+   },
+   "generic": true,
+   "is_macro": false,
+   "api": "hksh_rich_generic_fn"
+  },
+  {
+   "name": "a_macro",
+   "kind": "function",
+   "signature": "fn a_macro",
+   "params": [],
+   "generic": false,
+   "is_macro": true,
+   "api": "hksh_rich_a_macro"
+  },
+  {
+   "name": "no_api",
+   "kind": "function",
+   "signature": "fn no_api",
+   "params": [
+    {
+     "type": "i64"
+    }
+   ],
+   "returns": {
+    "type": "i64"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": ""
+  },
+  {
+   "name": "wide",
+   "kind": "function",
+   "signature": "fn wide",
+   "params": [
+    {
+     "type": "i128"
+    }
+   ],
+   "returns": {
+    "type": "i64"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_wide"
+  },
+  {
+   "name": "bad_ret",
+   "kind": "function",
+   "signature": "fn bad_ret",
+   "params": [
+    {
+     "type": "i64"
+    }
+   ],
+   "returns": {
+    "type": "weird"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_bad_ret"
+  },
+  {
+   "name": "add",
+   "kind": "function",
+   "signature": "fn add",
+   "params": [
+    {
+     "type": "i64"
+    },
+    {
+     "type": "i64"
+    }
+   ],
+   "returns": {
+    "type": "i64"
+   },
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_add"
+  },
+  {
+   "name": "CONST_X",
+   "kind": "const",
+   "api": "hksh_rich_CONST_X"
+  },
+  {
+   "name": "noret",
+   "kind": "function",
+   "signature": "fn noret",
+   "params": [
+    {
+     "type": "i64"
+    }
+   ],
+   "generic": false,
+   "is_macro": false,
+   "api": "hksh_rich_noret"
+  }
+ ],
+ "artifacts": [
+  {
+   "kind": "static_lib",
+   "target": "x86_64-unknown-linux-gnu",
+   "path": "native/x86_64-unknown-linux-gnu/librich.a",
+   "link_libs": [
+    "stdc++",
+    "m",
+    "pthread",
+    "dl"
+   ]
+  },
+  {
+   "kind": "static_lib",
+   "target": "aarch64-unknown-linux-gnu",
+   "path": "native/aarch64-unknown-linux-gnu/librich.a",
+   "link_libs": [
+    "m"
+   ]
+  },
+  {
+   "kind": "shared_object",
+   "target": "x86_64-unknown-linux-gnu",
+   "path": "native/x86_64-unknown-linux-gnu/librich.so"
+  }
+ ]
+}
