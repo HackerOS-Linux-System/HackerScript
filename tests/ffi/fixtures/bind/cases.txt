@@ -1,0 +1,2 @@
+static|/opt/x/librich.a|static|stdc++,m,pthread,dl
+dynamic|/opt/x/librich.so|dynamic|
