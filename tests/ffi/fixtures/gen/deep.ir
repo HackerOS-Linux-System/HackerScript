@@ -1,0 +1,15 @@
+S|Pair|A,B|a:A|b:B
+S|Cfg||m:Dict<Str,Pair<Int,Str>>|c:Chan<Str>|r:Result<List<Int>,Str>|o:Option<List<Str>>|s:Set<Int>|sb:Set<Bool>|f:Float|ok:Bool
+S|Tree||v:Int|l:Option<Tree>|r:Option<Tree>|kids:List<Tree>
+E|Msg||Text:Str|Num:Int;Float|Nest:Option<Tree>;List<Cfg>|Quit
+F|||make_cfg|0||=Cfg
+F|||take_tree|0||t:Tree|=Int
+F|||depth|1||t:Tree|=Int
+F|||ident|0|T|x:T|=T
+F|||pair_swap|0|A,B|p:Pair<A,B>|=Pair<B,A>
+F|||ch|0||c:Chan<Str>|=Option<Str>
+F|Tree||leaf|0||v:Int|=Tree
+F|Tree||size|0||self:self|=Int
+F|Tree||add|1||self:self|o:Tree|=Tree
+F|Msg||describe|0||self:self|=Str
+F|Msg||quit|0||=Msg
