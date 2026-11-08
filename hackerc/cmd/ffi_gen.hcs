@@ -1,0 +1,1230 @@
+get <std:string> import <str_trim::str_split::str_join::str_ends_with::str_starts_with>
+
+!!! ffi_gen.hcs - generator fasady C-ABI (czysty HackerScript; zastepuje dawne `ffi_gen.rs`, ktory byl
+!!! wklejany do bloku `native {Rust}` w `ffi.hcs` przez `scripts/ffi_splice.py` - tamten mechanizm juz nie istnieje).
+!!!
+!!! Wejscie `ffg_generate(ir, lib, inst)`:
+!!!   ir   - tekst IR zapisany przez `ffi.hcs::ffi_ir` (jedna deklaracja na linie, pola rozdzielone `|`),
+!!!   lib  - nazwa biblioteki (staje sie czescia symboli `hksffi_<lib>_<nazwa>`),
+!!!   inst - instancjacje generykow po przecinku, np. `ident<Int>,Pair<Int,Str>`.
+!!! Wyjscie `FfgOut`: `rust` = kod fasady, `exports` = tablica JSON `manifest.exports`,
+!!! `skipped` = deklaracje pominiete (po `\n`, puste gdy nic nie pominieto).
+!!!
+!!! Format IR (linie, pola rozdzielone `|`):
+!!!   S|Nazwa|T1,T2|pole:Typ|...            E|Nazwa|T1,T2|Wariant:Typ;Typ|Wariant|...
+!!!   F|Wlasciciel|ParamyWlasciciela|Nazwa|async(0/1)|ParamyTypowe|nazwa:Typ|...|=Zwracany
+!!!   (Wlasciciel pusty = funkcja wolna; pierwszy parametr metody z `self` ma typ `self`)
+!!!
+!!! Typ (`FfgTy`) to jedna rekurencyjna struktura zamiast enuma: `kind` jest jednym z
+!!! Int Float Bool Str Unit List Set Option Result Dict Chan Named, a `args` niesie skladniki
+!!! (List/Set/Option/Chan - 1, Dict/Result - 2, Named - argumenty generyku). Dzieki temu nie ma
+!!! kolizji nazw wariantow (bootstrap wymaga ich unikalnosci w calym programie).
+
+struct FfgTy [
+    kind: Str,
+    name: Str,
+    args: List<FfgTy>
+]
+
+struct FfgField [
+    name: Str,
+    ty: FfgTy
+]
+
+struct FfgSDecl [
+    name: Str,
+    tp: List<Str>,
+    fields: List<FfgField>
+]
+
+struct FfgVariant [
+    name: Str,
+    fields: List<FfgTy>
+]
+
+struct FfgEDecl [
+    name: Str,
+    tp: List<Str>,
+    variants: List<FfgVariant>
+]
+
+struct FfgFDecl [
+    owner: Str,
+    owner_tp: List<Str>,
+    name: Str,
+    is_async: Bool,
+    tp: List<Str>,
+    params: List<FfgField>,
+    has_self: Bool,
+    ret: Option<FfgTy>
+]
+
+struct FfgOut [
+    rust: Str,
+    exports: Str,
+    skipped: Str
+]
+
+!!! ---------- typy ----------
+
+fun ffg_ty0(kind: Str) -> FfgTy [
+    end FfgTy(kind, "", [])
+]
+
+fun ffg_ty1(kind: Str, a: FfgTy) -> FfgTy [
+    end FfgTy(kind, "", [a])
+]
+
+fun ffg_ty2(kind: Str, a: FfgTy, b: FfgTy) -> FfgTy [
+    end FfgTy(kind, "", [a, b])
+]
+
+fun ffg_int() -> FfgTy [
+    end ffg_ty0("Int")
+]
+
+fun ffg_bool() -> FfgTy [
+    end ffg_ty0("Bool")
+]
+
+fun ffg_unit() -> FfgTy [
+    end ffg_ty0("Unit")
+]
+
+!!! n-ty argument typu albo `Unit` (parytet z `args.get(n).cloned().unwrap_or(Unit)`).
+fun ffg_arg(t: FfgTy, n: Int) -> FfgTy [
+    if n < t.args.len() [
+        end t.args[n].clone()
+    ]
+    end ffg_unit()
+]
+
+fun ffg_list_has(xs: List<Str>, s: Str) -> Bool [
+    let i = 0
+    while i < xs.len() [
+        if xs[i] == s [
+            end true
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+fun ffg_index_of_char(s: Str, c: Str) -> Int [
+    let i = 0
+    let n = s.len()
+    while i < n [
+        if s.char_at(i) == c [
+            end i
+        ]
+        i = i + 1
+    ]
+    end 0 - 1
+]
+
+!!! Dzieli po `sep` (jeden znak) tylko na poziomie zerowym nawiasow `<...>`; elementy sa przycinane.
+fun ffg_split_top(s: Str, sep: Str) -> List<Str> [
+    let out: List<Str> = []
+    let depth = 0
+    let cur = ""
+    let i = 0
+    let n = s.len()
+    while i < n [
+        let c = s.char_at(i)
+        if c == "<" [
+            depth = depth + 1
+        ]
+        if c == ">" [
+            depth = depth - 1
+        ]
+        if c == sep and depth == 0 [
+            out.push(str_trim(cur.clone()))
+            cur = ""
+        ] else [
+            cur = cur + c
+        ]
+        i = i + 1
+    ]
+    if str_trim(cur.clone()) != "" or out.len() > 0 [
+        out.push(str_trim(cur.clone()))
+    ]
+    end out
+]
+
+!!! Lista po przecinku bez pustych elementow.
+fun ffg_csv(s: Str) -> List<Str> [
+    let out: List<Str> = []
+    let parts: List<Str> = str_split(s, ",")
+    let i = 0
+    while i < parts.len() [
+        let p: Str = str_trim(parts[i].clone())
+        if p != "" [
+            out.push(p)
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+fun ffg_parse_ty(s0: Str) -> FfgTy [
+    let s: Str = str_trim(s0)
+    let name: Str = s.clone()
+    let args: List<FfgTy> = []
+    let lt = ffg_index_of_char(s.clone(), "<")
+    if lt >= 0 and str_ends_with(s.clone(), ">") [
+        name = str_trim(s.slice(0, lt))
+        let parts: List<Str> = ffg_split_top(s.slice(lt + 1, s.len() - 1), ",")
+        let i = 0
+        while i < parts.len() [
+            args.push(ffg_parse_ty(parts[i].clone()))
+            i = i + 1
+        ]
+    ]
+    let t0 = FfgTy("Named", name.clone(), args.clone())
+    if name == "Int" or name == "Float" or name == "Bool" or name == "Str" [
+        end ffg_ty0(name)
+    ]
+    if name == "" or name == "Unit" [
+        end ffg_unit()
+    ]
+    if name == "List" or name == "Set" or name == "Option" or name == "Chan" [
+        end ffg_ty1(name, ffg_arg(t0.clone(), 0))
+    ]
+    if name == "Dict" or name == "Result" [
+        end ffg_ty2(name, ffg_arg(t0.clone(), 0), ffg_arg(t0.clone(), 1))
+    ]
+    end t0
+]
+
+!!! Podstawia `args` za parametry typowe `names` (typ nazwany bez argumentow o nazwie z `names`).
+fun ffg_subst(t: FfgTy, names: List<Str>, args: List<FfgTy>) -> FfgTy [
+    if t.kind == "Named" and t.args.len() == 0 [
+        let i = 0
+        while i < names.len() [
+            if names[i] == t.name [
+                if i < args.len() [
+                    end args[i].clone()
+                ]
+                end ffg_unit()
+            ]
+            i = i + 1
+        ]
+    ]
+    let out: List<FfgTy> = []
+    let k = 0
+    while k < t.args.len() [
+        out.push(ffg_subst(t.args[k].clone(), names.clone(), args.clone()))
+        k = k + 1
+    ]
+    end FfgTy(t.kind.clone(), t.name.clone(), out)
+]
+
+!!! Nazwa typu uzywana w symbolach (`List_Int`, `Dict_Str_Int`, `Pair_Int_Str`...).
+fun ffg_tname(t: FfgTy) -> Str [
+    let s = t.kind.clone()
+    if t.kind == "Named" [
+        s = t.name.clone()
+    ]
+    let i = 0
+    while i < t.args.len() [
+        s = s + "_" + ffg_tname(t.args[i].clone())
+        i = i + 1
+    ]
+    end s
+]
+
+fun ffg_rty_list(xs: List<FfgTy>) -> Str [
+    let parts: List<Str> = []
+    let i = 0
+    while i < xs.len() [
+        parts.push(ffg_rty(xs[i].clone()))
+        i = i + 1
+    ]
+    end str_join(parts, ", ")
+]
+
+fun ffg_tname_list(xs: List<FfgTy>) -> Str [
+    let parts: List<Str> = []
+    let i = 0
+    while i < xs.len() [
+        parts.push(ffg_tname(xs[i].clone()))
+        i = i + 1
+    ]
+    end str_join(parts, ", ")
+]
+
+!!! Typ Rusta odpowiadajacy typowi HackerScript.
+fun ffg_rty(t: FfgTy) -> Str [
+    let k = t.kind.clone()
+    if k == "Int" [
+        end "i64"
+    ]
+    if k == "Float" [
+        end "f64"
+    ]
+    if k == "Bool" [
+        end "bool"
+    ]
+    if k == "Str" [
+        end "String"
+    ]
+    if k == "Unit" [
+        end "()"
+    ]
+    if k == "List" [
+        end "Vec<" + ffg_rty(ffg_arg(t.clone(), 0)) + ">"
+    ]
+    if k == "Set" [
+        end "std::collections::HashSet<" + ffg_rty(ffg_arg(t.clone(), 0)) + ">"
+    ]
+    if k == "Option" [
+        end "Option<" + ffg_rty(ffg_arg(t.clone(), 0)) + ">"
+    ]
+    if k == "Chan" [
+        end "HksChan<" + ffg_rty(ffg_arg(t.clone(), 0)) + ">"
+    ]
+    if k == "Dict" [
+        end "std::collections::HashMap<" + ffg_rty(ffg_arg(t.clone(), 0)) + ", " + ffg_rty(ffg_arg(t.clone(), 1)) + ">"
+    ]
+    if k == "Result" [
+        end "Result<" + ffg_rty(ffg_arg(t.clone(), 0)) + ", " + ffg_rty(ffg_arg(t.clone(), 1)) + ">"
+    ]
+    if t.args.len() == 0 [
+        end t.name.clone()
+    ]
+    end t.name + "<" + ffg_rty_list(t.args.clone()) + ">"
+]
+
+fun ffg_is_scalar(t: FfgTy) -> Bool [
+    end t.kind == "Int" or t.kind == "Float" or t.kind == "Bool"
+]
+
+!!! Uchwyt = wszystko, co przechodzi przez fasade jako nieprzezroczysty wskaznik (nie skalar, nie Str).
+fun ffg_is_handle(t: FfgTy) -> Bool [
+    end not ffg_is_scalar(t.clone()) and t.kind != "Str" and t.kind != "Unit"
+]
+
+fun ffg_hashable(t: FfgTy) -> Bool [
+    end t.kind == "Int" or t.kind == "Bool" or t.kind == "Str"
+]
+
+!!! Typ C-ABI parametru/wyniku.
+fun ffg_cty(t: FfgTy) -> Str [
+    if t.kind == "Int" [
+        end "i64"
+    ]
+    if t.kind == "Float" [
+        end "f64"
+    ]
+    if t.kind == "Bool" [
+        end "bool"
+    ]
+    if t.kind == "Str" [
+        end "*const std::os::raw::c_char"
+    ]
+    end "i64"
+]
+
+!!! Opis typu w `manifest.exports` (AbiType, patrz docs/HLIB_FORMAT.md sekcja 3).
+fun ffg_abi_json(t: FfgTy) -> Str [
+    if t.kind == "Int" [
+        end "{\"type\":\"i64\"}"
+    ]
+    if t.kind == "Float" [
+        end "{\"type\":\"f64\"}"
+    ]
+    if t.kind == "Bool" [
+        end "{\"type\":\"bool\"}"
+    ]
+    if t.kind == "Str" [
+        end "{\"type\":\"cstr\"}"
+    ]
+    end "{\"type\":\"opaque\",\"struct_name\":\"" + ffg_tname(t.clone()) + "\"}"
+]
+
+fun ffg_ident(s: Str) -> Str [
+    let out = ""
+    let i = 0
+    let n = s.len()
+    while i < n [
+        let c = s.char_at(i)
+        let ok = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+        if ok [
+            out = out + c
+        ] else [
+            out = out + "_"
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+!!! ---------- konwersje wartosci miedzy C-ABI a Rustem ----------
+!!! (wolne funkcje - nie zaleza od stanu generatora)
+
+!!! Argument `i` jako referencja (`&mut`) - Str -> kopia z C-stringa, uchwyt -> pozyczony wskaznik.
+fun ffg_in_ref(t: FfgTy, i: Int) -> Str [
+    if t.kind == "Str" [
+        end "&mut hks_cstr(a" + i + ")"
+    ]
+    if ffg_is_handle(t.clone()) [
+        end "hks_ref::<" + ffg_rty(t.clone()) + ">(a" + i + ")"
+    ]
+    end "a" + i
+]
+
+!!! Argument `i` jako wartosc wlasna (klon uchwytu).
+fun ffg_in_own(t: FfgTy, i: Int) -> Str [
+    if t.kind == "Str" [
+        end "hks_cstr(a" + i + ")"
+    ]
+    if ffg_is_handle(t.clone()) [
+        end "hks_ref::<" + ffg_rty(t.clone()) + ">(a" + i + ").clone()"
+    ]
+    end "a" + i
+]
+
+!!! Wynik wlasny `e` -> wartosc C-ABI (Str -> bufor watku, uchwyt -> Box na stercie).
+fun ffg_out_own(t: FfgTy, e: Str) -> Str [
+    if t.kind == "Str" [
+        end "hks_ret_str(" + e + ")"
+    ]
+    if ffg_is_handle(t.clone()) [
+        end "hks_box(" + e + ")"
+    ]
+    end e
+]
+
+!!! `e` ma typ `&mut T`: skalar -> wartosc, Str -> kopia, uchwyt -> wskaznik pozyczony.
+fun ffg_out_ref(t: FfgTy, e: Str) -> Str [
+    if t.kind == "Str" [
+        end "hks_ret_str((" + e + ").clone())"
+    ]
+    if ffg_is_handle(t.clone()) [
+        end "hks_ptr(" + e + ")"
+    ]
+    end "(*" + e + ").clone()"
+]
+
+fun ffg_dflt(t: FfgTy) -> Str [
+    if t.kind == "Float" [
+        end "0.0"
+    ]
+    if t.kind == "Bool" [
+        end "false"
+    ]
+    if t.kind == "Str" [
+        end "hks_ret_str(String::new())"
+    ]
+    end "0"
+]
+
+!!! ---------- stan generatora ----------
+
+struct FfgGen [
+    lib: Str,
+    structs: List<FfgSDecl>,
+    enums: List<FfgEDecl>,
+    funs: List<FfgFDecl>,
+    rust: Str,
+    exports: List<Str>,
+    skipped: List<Str>,
+    queue: List<FfgTy>,
+    seen: List<Str>,
+    done_fns: List<Str>
+]
+
+fun ffg_new_gen(lib: Str) -> FfgGen [
+    end FfgGen(ffg_ident(lib), [], [], [], "", [], [], [], [], [])
+]
+
+impl FfgGen [
+    fun find_s(self, n: Str) -> Int [
+        let i = 0
+        while i < self.structs.len() [
+            if self.structs[i].name == n [
+                end i
+            ]
+            i = i + 1
+        ]
+        end 0 - 1
+    ]
+
+    fun find_e(self, n: Str) -> Int [
+        let i = 0
+        while i < self.enums.len() [
+            if self.enums[i].name == n [
+                end i
+            ]
+            i = i + 1
+        ]
+        end 0 - 1
+    ]
+
+    !!! Czy typ da sie przeniesc przez fasade (rekurencja tylko po skladnikach, nie po polach struktur).
+    fun supported(self, t: FfgTy) -> Bool [
+        let k = t.kind.clone()
+        if k == "Int" or k == "Float" or k == "Bool" or k == "Str" [
+            end true
+        ]
+        if k == "Unit" [
+            end false
+        ]
+        if k == "List" or k == "Option" or k == "Chan" [
+            end self.supported(ffg_arg(t.clone(), 0))
+        ]
+        if k == "Set" [
+            end ffg_hashable(ffg_arg(t.clone(), 0))
+        ]
+        if k == "Dict" [
+            end ffg_hashable(ffg_arg(t.clone(), 0)) and self.supported(ffg_arg(t.clone(), 1))
+        ]
+        if k == "Result" [
+            end self.supported(ffg_arg(t.clone(), 0)) and self.supported(ffg_arg(t.clone(), 1))
+        ]
+        let tp = 0
+        let si = self.find_s(t.name.clone())
+        let ei = self.find_e(t.name.clone())
+        if si >= 0 [
+            tp = self.structs[si].tp.len()
+        ] elif ei >= 0 [
+            tp = self.enums[ei].tp.len()
+        ] else [
+            end false
+        ]
+        if tp != t.args.len() [
+            end false
+        ]
+        let i = 0
+        while i < t.args.len() [
+            if not self.supported(t.args[i].clone()) [
+                end false
+            ]
+            i = i + 1
+        ]
+        end true
+    ]
+
+    !!! Rejestruje typ-uchwyt (jego operacje zostana wygenerowane w `drain`).
+    fun reg(self, t: FfgTy) [
+        if not ffg_is_handle(t.clone()) [
+            end
+        ]
+        let k = ffg_tname(t.clone())
+        if ffg_list_has(self.seen.clone(), k.clone()) [
+            end
+        ]
+        self.seen.push(k)
+        self.queue.push(t)
+    ]
+
+    !!! Emituje jedna funkcje `extern "C"` oraz jej wpis w `exports`.
+    fun emit(self, name: Str, sig: Str, params: List<FfgTy>, ret: Option<FfgTy>, body: Str) [
+        let pi = 0
+        while pi < params.len() [
+            self.reg(params[pi].clone())
+            pi = pi + 1
+        ]
+        match ret.clone() [
+            Some(rt) -> [
+                self.reg(rt)
+            ]
+            None -> [
+            ]
+        ]
+        let sym = "hksffi_" + self.lib + "_" + name
+        let ps: List<Str> = []
+        let pj: List<Str> = []
+        let i = 0
+        while i < params.len() [
+            ps.push("a" + i + ": " + ffg_cty(params[i].clone()))
+            pj.push(ffg_abi_json(params[i].clone()))
+            i = i + 1
+        ]
+        let head = "#[no_mangle]\npub unsafe extern \"C\" fn " + sym + "(" + str_join(ps, ", ") + ")"
+        let ej = "{\"name\":\"" + name + "\",\"kind\":\"function\",\"signature\":\"" + sig + "\",\"params\":[" + str_join(pj, ",") + "]"
+        match ret.clone() [
+            Some(r2) -> [
+                head = head + " -> " + ffg_cty(r2.clone())
+                ej = ej + ",\"returns\":" + ffg_abi_json(r2.clone())
+            ]
+            None -> [
+            ]
+        ]
+        self.rust = self.rust + head + " {\n    " + body + "\n}\n"
+        ej = ej + ",\"generic\":false,\"is_macro\":false,\"api\":\"" + sym + "\"}"
+        self.exports.push(ej)
+    ]
+
+    !!! ---- funkcje uzytkownika ----
+    fun gen_fn(self, d: FfgFDecl, owner_args: List<FfgTy>, targs: List<FfgTy>) [
+        let names: List<Str> = d.owner_tp.clone()
+        let ni = 0
+        while ni < d.tp.len() [
+            names.push(d.tp[ni].clone())
+            ni = ni + 1
+        ]
+        let args: List<FfgTy> = owner_args.clone()
+        let ai = 0
+        while ai < targs.len() [
+            args.push(targs[ai].clone())
+            ai = ai + 1
+        ]
+        if names.len() != args.len() [
+            self.skipped.push(d.name + " (liczba argumentow typowych)")
+            end
+        ]
+        let self_ty = ffg_unit()
+        if d.owner != "" [
+            self_ty = FfgTy("Named", d.owner.clone(), owner_args.clone())
+        ]
+        let label = d.name.clone()
+        if d.owner != "" [
+            label = ffg_tname(self_ty.clone()) + "_" + d.name
+        ]
+        let li = 0
+        while li < targs.len() [
+            label = label + "_" + ffg_tname(targs[li].clone())
+            li = li + 1
+        ]
+        let ptys: List<FfgTy> = []
+        let call_args: List<Str> = []
+        let recv = ""
+        let i = 0
+        while i < d.params.len() [
+            let pn = d.params[i].name.clone()
+            let decl = d.params[i].ty.clone()
+            let t = ffg_unit()
+            if d.has_self and i == 0 [
+                t = self_ty.clone()
+            ] else [
+                let t2 = decl.clone()
+                if decl.kind == "Named" and decl.name == "Self" and decl.args.len() == 0 [
+                    t2 = self_ty.clone()
+                ]
+                t = ffg_subst(t2, names.clone(), args.clone())
+            ]
+            if not self.supported(t.clone()) [
+                self.skipped.push(label + " (parametr `" + pn + "` ma typ spoza fasady)")
+                end
+            ]
+            let refable = false
+            if decl.kind == "Str" or decl.kind == "List" or decl.kind == "Dict" [
+                refable = true
+            ] elif decl.kind == "Named" [
+                let known = self.find_s(decl.name.clone()) >= 0 or self.find_e(decl.name.clone()) >= 0
+                let is_param = ffg_list_has(names.clone(), decl.name.clone())
+                if decl.args.len() == 0 and not is_param [
+                    refable = true
+                ]
+                if decl.args.len() > 0 and known [
+                    refable = true
+                ]
+                if decl.name == "Self" [
+                    refable = true
+                ]
+            ]
+            if d.has_self and i == 0 [
+                recv = ffg_in_ref(t.clone(), 0)
+            ] elif refable [
+                call_args.push(ffg_in_ref(t.clone(), i))
+            ] elif ffg_is_scalar(t.clone()) [
+                call_args.push("a" + i)
+            ] else [
+                call_args.push(ffg_in_own(t.clone(), i))
+            ]
+            ptys.push(t)
+            i = i + 1
+        ]
+        let ret: Option<FfgTy> = none()
+        match d.ret.clone() [
+            Some(r0) -> [
+                let r1 = ffg_unit()
+                let r2 = r0.clone()
+                if r0.kind == "Named" and r0.name == "Self" and r0.args.len() == 0 [
+                    r2 = self_ty.clone()
+                ]
+                r1 = ffg_subst(r2, names.clone(), args.clone())
+                if not self.supported(r1.clone()) [
+                    self.skipped.push(label + " (typ zwracany spoza fasady)")
+                    end
+                ]
+                ret = some(r1)
+            ]
+            None -> [
+            ]
+        ]
+        let turbofish = ""
+        if d.tp.len() > 0 [
+            turbofish = "::<" + ffg_rty_list(targs.clone()) + ">"
+        ]
+        let call = ""
+        if d.owner == "" [
+            call = d.name + turbofish + "(" + str_join(call_args.clone(), ", ") + ")"
+        ] elif d.has_self [
+            call = recv + "." + d.name + turbofish + "(" + str_join(call_args.clone(), ", ") + ")"
+        ] elif owner_args.len() == 0 [
+            call = d.owner + "::" + d.name + turbofish + "(" + str_join(call_args.clone(), ", ") + ")"
+        ] else [
+            call = d.owner + "::<" + ffg_rty_list(owner_args.clone()) + ">::" + d.name + turbofish + "(" + str_join(call_args.clone(), ", ") + ")"
+        ]
+        if d.is_async [
+            call = "hks_block_on(" + call + ")"
+        ]
+        let body = call.clone() + ";"
+        match ret.clone() [
+            Some(rr) -> [
+                body = "let r = " + call.clone() + ";\n    " + ffg_out_own(rr.clone(), "r")
+            ]
+            None -> [
+            ]
+        ]
+        if ffg_list_has(self.done_fns.clone(), label.clone()) [
+            end
+        ]
+        self.done_fns.push(label.clone())
+        let sig = "fun " + label + "(" + ffg_tname_list(ptys.clone()) + ")"
+        match ret.clone() [
+            Some(rs) -> [
+                sig = sig + " -> " + ffg_tname(rs.clone())
+            ]
+            None -> [
+            ]
+        ]
+        self.emit(label, sig, ptys, ret, body)
+    ]
+
+    !!! ---- operacje na typach-uchwytach ----
+    fun ops(self, t: FfgTy) [
+        let n = ffg_tname(t.clone())
+        let r = ffg_rty(t.clone())
+        let me = t.clone()
+        let hr = "hks_ref::<" + r + ">"
+        self.emit(n + "_free", "fun " + n + "_free(h: " + n + ")", [me.clone()], none(), "hks_free::<" + r + ">(a0);")
+        self.emit(n + "_clone", "fun " + n + "_clone(h: " + n + ") -> " + n, [me.clone()], some(me.clone()), "hks_box(" + hr + "(a0).clone())")
+        if t.kind == "List" [
+            self.ops_list(t.clone(), n.clone(), r.clone(), hr.clone())
+        ] elif t.kind == "Option" [
+            self.ops_option(t.clone(), n.clone(), r.clone(), hr.clone())
+        ] elif t.kind == "Result" [
+            self.ops_result(t.clone(), n.clone(), r.clone(), hr.clone())
+        ] elif t.kind == "Dict" [
+            self.ops_dict(t.clone(), n.clone(), r.clone(), hr.clone())
+        ] elif t.kind == "Set" [
+            self.ops_set(t.clone(), n.clone(), r.clone(), hr.clone())
+        ] elif t.kind == "Chan" [
+            self.ops_chan(t.clone(), n.clone(), r.clone(), hr.clone())
+        ] elif t.kind == "Named" [
+            let si = self.find_s(t.name.clone())
+            let ei = self.find_e(t.name.clone())
+            if si >= 0 [
+                self.struct_ops(si, t.clone(), t.args.clone())
+            ] elif ei >= 0 [
+                self.enum_ops(ei, t.clone(), t.args.clone())
+            ]
+        ]
+    ]
+
+    fun ops_list(self, t: FfgTy, n: Str, r: Str, hr: Str) [
+        let me = t.clone()
+        let e = ffg_arg(t.clone(), 0)
+        let en = ffg_tname(e.clone())
+        self.emit(n + "_new", "fun " + n + "_new() -> " + n, [], some(me.clone()), "hks_box(Vec::<" + ffg_rty(e.clone()) + ">::new())")
+        self.emit(n + "_len", "fun " + n + "_len(h: " + n + ") -> Int", [me.clone()], some(ffg_int()), hr + "(a0).len() as i64")
+        self.emit(n + "_clear", "fun " + n + "_clear(h: " + n + ")", [me.clone()], none(), hr + "(a0).clear();")
+        self.emit(n + "_push", "fun " + n + "_push(h: " + n + ", v: " + en + ")", [me.clone(), e.clone()], none(), hr + "(a0).push(" + ffg_in_own(e.clone(), 1) + ");")
+        let get_body = "match " + hr + "(a0).get_mut(a1 as usize) { Some(x) => " + ffg_out_ref(e.clone(), "x") + ", None => " + ffg_dflt(e.clone()) + " }"
+        self.emit(n + "_get", "fun " + n + "_get(h: " + n + ", i: Int) -> " + en, [me.clone(), ffg_int()], some(e.clone()), get_body)
+        let set_body = "if let Some(x) = " + hr + "(a0).get_mut(a1 as usize) { *x = " + ffg_in_own(e.clone(), 2) + "; }"
+        self.emit(n + "_set", "fun " + n + "_set(h: " + n + ", i: Int, v: " + en + ")", [me.clone(), ffg_int(), e.clone()], none(), set_body)
+        let ins_body = "let v = " + hr + "(a0); let i = (a1 as usize).min(v.len()); v.insert(i, " + ffg_in_own(e.clone(), 2) + ");"
+        self.emit(n + "_insert", "fun " + n + "_insert(h: " + n + ", i: Int, v: " + en + ")", [me.clone(), ffg_int(), e.clone()], none(), ins_body)
+        let pop_body = "match " + hr + "(a0).pop() { Some(x) => " + ffg_out_own(e.clone(), "x") + ", None => " + ffg_dflt(e.clone()) + " }"
+        self.emit(n + "_pop", "fun " + n + "_pop(h: " + n + ") -> " + en, [me.clone()], some(e.clone()), pop_body)
+        let rem_body = "let v = " + hr + "(a0); if (a1 as usize) < v.len() { let x = v.remove(a1 as usize); " + ffg_out_own(e.clone(), "x") + " } else { " + ffg_dflt(e.clone()) + " }"
+        self.emit(n + "_remove", "fun " + n + "_remove(h: " + n + ", i: Int) -> " + en, [me.clone(), ffg_int()], some(e.clone()), rem_body)
+    ]
+
+    fun ops_option(self, t: FfgTy, n: Str, r: Str, hr: Str) [
+        let me = t.clone()
+        let e = ffg_arg(t.clone(), 0)
+        let en = ffg_tname(e.clone())
+        self.emit(n + "_none", "fun " + n + "_none() -> " + n, [], some(me.clone()), "hks_box(None::<" + ffg_rty(e.clone()) + ">)")
+        self.emit(n + "_some", "fun " + n + "_some(v: " + en + ") -> " + n, [e.clone()], some(me.clone()), "hks_box(Some(" + ffg_in_own(e.clone(), 0) + "))")
+        self.emit(n + "_is_some", "fun " + n + "_is_some(h: " + n + ") -> Bool", [me.clone()], some(ffg_bool()), hr + "(a0).is_some()")
+        let get_body = "match " + hr + "(a0).as_mut() { Some(x) => " + ffg_out_ref(e.clone(), "x") + ", None => " + ffg_dflt(e.clone()) + " }"
+        self.emit(n + "_get", "fun " + n + "_get(h: " + n + ") -> " + en, [me.clone()], some(e.clone()), get_body)
+    ]
+
+    fun ops_result(self, t: FfgTy, n: Str, r: Str, hr: Str) [
+        let me = t.clone()
+        let a = ffg_arg(t.clone(), 0)
+        let b = ffg_arg(t.clone(), 1)
+        let an = ffg_tname(a.clone())
+        let bn = ffg_tname(b.clone())
+        self.emit(n + "_ok", "fun " + n + "_ok(v: " + an + ") -> " + n, [a.clone()], some(me.clone()), "hks_box(Ok::<" + ffg_rty(a.clone()) + ", " + ffg_rty(b.clone()) + ">(" + ffg_in_own(a.clone(), 0) + "))")
+        self.emit(n + "_err", "fun " + n + "_err(e: " + bn + ") -> " + n, [b.clone()], some(me.clone()), "hks_box(Err::<" + ffg_rty(a.clone()) + ", " + ffg_rty(b.clone()) + ">(" + ffg_in_own(b.clone(), 0) + "))")
+        self.emit(n + "_is_ok", "fun " + n + "_is_ok(h: " + n + ") -> Bool", [me.clone()], some(ffg_bool()), hr + "(a0).is_ok()")
+        let g1 = "match " + hr + "(a0) { Ok(x) => " + ffg_out_ref(a.clone(), "x") + ", Err(_) => " + ffg_dflt(a.clone()) + " }"
+        self.emit(n + "_ok_value", "fun " + n + "_ok_value(h: " + n + ") -> " + an, [me.clone()], some(a.clone()), g1)
+        let g2 = "match " + hr + "(a0) { Err(x) => " + ffg_out_ref(b.clone(), "x") + ", Ok(_) => " + ffg_dflt(b.clone()) + " }"
+        self.emit(n + "_err_value", "fun " + n + "_err_value(h: " + n + ") -> " + bn, [me.clone()], some(b.clone()), g2)
+    ]
+
+    fun ops_dict(self, t: FfgTy, n: Str, r: Str, hr: Str) [
+        let me = t.clone()
+        let k = ffg_arg(t.clone(), 0)
+        let v = ffg_arg(t.clone(), 1)
+        let kn = ffg_tname(k.clone())
+        let vn = ffg_tname(v.clone())
+        self.emit(n + "_new", "fun " + n + "_new() -> " + n, [], some(me.clone()), "hks_box(<" + r + ">::new())")
+        self.emit(n + "_len", "fun " + n + "_len(h: " + n + ") -> Int", [me.clone()], some(ffg_int()), hr + "(a0).len() as i64")
+        self.emit(n + "_clear", "fun " + n + "_clear(h: " + n + ")", [me.clone()], none(), hr + "(a0).clear();")
+        self.emit(n + "_insert", "fun " + n + "_insert(h: " + n + ", k: " + kn + ", v: " + vn + ")", [me.clone(), k.clone(), v.clone()], none(), hr + "(a0).insert(" + ffg_in_own(k.clone(), 1) + ", " + ffg_in_own(v.clone(), 2) + ");")
+        self.emit(n + "_contains", "fun " + n + "_contains(h: " + n + ", k: " + kn + ") -> Bool", [me.clone(), k.clone()], some(ffg_bool()), hr + "(a0).contains_key(&" + ffg_in_own(k.clone(), 1) + ")")
+        self.emit(n + "_remove", "fun " + n + "_remove(h: " + n + ", k: " + kn + ") -> Bool", [me.clone(), k.clone()], some(ffg_bool()), hr + "(a0).remove(&" + ffg_in_own(k.clone(), 1) + ").is_some()")
+        let get_body = "match " + hr + "(a0).get_mut(&" + ffg_in_own(k.clone(), 1) + ") { Some(x) => " + ffg_out_ref(v.clone(), "x") + ", None => " + ffg_dflt(v.clone()) + " }"
+        self.emit(n + "_get", "fun " + n + "_get(h: " + n + ", k: " + kn + ") -> " + vn, [me.clone(), k.clone()], some(v.clone()), get_body)
+        let lk = ffg_ty1("List", k.clone())
+        self.emit(n + "_keys", "fun " + n + "_keys(h: " + n + ") -> " + ffg_tname(lk.clone()), [me.clone()], some(lk.clone()), "hks_box(" + hr + "(a0).keys().cloned().collect::<Vec<" + ffg_rty(k.clone()) + ">>())")
+        let lv = ffg_ty1("List", v.clone())
+        self.emit(n + "_values", "fun " + n + "_values(h: " + n + ") -> " + ffg_tname(lv.clone()), [me.clone()], some(lv.clone()), "hks_box(" + hr + "(a0).values().cloned().collect::<Vec<" + ffg_rty(v.clone()) + ">>())")
+    ]
+
+    fun ops_set(self, t: FfgTy, n: Str, r: Str, hr: Str) [
+        let me = t.clone()
+        let e = ffg_arg(t.clone(), 0)
+        let en = ffg_tname(e.clone())
+        self.emit(n + "_new", "fun " + n + "_new() -> " + n, [], some(me.clone()), "hks_box(<" + r + ">::new())")
+        self.emit(n + "_len", "fun " + n + "_len(h: " + n + ") -> Int", [me.clone()], some(ffg_int()), hr + "(a0).len() as i64")
+        self.emit(n + "_clear", "fun " + n + "_clear(h: " + n + ")", [me.clone()], none(), hr + "(a0).clear();")
+        self.emit(n + "_insert", "fun " + n + "_insert(h: " + n + ", v: " + en + ") -> Bool", [me.clone(), e.clone()], some(ffg_bool()), hr + "(a0).insert(" + ffg_in_own(e.clone(), 1) + ")")
+        self.emit(n + "_contains", "fun " + n + "_contains(h: " + n + ", v: " + en + ") -> Bool", [me.clone(), e.clone()], some(ffg_bool()), hr + "(a0).contains(&" + ffg_in_own(e.clone(), 1) + ")")
+        self.emit(n + "_remove", "fun " + n + "_remove(h: " + n + ", v: " + en + ") -> Bool", [me.clone(), e.clone()], some(ffg_bool()), hr + "(a0).remove(&" + ffg_in_own(e.clone(), 1) + ")")
+        let le = ffg_ty1("List", e.clone())
+        self.emit(n + "_items", "fun " + n + "_items(h: " + n + ") -> " + ffg_tname(le.clone()), [me.clone()], some(le.clone()), "hks_box(" + hr + "(a0).iter().cloned().collect::<Vec<" + ffg_rty(e.clone()) + ">>())")
+    ]
+
+    fun ops_chan(self, t: FfgTy, n: Str, r: Str, hr: Str) [
+        let me = t.clone()
+        let e = ffg_arg(t.clone(), 0)
+        let en = ffg_tname(e.clone())
+        self.emit(n + "_new", "fun " + n + "_new(cap: Int) -> " + n, [ffg_int()], some(me.clone()), "hks_box(<" + r + ">::new(a0))")
+        self.emit(n + "_send", "fun " + n + "_send(h: " + n + ", v: " + en + ") -> Bool", [me.clone(), e.clone()], some(ffg_bool()), "hks_block_on(" + hr + "(a0).send(" + ffg_in_own(e.clone(), 1) + "))")
+        let oe = ffg_ty1("Option", e.clone())
+        self.emit(n + "_recv", "fun " + n + "_recv(h: " + n + ") -> " + ffg_tname(oe.clone()), [me.clone()], some(oe.clone()), "hks_box(hks_block_on(" + hr + "(a0).recv()))")
+        self.emit(n + "_close", "fun " + n + "_close(h: " + n + ")", [me.clone()], none(), hr + "(a0).close();")
+    ]
+
+    !!! Gettery/settery pol i konstruktor struktury + jej metody `impl`.
+    fun struct_ops(self, si: Int, me: FfgTy, args: List<FfgTy>) [
+        let n = ffg_tname(me.clone())
+        let r = ffg_rty(me.clone())
+        let hr = "hks_ref::<" + r + ">"
+        let tp = self.structs[si].tp.clone()
+        let sname = self.structs[si].name.clone()
+        let fields: List<FfgField> = []
+        let fi = 0
+        while fi < self.structs[si].fields.len() [
+            let f0 = self.structs[si].fields[fi].clone()
+            fields.push(FfgField(f0.name.clone(), ffg_subst(f0.ty.clone(), tp.clone(), args.clone())))
+            fi = fi + 1
+        ]
+        let ok_fields: List<FfgField> = []
+        let all_ok = true
+        let k = 0
+        while k < fields.len() [
+            let fname = fields[k].name.clone()
+            let ft = fields[k].ty.clone()
+            if not self.supported(ft.clone()) [
+                all_ok = false
+                self.skipped.push(n + "." + fname + " (pole spoza fasady)")
+            ] else [
+                ok_fields.push(FfgField(fname.clone(), ft.clone()))
+                let place = "&mut " + hr + "(a0)." + fname
+                let get_body = ""
+                if ft.kind == "Option" [
+                    get_body = "hks_box(HksOwn::<" + ffg_rty(ft.clone()) + ">::hks_own(&" + hr + "(a0)." + fname + "))"
+                ] elif ffg_is_handle(ft.clone()) [
+                    get_body = "hks_ptr(HksBorrow::<" + ffg_rty(ft.clone()) + ">::hks_borrow(" + place + "))"
+                ] else [
+                    get_body = ffg_out_ref(ft.clone(), place.clone())
+                ]
+                self.emit(n + "_get_" + fname, "fun " + n + "_get_" + fname + "(h: " + n + ") -> " + ffg_tname(ft.clone()), [me.clone()], some(ft.clone()), get_body)
+                let val = "a1"
+                if ffg_is_handle(ft.clone()) or ft.kind == "Str" [
+                    val = "HksFrom::hks_from(" + ffg_in_own(ft.clone(), 1) + ")"
+                ]
+                self.emit(n + "_set_" + fname, "fun " + n + "_set_" + fname + "(h: " + n + ", v: " + ffg_tname(ft.clone()) + ")", [me.clone(), ft.clone()], none(), hr + "(a0)." + fname + " = " + val + ";")
+            ]
+            k = k + 1
+        ]
+        if all_ok and ok_fields.len() > 0 [
+            let ptys: List<FfgTy> = []
+            let inits: List<Str> = []
+            let sigp: List<Str> = []
+            let q = 0
+            while q < ok_fields.len() [
+                let qf = ok_fields[q].name.clone()
+                let qt = ok_fields[q].ty.clone()
+                ptys.push(qt.clone())
+                if ffg_is_scalar(qt.clone()) [
+                    inits.push(qf.clone() + ": a" + q)
+                ] else [
+                    inits.push(qf.clone() + ": HksFrom::hks_from(" + ffg_in_own(qt.clone(), q) + ")")
+                ]
+                sigp.push(qf.clone() + ": " + ffg_tname(qt.clone()))
+                q = q + 1
+            ]
+            let sig = "fun " + n + "_new(" + str_join(sigp, ", ") + ")"
+            self.emit(n + "_new", sig, ptys, some(me.clone()), "{ type T_ = " + r + "; hks_box(T_ { " + str_join(inits, ", ") + " }) }")
+        ]
+        !! metody `impl`
+        let methods: List<FfgFDecl> = []
+        let mi = 0
+        while mi < self.funs.len() [
+            if self.funs[mi].owner == sname [
+                methods.push(self.funs[mi].clone())
+            ]
+            mi = mi + 1
+        ]
+        let mj = 0
+        while mj < methods.len() [
+            if methods[mj].tp.len() == 0 [
+                self.gen_fn(methods[mj].clone(), args.clone(), [])
+            ]
+            mj = mj + 1
+        ]
+    ]
+
+    !!! Tag, konstruktory wariantow i gettery pol wariantow enuma + jego metody `impl`.
+    fun enum_ops(self, ei: Int, me: FfgTy, args: List<FfgTy>) [
+        let n = ffg_tname(me.clone())
+        let r = ffg_rty(me.clone())
+        let hr = "hks_ref::<" + r + ">"
+        let en = self.enums[ei].name.clone()
+        let tp = self.enums[ei].tp.clone()
+        let variants: List<FfgVariant> = []
+        let vi0 = 0
+        while vi0 < self.enums[ei].variants.len() [
+            let v0 = self.enums[ei].variants[vi0].clone()
+            let fs: List<FfgTy> = []
+            let q0 = 0
+            while q0 < v0.fields.len() [
+                fs.push(ffg_subst(v0.fields[q0].clone(), tp.clone(), args.clone()))
+                q0 = q0 + 1
+            ]
+            variants.push(FfgVariant(v0.name.clone(), fs))
+            vi0 = vi0 + 1
+        ]
+        let arms: List<Str> = []
+        let ai = 0
+        while ai < variants.len() [
+            let vn0 = variants[ai].name.clone()
+            if variants[ai].fields.len() == 0 [
+                arms.push(en + "::" + vn0 + " => " + ai)
+            ] else [
+                arms.push(en + "::" + vn0 + "(..) => " + ai)
+            ]
+            ai = ai + 1
+        ]
+        self.emit(n + "_tag", "fun " + n + "_tag(h: " + n + ") -> Int", [me.clone()], some(ffg_int()), "match &*" + hr + "(a0) { " + str_join(arms, ", ") + " }")
+        let vi = 0
+        while vi < variants.len() [
+            let vn = variants[vi].name.clone()
+            let vf = variants[vi].fields.clone()
+            let bad = false
+            let bi = 0
+            while bi < vf.len() [
+                if not self.supported(vf[bi].clone()) [
+                    bad = true
+                ]
+                bi = bi + 1
+            ]
+            if bad [
+                self.skipped.push(n + "::" + vn + " (pole spoza fasady)")
+            ] else [
+                let ctor = "T_::" + vn
+                if vf.len() > 0 [
+                    let cargs: List<Str> = []
+                    let ci = 0
+                    while ci < vf.len() [
+                        if ffg_is_scalar(vf[ci].clone()) [
+                            cargs.push("a" + ci)
+                        ] else [
+                            cargs.push("HksFrom::hks_from(" + ffg_in_own(vf[ci].clone(), ci) + ")")
+                        ]
+                        ci = ci + 1
+                    ]
+                    ctor = "T_::" + vn + "(" + str_join(cargs, ", ") + ")"
+                ]
+                let sig = "fun " + n + "_" + vn + "(" + ffg_tname_list(vf.clone()) + ")"
+                self.emit(n + "_" + vn, sig, vf.clone(), some(me.clone()), "{ type T_ = " + r + "; hks_box(" + ctor + ") }")
+                let fi = 0
+                while fi < vf.len() [
+                    let ft = vf[fi].clone()
+                    let binds: List<Str> = []
+                    let kk = 0
+                    while kk < vf.len() [
+                        if kk == fi [
+                            binds.push("x")
+                        ] else [
+                            binds.push("_")
+                        ]
+                        kk = kk + 1
+                    ]
+                    let pat = en + "::" + vn + "(" + str_join(binds, ", ") + ")"
+                    let val = ""
+                    if ft.kind == "Option" [
+                        val = "hks_box(HksOwn::<" + ffg_rty(ft.clone()) + ">::hks_own(&*x))"
+                    ] elif ffg_is_handle(ft.clone()) [
+                        val = "hks_ptr(HksBorrow::<" + ffg_rty(ft.clone()) + ">::hks_borrow(x))"
+                    ] else [
+                        val = ffg_out_ref(ft.clone(), "x")
+                    ]
+                    let body = "match " + hr + "(a0) { " + pat + " => " + val + ", _ => " + ffg_dflt(ft.clone()) + " }"
+                    self.emit(n + "_" + vn + "_get_" + fi, "fun " + n + "_" + vn + "_get_" + fi + "(h: " + n + ") -> " + ffg_tname(ft.clone()), [me.clone()], some(ft.clone()), body)
+                    fi = fi + 1
+                ]
+            ]
+            vi = vi + 1
+        ]
+        let methods: List<FfgFDecl> = []
+        let mi = 0
+        while mi < self.funs.len() [
+            if self.funs[mi].owner == en [
+                methods.push(self.funs[mi].clone())
+            ]
+            mi = mi + 1
+        ]
+        let mj = 0
+        while mj < methods.len() [
+            if methods[mj].tp.len() == 0 [
+                self.gen_fn(methods[mj].clone(), args.clone(), [])
+            ]
+            mj = mj + 1
+        ]
+    ]
+
+    !!! Czyta IR (S/E/F, patrz naglowek pliku) do `structs`/`enums`/`funs`.
+    fun parse_ir(self, ir: Str) [
+        let lines: List<Str> = str_split(ir, "\n")
+        let li = 0
+        while li < lines.len() [
+            let p: List<Str> = str_split(lines[li].clone(), "|")
+            let tag: Str = p[0].clone()
+            if tag == "S" and p.len() >= 3 [
+                let fields: List<FfgField> = []
+                let k = 3
+                while k < p.len() [
+                    let f: Str = p[k].clone()
+                    let ci = ffg_index_of_char(f.clone(), ":")
+                    if ci >= 0 [
+                        fields.push(FfgField(f.slice(0, ci), ffg_parse_ty(f.slice(ci + 1, f.len()))))
+                    ]
+                    k = k + 1
+                ]
+                self.structs.push(FfgSDecl(p[1].clone(), ffg_csv(p[2].clone()), fields))
+            ]
+            if tag == "E" and p.len() >= 3 [
+                let variants: List<FfgVariant> = []
+                let k = 3
+                while k < p.len() [
+                    let v: Str = p[k].clone()
+                    let ci = ffg_index_of_char(v.clone(), ":")
+                    if ci >= 0 [
+                        let tys: List<FfgTy> = []
+                        let parts: List<Str> = ffg_split_top(v.slice(ci + 1, v.len()), ";")
+                        let q = 0
+                        while q < parts.len() [
+                            tys.push(ffg_parse_ty(parts[q].clone()))
+                            q = q + 1
+                        ]
+                        variants.push(FfgVariant(v.slice(0, ci), tys))
+                    ] else [
+                        variants.push(FfgVariant(v.clone(), []))
+                    ]
+                    k = k + 1
+                ]
+                self.enums.push(FfgEDecl(p[1].clone(), ffg_csv(p[2].clone()), variants))
+            ]
+            if tag == "F" and p.len() >= 6 [
+                let params: List<FfgField> = []
+                let ret: Option<FfgTy> = none()
+                let has_self = false
+                let k = 6
+                while k < p.len() [
+                    let x: Str = p[k].clone()
+                    if str_starts_with(x.clone(), "=") [
+                        let rs: Str = x.slice(1, x.len())
+                        if rs != "" [
+                            ret = some(ffg_parse_ty(rs))
+                        ]
+                    ] else [
+                        let ci = ffg_index_of_char(x.clone(), ":")
+                        if ci >= 0 [
+                            let ty: Str = x.slice(ci + 1, x.len())
+                            if ty == "self" [
+                                has_self = true
+                                params.push(FfgField(x.slice(0, ci), ffg_unit()))
+                            ] else [
+                                params.push(FfgField(x.slice(0, ci), ffg_parse_ty(ty)))
+                            ]
+                        ]
+                    ]
+                    k = k + 1
+                ]
+                self.funs.push(FfgFDecl(p[1].clone(), ffg_csv(p[2].clone()), p[3].clone(), p[4] == "1", ffg_csv(p[5].clone()), params, has_self, ret))
+            ]
+            li = li + 1
+        ]
+    ]
+
+    !!! Generuje operacje wszystkich zarejestrowanych typow-uchwytow (kolejka LIFO, jak `Vec::pop`).
+    fun drain(self) [
+        let guard = 0
+        let go = true
+        while go [
+            match self.queue.pop() [
+                Some(t) -> [
+                    guard = guard + 1
+                    if guard > 5000 [
+                        self.skipped.push("zbyt wiele typow pochodnych - przerwano")
+                        go = false
+                    ] else [
+                        self.ops(t)
+                    ]
+                ]
+                None -> [
+                    go = false
+                ]
+            ]
+        ]
+    ]
+]
+
+!!! ---------- kod pomocniczy wklejany na poczatek fasady ----------
+
+fun ffg_support_code() -> Str [
+    let s = ""
+    s = s + "// Wygenerowane przez `hackerc hlib build --ffi` - NIE EDYTUJ RECZNIE.\n"
+    s = s + "#![allow(dead_code, unused_imports, unused_mut, unused_variables, non_snake_case, unused_unsafe, clippy::all)]\n"
+    s = s + "use crate::*;\nuse std::os::raw::c_char;\n\n"
+    s = s + "thread_local! {\n    static HKS_RET: std::cell::RefCell<std::ffi::CString> = std::cell::RefCell::new(std::ffi::CString::default());\n}\n\n"
+    s = s + "unsafe fn hks_cstr(p: *const c_char) -> String {\n    if p.is_null() { String::new() } else { std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned() }\n}\n\n"
+    s = s + "fn hks_ret_str(s: String) -> *const c_char {\n    let c = std::ffi::CString::new(s.replace('\\0', \"\")).unwrap_or_default();\n    HKS_RET.with(|r| { *r.borrow_mut() = c; r.borrow().as_ptr() })\n}\n\n"
+    s = s + "fn hks_box<T>(v: T) -> i64 { Box::into_raw(Box::new(v)) as i64 }\n"
+    s = s + "fn hks_ptr<T>(r: &mut T) -> i64 { r as *mut T as i64 }\n"
+    s = s + "unsafe fn hks_ref<'a, T>(h: i64) -> &'a mut T { &mut *(h as *mut T) }\n"
+    s = s + "unsafe fn hks_free<T>(h: i64) { if h != 0 { drop(Box::from_raw(h as *mut T)); } }\n\n"
+    s = s + "// pola rekurencyjne transpiler owija w Box / Option<Box>; te cechy ukrywaja roznice\n"
+    s = s + "trait HksBorrow<T> { fn hks_borrow(&mut self) -> &mut T; }\n"
+    s = s + "impl<T> HksBorrow<T> for T { fn hks_borrow(&mut self) -> &mut T { self } }\n"
+    s = s + "impl<T> HksBorrow<T> for Box<T> { fn hks_borrow(&mut self) -> &mut T { &mut **self } }\n"
+    s = s + "trait HksFrom<T> { fn hks_from(v: T) -> Self; }\n"
+    s = s + "impl<T> HksFrom<T> for T { fn hks_from(v: T) -> T { v } }\n"
+    s = s + "impl<T> HksFrom<T> for Box<T> { fn hks_from(v: T) -> Box<T> { Box::new(v) } }\n"
+    s = s + "impl<T> HksFrom<Option<T>> for Option<Box<T>> { fn hks_from(v: Option<T>) -> Option<Box<T>> { v.map(Box::new) } }\n"
+    s = s + "trait HksOwn<T> { fn hks_own(&self) -> T; }\n"
+    s = s + "impl<T: Clone> HksOwn<T> for T { fn hks_own(&self) -> T { self.clone() } }\n"
+    s = s + "impl<T: Clone> HksOwn<T> for Box<T> { fn hks_own(&self) -> T { (**self).clone() } }\n"
+    s = s + "impl<T: Clone> HksOwn<Option<T>> for Option<Box<T>> { fn hks_own(&self) -> Option<T> { self.as_ref().map(|b| (**b).clone()) } }\n\n"
+    end s
+]
+
+!!! ---------- punkt wejscia ----------
+
+!!! Generuje fasade C-ABI. Patrz naglowek pliku.
+fun ffg_generate(ir: Str, lib: Str, inst: Str) -> FfgOut [
+    let g = ffg_new_gen(lib)
+    g.parse_ir(ir)
+    !! 1) typy niegeneryczne
+    let i = 0
+    while i < g.structs.len() [
+        if g.structs[i].tp.len() == 0 [
+            g.reg(FfgTy("Named", g.structs[i].name.clone(), []))
+        ]
+        i = i + 1
+    ]
+    i = 0
+    while i < g.enums.len() [
+        if g.enums[i].tp.len() == 0 [
+            g.reg(FfgTy("Named", g.enums[i].name.clone(), []))
+        ]
+        i = i + 1
+    ]
+    let inst_parts: List<Str> = ffg_split_top(inst, ",")
+    let insts: List<FfgTy> = []
+    let inst_names: List<Str> = []
+    i = 0
+    while i < inst_parts.len() [
+        if inst_parts[i] != "" [
+            let pt = ffg_parse_ty(inst_parts[i].clone())
+            if pt.kind == "Named" [
+                inst_names.push(pt.name.clone())
+                insts.push(pt)
+            ] else [
+                insts.push(FfgTy("Named", ffg_tname(pt.clone()), []))
+            ]
+        ]
+        i = i + 1
+    ]
+    i = 0
+    while i < g.structs.len() [
+        let sn = g.structs[i].name.clone()
+        if g.structs[i].tp.len() > 0 and not ffg_list_has(inst_names.clone(), sn.clone()) [
+            g.skipped.push(sn.clone() + " (generyk - podaj instancje: --ffi-inst \"" + sn + "<Int>\")")
+        ]
+        i = i + 1
+    ]
+    !! 2) instancje generykow z `inst`
+    i = 0
+    while i < insts.len() [
+        let it = insts[i].clone()
+        if g.find_s(it.name.clone()) >= 0 or g.find_e(it.name.clone()) >= 0 [
+            if g.supported(it.clone()) [
+                g.reg(it.clone())
+            ] else [
+                g.skipped.push(ffg_tname(it.clone()) + " (instancja ma zly typ/arnosc)")
+            ]
+        ]
+        i = i + 1
+    ]
+    !! 3) funkcje wolne (+ generyczne z instancji)
+    let funs = g.funs.clone()
+    i = 0
+    while i < funs.len() [
+        let f = funs[i].clone()
+        let skip = f.owner != "" or f.name == "main" or str_starts_with(f.name.clone(), "_")
+        if not skip [
+            if f.tp.len() == 0 [
+                g.gen_fn(f.clone(), [], [])
+            ] else [
+                let found = false
+                let j = 0
+                while j < insts.len() [
+                    if insts[j].name == f.name and insts[j].args.len() == f.tp.len() [
+                        g.gen_fn(f.clone(), [], insts[j].args.clone())
+                        found = true
+                    ]
+                    j = j + 1
+                ]
+                if not found [
+                    g.skipped.push(f.name + " (funkcja generyczna - podaj instancje: --ffi-inst \"" + f.name + "<Int>\")")
+                ]
+            ]
+        ]
+        i = i + 1
+    ]
+    !! 4) metody z wlasnymi parametrami typowymi nie sa wspierane - zglos
+    i = 0
+    while i < funs.len() [
+        if funs[i].owner != "" and funs[i].tp.len() > 0 [
+            g.skipped.push(funs[i].owner + "." + funs[i].name + " (metoda generyczna)")
+        ]
+        i = i + 1
+    ]
+    g.drain()
+    let out = ffg_support_code() + g.rust
+    end FfgOut(out, "[" + str_join(g.exports.clone(), ",") + "]", str_join(g.skipped.clone(), "\n"))
+]
