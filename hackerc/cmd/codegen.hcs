@@ -4627,7 +4627,10 @@ impl CodeGen [
                     !! (przekazanie dalej) wymaga mutowalnego bindingu.
                     params_str = params_str + "mut " + p2.name.clone() + ": " + pts
                 ] else [
-                    params_str = params_str + p2.name.clone() + ": " + pts
+                    !! `mut` takze dla zwyklych parametrow: bez niego rustc traktuje nazwe parametru jako mozliwy wzorzec sciezki i szuka jej
+                    !! wsrod globow `use X::*`; gdy dwa globy (np. `image::*` i `libc::*`) eksportuja te sama nazwe (`open`) jest E0659
+                    !! `open is ambiguous`. Wiazanie `mut x` nigdy nie jest sciezka. `unused_mut` jest wylaczone w naglowku modulu.
+                    params_str = params_str + "mut " + p2.name.clone() + ": " + pts
                 ]
             ]
             j = j + 1
@@ -4744,10 +4747,10 @@ impl CodeGen [
                             if prefix == "&mut " [
                                 params_str = params_str + ", mut " + p.name + ": " + prefix + base
                             ] else [
-                                params_str = params_str + ", " + p.name + ": " + prefix + base
+                                params_str = params_str + ", mut " + p.name + ": " + prefix + base
                             ]
                         ] else [
-                            params_str = params_str + ", " + p.name + ": " + base
+                            params_str = params_str + ", mut " + p.name + ": " + base
                         ]
                     ]
                     None -> [
