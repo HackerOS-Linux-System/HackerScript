@@ -28,6 +28,15 @@ w CI - samohostowanie.
 
 ## Kompilator `hackerc`
 
+* [zrobione] Wejscie bez `fun main` (np. `lib/mod.hcs` biblioteki budowane przez
+  `bit build` bez `--library`) jest budowane automatycznie jako biblioteka
+  (`src/lib.rs`, `[lib]`), z komunikatem na stderr - zamiast `error[E0601]: main
+  function not found` z cargo (`build_project`, `program_has_main` w
+  `hackerc/cmd/project.hcs`). Wymuszone `--bin <nazwa>` zachowuje dawne zachowanie.
+  Uwaga dla bibliotek: plik biblioteki nie powinien importowac WLASNYCH modulow przez
+  `get <bit:nazwa::modul>` (przy budowie samej biblioteki nie ma jej w `BIT_LIBS`,
+  co dawalo `E0432 unresolved import crate::_hks_bit_*`) - uzywaj `include <modul>`.
+
 * [czesciowe] Pozycje w AST: parser zapisuje w `Program` tabele pozycji WSZYSTKICH
   instrukcji (`lines`/`cols`/`tags`, kolejnosc pre-order, obok drzewa - warianty
   `Stmt` bez zmian). Typechecker uzywa jej dla naglowkow funkcji/metod i `let`
