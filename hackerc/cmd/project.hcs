@@ -1916,6 +1916,25 @@ fun load_cached_result(cache_file: Str, fp: Str) -> Option<ProjectResult> [
 !!! przez `bit build` (patrz `bit`) przez
 !!! `hackerc build --version-map wersja1=sciezka1;wersja2=sciezka2`.
 
+!!! NOWOSC (naprawa E0601 przy budowie samej biblioteki) - czy PROGRAM
+!!! (plik wejsciowy) deklaruje funkcje `main` na najwyzszym poziomie.
+fun program_has_main(p: Program) -> Bool [
+    let i = 0
+    while i < p.body.len() [
+        match p.body[i].clone() [
+            FunDecl(n, _p, _r, _b, _pub, _tp, _as) -> [
+                if n == "main" [
+                    end true
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
 fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_root: Option<Str>, bit_root: Option<Str>, crate_name: Str, force_library: Bool, bin_name: Option<Str>, own_version: Str, version_binaries: Dict<Str, Str>) -> ProjectResult [
     let src_dir = out_dir + "/src"
     let main_rs_path = src_dir + "/main.rs"
@@ -1965,12 +1984,31 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
 
     !! 0.6 - CACHE BUDOWANIA: identyczny odcisk wejscia + istniejace pliki wyjsciowe =>
     !! pomijamy cala transpilacje (kolejne buildy bez zmian = ulamek sekundy).
+    !! NAPRAWA - `bit build` na samej BIBLIOTECE (`lib/mod.hcs`, bez `fun main`)
+    !! budowal ja jako binarke i cargo konczyl sie `error[E0601]: main function not
+    !! found`. Wejscie bez `fun main` (i bez `--bin`) nie moze byc binarka -
+    !! przelaczamy sie wtedy automatycznie na tryb `--library` (src/lib.rs, `[lib]`)
+    !! i informujemy o tym na stderr (zamiast mylacego bledu rustc).
+    let lib_mode = force_library
+    if not lib_mode and disc.files.len() > 0 [
+        match bin_name.clone() [
+            Some(_bn) -> [
+            ]
+            None -> [
+                if not program_has_main(disc.files[0].program.clone()) [
+                    lib_mode = true
+                    elog("hackerc: wejscie " + entry.clone() + " nie ma `fun main` - buduje jako biblioteke (jak z --library: src/lib.rs, [lib])")
+                ]
+            ]
+        ]
+    ]
+
     let cache_dir = out_dir + "/.hks-cache"
     let cache_file = cache_dir + "/build.txt"
     let cache_on = build_cache_enabled()
     let fp = ""
     if cache_on and warnings.len() == 0 [
-        fp = build_fingerprint(disc.files.clone(), entry.clone(), crate_name.clone(), force_library, bin_name.clone(), own_version.clone())
+        fp = build_fingerprint(disc.files.clone(), entry.clone(), crate_name.clone(), lib_mode, bin_name.clone(), own_version.clone())
         if fp != "" [
             match load_cached_result(cache_file.clone(), fp.clone()) [
                 Some(cached) -> [
@@ -2392,7 +2430,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
     !! `needs_wasm_bindgen` - `entry_rust` (kod funkcji uzytkownika) jest
     !! IDENTYCZNY w obu przypadkach, rozni sie tylko plik docelowy i
     !! sekcja Cargo.toml (patrz `cargo_toml_text` wyzej).
-    if needs_wasm_bindgen or force_library [
+    if needs_wasm_bindgen or lib_mode [
         main_rs_path = src_dir + "/lib.rs"
     ]
     !! ROZBUDOWA (ta runda) - multi-binarki: `bin_name = some(x)`
@@ -2462,7 +2500,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
                     !! manifestu -> `cargo: manifest path ... does not exist`)
                     !! generujemy go od zera i kierujemy `[[bin]]` na
                     !! `src/bin/<nazwa>.rs`.
-                    let fresh = cargo_toml_text(crate_name, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, needs_native_cpp, needs_wasm_bindgen, force_library, crates_names.clone(), crates_versions.clone(), needs_native_java or needs_native_kotlin, needs_sha256)
+                    let fresh = cargo_toml_text(crate_name, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, needs_native_cpp, needs_wasm_bindgen, lib_mode, crates_names.clone(), crates_versions.clone(), needs_native_java or needs_native_kotlin, needs_sha256)
                     fresh = str_replace(fresh, "[[bin]]\nname = \"" + crate_name + "\"\npath = \"src/main.rs\"", "[[bin]]\nname = \"" + bn2 + "\"\npath = \"src/bin/" + bn2 + ".rs\"")
                     match write_file_if_changed(cargo_toml_path.clone(), fresh) [
                         Ok(_v) -> [
@@ -2475,7 +2513,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
             ]
         ]
         None -> [
-            let cargo_text = cargo_toml_text(crate_name, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, needs_native_cpp, needs_wasm_bindgen, force_library, crates_names.clone(), crates_versions.clone(), needs_native_java or needs_native_kotlin, needs_sha256)
+            let cargo_text = cargo_toml_text(crate_name, needs_pyo3, needs_native_js, needs_sandbox, needs_hot_reload, needs_native_cpp, needs_wasm_bindgen, lib_mode, crates_names.clone(), crates_versions.clone(), needs_native_java or needs_native_kotlin, needs_sha256)
             match write_file_if_changed(cargo_toml_path.clone(), cargo_text) [
                 Ok(_v) -> [
                 ]
