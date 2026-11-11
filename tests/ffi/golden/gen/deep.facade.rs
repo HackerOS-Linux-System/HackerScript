@@ -15,23 +15,23 @@ fn hks_ret_str(s: String) -> *const c_char {
     HKS_RET.with(|r| { *r.borrow_mut() = c; r.borrow().as_ptr() })
 }
 
-fn hks_box<T>(v: T) -> i64 { Box::into_raw(Box::new(v)) as i64 }
+fn hks_box<T>(v: T) -> i64 { std::boxed::Box::into_raw(std::boxed::Box::new(v)) as i64 }
 fn hks_ptr<T>(r: &mut T) -> i64 { r as *mut T as i64 }
 unsafe fn hks_ref<'a, T>(h: i64) -> &'a mut T { &mut *(h as *mut T) }
-unsafe fn hks_free<T>(h: i64) { if h != 0 { drop(Box::from_raw(h as *mut T)); } }
+unsafe fn hks_free<T>(h: i64) { if h != 0 { drop(std::boxed::Box::from_raw(h as *mut T)); } }
 
 // pola rekurencyjne transpiler owija w Box / Option<Box>; te cechy ukrywaja roznice
 trait HksBorrow<T> { fn hks_borrow(&mut self) -> &mut T; }
 impl<T> HksBorrow<T> for T { fn hks_borrow(&mut self) -> &mut T { self } }
-impl<T> HksBorrow<T> for Box<T> { fn hks_borrow(&mut self) -> &mut T { &mut **self } }
+impl<T> HksBorrow<T> for std::boxed::Box<T> { fn hks_borrow(&mut self) -> &mut T { &mut **self } }
 trait HksFrom<T> { fn hks_from(v: T) -> Self; }
 impl<T> HksFrom<T> for T { fn hks_from(v: T) -> T { v } }
-impl<T> HksFrom<T> for Box<T> { fn hks_from(v: T) -> Box<T> { Box::new(v) } }
-impl<T> HksFrom<Option<T>> for Option<Box<T>> { fn hks_from(v: Option<T>) -> Option<Box<T>> { v.map(Box::new) } }
+impl<T> HksFrom<T> for std::boxed::Box<T> { fn hks_from(v: T) -> std::boxed::Box<T> { std::boxed::Box::new(v) } }
+impl<T> HksFrom<Option<T>> for Option<std::boxed::Box<T>> { fn hks_from(v: Option<T>) -> Option<std::boxed::Box<T>> { v.map(std::boxed::Box::new) } }
 trait HksOwn<T> { fn hks_own(&self) -> T; }
 impl<T: Clone> HksOwn<T> for T { fn hks_own(&self) -> T { self.clone() } }
-impl<T: Clone> HksOwn<T> for Box<T> { fn hks_own(&self) -> T { (**self).clone() } }
-impl<T: Clone> HksOwn<Option<T>> for Option<Box<T>> { fn hks_own(&self) -> Option<T> { self.as_ref().map(|b| (**b).clone()) } }
+impl<T: Clone> HksOwn<T> for std::boxed::Box<T> { fn hks_own(&self) -> T { (**self).clone() } }
+impl<T: Clone> HksOwn<Option<T>> for Option<std::boxed::Box<T>> { fn hks_own(&self) -> Option<T> { self.as_ref().map(|b| (**b).clone()) } }
 
 #[no_mangle]
 pub unsafe extern "C" fn hksffi_t_make_cfg() -> i64 {
