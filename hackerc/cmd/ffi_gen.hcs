@@ -518,6 +518,19 @@ impl FfgGen [
         self.queue.push(t)
     ]
 
+    !!! Czy struktura/enum `owner` ma wlasna metode `mname` (metoda uzytkownika wygrywa z
+    !!! wygenerowanym akcesorem pola o tym samym symbolu, np. pole `theme` vs `fun set_theme`).
+    fun has_method(self, owner: Str, mname: Str) -> Bool [
+        let i = 0
+        while i < self.funs.len() [
+            if self.funs[i].owner == owner and self.funs[i].name == mname [
+                end true
+            ]
+            i = i + 1
+        ]
+        end false
+    ]
+
     !!! Emituje jedna funkcje `extern "C"` oraz jej wpis w `exports`.
     fun emit(self, name: Str, sig: Str, params: List<FfgTy>, ret: Option<FfgTy>, body: Str) [
         let pi = 0
@@ -850,12 +863,16 @@ impl FfgGen [
                 ] else [
                     get_body = ffg_out_ref(ft.clone(), place.clone())
                 ]
-                self.emit(n + "_get_" + fname, "fun " + n + "_get_" + fname + "(h: " + n + ") -> " + ffg_tname(ft.clone()), [me.clone()], some(ft.clone()), get_body)
+                if not self.has_method(sname.clone(), "get_" + fname) [
+                    self.emit(n + "_get_" + fname, "fun " + n + "_get_" + fname + "(h: " + n + ") -> " + ffg_tname(ft.clone()), [me.clone()], some(ft.clone()), get_body)
+                ]
                 let val = "a1"
                 if ffg_is_handle(ft.clone()) or ft.kind == "Str" [
                     val = "HksFrom::hks_from(" + ffg_in_own(ft.clone(), 1) + ")"
                 ]
-                self.emit(n + "_set_" + fname, "fun " + n + "_set_" + fname + "(h: " + n + ", v: " + ffg_tname(ft.clone()) + ")", [me.clone(), ft.clone()], none(), hr + "(a0)." + fname + " = " + val + ";")
+                if not self.has_method(sname.clone(), "set_" + fname) [
+                    self.emit(n + "_set_" + fname, "fun " + n + "_set_" + fname + "(h: " + n + ", v: " + ffg_tname(ft.clone()) + ")", [me.clone(), ft.clone()], none(), hr + "(a0)." + fname + " = " + val + ";")
+                ]
             ]
             k = k + 1
         ]
@@ -877,7 +894,9 @@ impl FfgGen [
                 q = q + 1
             ]
             let sig = "fun " + n + "_new(" + str_join(sigp, ", ") + ")"
-            self.emit(n + "_new", sig, ptys, some(me.clone()), "{ type T_ = " + r + "; hks_box(T_ { " + str_join(inits, ", ") + " }) }")
+            if not self.has_method(sname.clone(), "new") [
+                self.emit(n + "_new", sig, ptys, some(me.clone()), "{ type T_ = " + r + "; hks_box(T_ { " + str_join(inits, ", ") + " }) }")
+            ]
         ]
         !! metody `impl`
         let methods: List<FfgFDecl> = []
@@ -1113,22 +1132,22 @@ fun ffg_support_code() -> Str [
     s = s + "thread_local! {\n    static HKS_RET: std::cell::RefCell<std::ffi::CString> = std::cell::RefCell::new(std::ffi::CString::default());\n}\n\n"
     s = s + "unsafe fn hks_cstr(p: *const c_char) -> String {\n    if p.is_null() { String::new() } else { std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned() }\n}\n\n"
     s = s + "fn hks_ret_str(s: String) -> *const c_char {\n    let c = std::ffi::CString::new(s.replace('\\0', \"\")).unwrap_or_default();\n    HKS_RET.with(|r| { *r.borrow_mut() = c; r.borrow().as_ptr() })\n}\n\n"
-    s = s + "fn hks_box<T>(v: T) -> i64 { Box::into_raw(Box::new(v)) as i64 }\n"
+    s = s + "fn hks_box<T>(v: T) -> i64 { std::boxed::Box::into_raw(std::boxed::Box::new(v)) as i64 }\n"
     s = s + "fn hks_ptr<T>(r: &mut T) -> i64 { r as *mut T as i64 }\n"
     s = s + "unsafe fn hks_ref<'a, T>(h: i64) -> &'a mut T { &mut *(h as *mut T) }\n"
-    s = s + "unsafe fn hks_free<T>(h: i64) { if h != 0 { drop(Box::from_raw(h as *mut T)); } }\n\n"
+    s = s + "unsafe fn hks_free<T>(h: i64) { if h != 0 { drop(std::boxed::Box::from_raw(h as *mut T)); } }\n\n"
     s = s + "// pola rekurencyjne transpiler owija w Box / Option<Box>; te cechy ukrywaja roznice\n"
     s = s + "trait HksBorrow<T> { fn hks_borrow(&mut self) -> &mut T; }\n"
     s = s + "impl<T> HksBorrow<T> for T { fn hks_borrow(&mut self) -> &mut T { self } }\n"
-    s = s + "impl<T> HksBorrow<T> for Box<T> { fn hks_borrow(&mut self) -> &mut T { &mut **self } }\n"
+    s = s + "impl<T> HksBorrow<T> for std::boxed::Box<T> { fn hks_borrow(&mut self) -> &mut T { &mut **self } }\n"
     s = s + "trait HksFrom<T> { fn hks_from(v: T) -> Self; }\n"
     s = s + "impl<T> HksFrom<T> for T { fn hks_from(v: T) -> T { v } }\n"
-    s = s + "impl<T> HksFrom<T> for Box<T> { fn hks_from(v: T) -> Box<T> { Box::new(v) } }\n"
-    s = s + "impl<T> HksFrom<Option<T>> for Option<Box<T>> { fn hks_from(v: Option<T>) -> Option<Box<T>> { v.map(Box::new) } }\n"
+    s = s + "impl<T> HksFrom<T> for std::boxed::Box<T> { fn hks_from(v: T) -> std::boxed::Box<T> { std::boxed::Box::new(v) } }\n"
+    s = s + "impl<T> HksFrom<Option<T>> for Option<std::boxed::Box<T>> { fn hks_from(v: Option<T>) -> Option<std::boxed::Box<T>> { v.map(std::boxed::Box::new) } }\n"
     s = s + "trait HksOwn<T> { fn hks_own(&self) -> T; }\n"
     s = s + "impl<T: Clone> HksOwn<T> for T { fn hks_own(&self) -> T { self.clone() } }\n"
-    s = s + "impl<T: Clone> HksOwn<T> for Box<T> { fn hks_own(&self) -> T { (**self).clone() } }\n"
-    s = s + "impl<T: Clone> HksOwn<Option<T>> for Option<Box<T>> { fn hks_own(&self) -> Option<T> { self.as_ref().map(|b| (**b).clone()) } }\n\n"
+    s = s + "impl<T: Clone> HksOwn<T> for std::boxed::Box<T> { fn hks_own(&self) -> T { (**self).clone() } }\n"
+    s = s + "impl<T: Clone> HksOwn<Option<T>> for Option<std::boxed::Box<T>> { fn hks_own(&self) -> Option<T> { self.as_ref().map(|b| (**b).clone()) } }\n\n"
     end s
 ]
 
