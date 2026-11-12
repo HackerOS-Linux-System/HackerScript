@@ -117,3 +117,14 @@ All three toolchains implement §§1–4 (the container/manifest/checksum/signat
 - H#'s own compiler is expected to move to a self-hosted (H#-in-H#) implementation over time; keeping its `.hlib` module (`source-code/hlib/`) small and dependency-isolated means that eventual rewrite doesn't ripple into Hacker Lang or HackerScript.
 
 If you're fixing a bug in one language's copy, check whether the same bug exists in the other two — they started from the same design but are not kept in sync automatically.
+
+## 10. Wybor funkcji eksportowanych przez fasade C-ABI
+
+`hackerc hlib build --ffi` eksportuje wszystkie funkcje wolne oznaczone `pub fun`. Biblioteka bez ani jednego `pub fun`
+eksportuje wszystko (zgodnosc wsteczna). `--ffi-api a,b,c` podaje liste jawnie i ma pierwszenstwo przed `pub`.
+Przy liscie struktury/enumy dostaja akcesory tylko wtedy, gdy wystepuja w podpisie wyeksportowanej funkcji, wiec
+biblioteka GUI nie wystawia tysiaca funkcji wewnetrznych. H# importuje taka biblioteke przez `use "bit -> nazwa"`
+(albo `use "hlib -> nazwa"`) i wiaze tylko funkcje, ktore program faktycznie wywoluje.
+
+Wpis `link_libs` w manifescie to czysta nazwa biblioteki (`dl`, `c`); `hackerc` wylacza kolory cargo i odfiltrowuje
+znaki spoza `[A-Za-z0-9_.+-]`, wiec kody ANSI nie trafiaja juz do manifestu.
