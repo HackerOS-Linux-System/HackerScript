@@ -1154,20 +1154,32 @@ fun ffg_support_code() -> Str [
 !!! ---------- punkt wejscia ----------
 
 !!! Generuje fasade C-ABI. Patrz naglowek pliku.
+!!! Bez listy API: eksportuje WSZYSTKO (zachowanie historyczne). Z lista - patrz `ffg_generate_api`.
 fun ffg_generate(ir: Str, lib: Str, inst: Str) -> FfgOut [
+    end ffg_generate_api(ir, lib, inst, "")
+]
+
+!!! `api` = nazwy funkcji wolnych po przecinku, ktore biblioteka UDOSTEPNIA na zewnatrz (`pub fun`, albo
+!!! `--ffi-api a,b,c`). Pusty `api` = eksport wszystkiego. Niepusty:
+!!!   - z funkcji wolnych powstaja tylko wymienione,
+!!!   - typy (struktury/enumy) dostaja akcesory/metody TYLKO jesli wystepuja w podpisie wyeksportowanej funkcji
+!!!     (zamiast rejestrowania kazdego typu biblioteki - tak powstawaly tysiace zbednych eksportow).
+fun ffg_generate_api(ir: Str, lib: Str, inst: Str, api: Str) -> FfgOut [
     let g = ffg_new_gen(lib)
     g.parse_ir(ir)
-    !! 1) typy niegeneryczne
+    let api_names: List<Str> = ffg_split_top(api, ",")
+    let only_api = api != ""
+    !! 1) typy niegeneryczne (bez listy API: wszystkie; z lista: tylko te osiagalne z podpisow API)
     let i = 0
     while i < g.structs.len() [
-        if g.structs[i].tp.len() == 0 [
+        if g.structs[i].tp.len() == 0 and not only_api [
             g.reg(FfgTy("Named", g.structs[i].name.clone(), []))
         ]
         i = i + 1
     ]
     i = 0
     while i < g.enums.len() [
-        if g.enums[i].tp.len() == 0 [
+        if g.enums[i].tp.len() == 0 and not only_api [
             g.reg(FfgTy("Named", g.enums[i].name.clone(), []))
         ]
         i = i + 1
@@ -1215,6 +1227,9 @@ fun ffg_generate(ir: Str, lib: Str, inst: Str) -> FfgOut [
     while i < funs.len() [
         let f = funs[i].clone()
         let skip = f.owner != "" or f.name == "main" or str_starts_with(f.name.clone(), "_")
+        if only_api and not ffg_list_has(api_names.clone(), f.name.clone()) [
+            skip = true
+        ]
         if not skip [
             if f.tp.len() == 0 [
                 g.gen_fn(f.clone(), [], [])
@@ -1231,6 +1246,24 @@ fun ffg_generate(ir: Str, lib: Str, inst: Str) -> FfgOut [
                 if not found [
                     g.skipped.push(f.name + " (funkcja generyczna - podaj instancje: --ffi-inst \"" + f.name + "<Int>\")")
                 ]
+            ]
+        ]
+        i = i + 1
+    ]
+    !! 3b) nazwa z listy API bez funkcji wolnej o takiej nazwie - zglos, zamiast milczec
+    i = 0
+    while i < api_names.len() [
+        if api_names[i] != "" [
+            let hit = false
+            let j = 0
+            while j < funs.len() [
+                if funs[j].owner == "" and funs[j].name == api_names[i] [
+                    hit = true
+                ]
+                j = j + 1
+            ]
+            if not hit [
+                g.skipped.push(api_names[i].clone() + " (jest na liscie API, ale nie ma takiej funkcji wolnej)")
             ]
         ]
         i = i + 1
