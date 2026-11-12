@@ -151,6 +151,26 @@ fun ffi_ir(bodies: List<Stmt>) -> Str [
     end ir
 ]
 
+!!! Nazwy funkcji wolnych oznaczonych `pub fun` (po przecinku). Pusty wynik = biblioteka nie uzywa `pub`
+!!! w ogole, wiec eksportujemy wszystko (zgodnosc wsteczna).
+fun ffi_pub_api(bodies: List<Stmt>) -> Str [
+    let names: List<Str> = []
+    let i = 0
+    while i < bodies.len() [
+        match bodies[i].clone() [
+            FunDecl(fname, fparams, fret, fbody, fpub, ftp, fasync) -> [
+                if fpub and fname != "main" [
+                    names.push(fname)
+                ]
+            ]
+            _ -> [
+            ]
+        ]
+        i = i + 1
+    ]
+    end ffi_csv(names)
+]
+
 fun ffi_sanitize_ident(s: Str) -> Str [
     let out = ""
     let i = 0
@@ -186,6 +206,10 @@ fun ffi_cargo_build(crate_dir: Str, crate_name: Str, target: Str) -> FfiBuildOut
         if !target.is_empty() {
             cmd.arg("--target").arg(&target);
         }
+        // bez kolorow: `bit` ustawia CLICOLOR_FORCE/CARGO_TERM_COLOR, a kody ANSI doklejaly sie do ostatniej
+        // biblioteki w linii `native-static-libs:` (np. -lc + ESC kod resetu koloru -> nazwa biblioteki ze smieciem).
+        cmd.env("CARGO_TERM_COLOR", "never").env("NO_COLOR", "1").env_remove("CLICOLOR_FORCE");
+        cmd.arg("--color").arg("never");
         cmd.arg("--").arg("--print").arg("native-static-libs");
         match cmd.output() {
             Err(e) => { message = format!("nie moge uruchomic cargo: {}", e); }
@@ -207,6 +231,9 @@ fun ffi_cargo_build(crate_dir: Str, crate_name: Str, target: Str) -> FfiBuildOut
                                 for tok in line[idx + "native-static-libs:".len()..].split_whitespace() {
                                     if let Some(name) = tok.strip_prefix("-l") {
                                         let name = name.trim_start_matches("static=").trim_start_matches("dylib=");
+                                        // nazwa biblioteki systemowej: tylko znaki dozwolone w `-l<nazwa>` (obrona przed ANSI/smieciami)
+                                        let name: String = name.chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(*c, '_' | '-' | '.' | '+')).collect();
+                                        let name = name.as_str();
                                         if !name.is_empty() && !libs.iter().any(|l| l == name) {
                                             libs.push(name.to_string());
                                         }
@@ -236,7 +263,7 @@ fun ffi_temp_dir(lib_name: Str) -> Str [
 ]
 
 !!! `hackerc hlib build --ffi <bundle.hcs> ...` - glowna sciezka. Zwraca kod wyjscia.
-fun ffi_build_hlib(src: Str, out_hlib: Str, lib_name: Str, lib_version: Str, sign_key_path: Str, target: Str, keep_dir: Bool, own_version: Str, inst: Str) -> Int [
+fun ffi_build_hlib(src: Str, out_hlib: Str, lib_name: Str, lib_version: Str, sign_key_path: Str, target: Str, keep_dir: Bool, own_version: Str, inst: Str, api_arg: Str) -> Int [
     let lib = ffi_sanitize_ident(lib_name)
     let crate_name = "hks_" + lib
     let tmp = ffi_temp_dir(lib)
@@ -263,7 +290,15 @@ fun ffi_build_hlib(src: Str, out_hlib: Str, lib_name: Str, lib_version: Str, sig
         ]
         fi = fi + 1
     ]
-    let facade = ffg_generate(ffi_ir(bodies), lib, inst)
+    !!! Co biblioteka UDOSTEPNIA: `--ffi-api` > wszystkie `pub fun` > (brak `pub`) wszystko.
+    let api = api_arg
+    if api == "" [
+        api = ffi_pub_api(bodies.clone())
+    ]
+    if api != "" [
+        elog(ffi_plain("hackerc hlib build --ffi:") + " eksportuje tylko API: " + api)
+    ]
+    let facade = ffg_generate_api(ffi_ir(bodies), lib, inst, api)
     let facade_rust = facade.rust.clone()
     let exports_json = facade.exports.clone()
     let skipped_text = facade.skipped.clone()
