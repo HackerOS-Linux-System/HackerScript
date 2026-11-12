@@ -772,7 +772,7 @@ fun cmd_hlib(argv: List<Str>) -> Int [
     let _drop = rest.remove(0)
 
     if action == "build" [
-        let src = first_positional(rest, ["-o", "--output", "--lib-version", "--sign", "--name", "--ffi-target", "--ffi-inst"])
+        let src = first_positional(rest, ["-o", "--output", "--lib-version", "--sign", "--name", "--ffi-target", "--ffi-inst", "--ffi-api"])
         if src == "" [
             elog(c_red("hackerc hlib build:") + " brak wymaganego argumentu 'source' (plik .hcs)")
             end 1
@@ -828,7 +828,14 @@ fun cmd_hlib(argv: List<Str>) -> Int [
                 Some(v) -> [ ffi_inst = v ]
                 None -> [ ]
             ]
-            end ffi_build_hlib(src, out_hlib, lib_name, lib_version, sign_key_path, ffi_target, has_flag(rest, "--ffi-keep"), VERSION.to_string(), ffi_inst)
+            !!! `--ffi-api "a,b,c"` - jawna lista funkcji wolnych do wyeksportowania. Bez niej: wszystkie `pub fun`
+            !!! biblioteki; gdy zadna nie jest `pub` - wszystko (zachowanie sprzed 0.7).
+            let ffi_api = ""
+            match find_flag_value(rest, "", "--ffi-api") [
+                Some(v) -> [ ffi_api = v ]
+                None -> [ ]
+            ]
+            end ffi_build_hlib(src, out_hlib, lib_name, lib_version, sign_key_path, ffi_target, has_flag(rest, "--ffi-keep"), VERSION.to_string(), ffi_inst, ffi_api)
         ]
         let result = hlib_build(src, "", out_hlib, lib_name, lib_version, sign_key_path)
         if result.ok [
@@ -1037,7 +1044,7 @@ fun print_usage() [
     log("    fmt                 formatuje kod .hcs")
     log("    lsp                 Language Server (LSP) po stdio - patrz docs/LSP.md (Etap 2a: diagnostyka)")
     log("    hlib                buduj/sprawdzaj archiwa .hlib (HackerOS Lib) - patrz hlib.hcs")
-    log("      hlib build <plik.hcs> [-o wyjscie.hlib] [--lib-version W] [--sign klucz] [--ffi [--ffi-target TRIPLE] [--ffi-inst f<Int>,T<Str>] [--ffi-keep]]")
+    log("      hlib build <plik.hcs> [-o wyjscie.hlib] [--lib-version W] [--sign klucz] [--ffi [--ffi-target TRIPLE] [--ffi-inst f<Int>,T<Str>] [--ffi-api f,g] [--ffi-keep]]")
     log("      hlib inspect <plik.hlib>")
     log("      hlib verify <plik.hlib> [--pubkey HEX]")
     log("      hlib keygen [-o klucz.key]")
