@@ -170,7 +170,9 @@ fun hlib_build_ex(source_hcs_path: Str, so_path: Str, out_hlib_path: Str, lib_na
                     else if kind == "static_lib" { format!(",\"target\":\"{}\"", ffi_target) }
                     else { String::new() };
                 let libs_json = if kind == "static_lib" && !link_libs.is_empty() {
-                    let items: Vec<String> = link_libs.split(',').filter(|x| !x.is_empty()).map(|x| format!("\"{}\"", x)).collect();
+                    let items: Vec<String> = link_libs.split(',')
+                        .map(|x| x.chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(*c, '_' | '-' | '.' | '+')).collect::<String>())
+                        .filter(|x| !x.is_empty()).map(|x| format!("\"{}\"", x)).collect();
                     format!(",\"link_libs\":[{}]", items.join(","))
                 } else { String::new() };
                 parts.push(format!(
