@@ -140,6 +140,21 @@ fun gen_unit_tests(dir: Str) -> TestRun [
     let weird = ffg_generate(ir, "we ird-lib.9", "")
     t.has("symbole zawieraja oczyszczona nazwe biblioteki", weird.rust.clone(), "fn hksffi_we_ird_lib_9_make_node(")
 
+    !! lista API: tylko wymienione funkcje wolne + typy z ich podpisow (nie wszystkie typy biblioteki)
+    let all_out = ffg_generate(ir.clone(), "t", "")
+    let api_out = ffg_generate_api(ir.clone(), "t", "", "bump,area")
+    t.has("API: wymieniona funkcja jest eksportowana", api_out.rust.clone(), "fn hksffi_t_bump(")
+    t.has("API: druga wymieniona funkcja jest eksportowana", api_out.rust.clone(), "fn hksffi_t_area(")
+    t.check("API: niewymieniona funkcja wolna NIE jest eksportowana", gen_count(api_out.rust.clone(), "fn hksffi_t_sum_list(") == 0)
+    let only_bump = ffg_generate_api(ir.clone(), "t", "", "bump")
+    t.check("API: typ z podpisu (Point) dostaje akcesory", gen_count(only_bump.rust.clone(), "fn hksffi_t_Point_") > 0)
+    t.check("API: typ spoza podpisow (Node, Shape) nie dostaje akcesorow", gen_count(only_bump.rust.clone(), "fn hksffi_t_Node_") == 0 and gen_count(only_bump.rust.clone(), "fn hksffi_t_Shape_") == 0)
+    t.check("API: eksportow wyraznie mniej niz bez listy", api_out.rust.len() < all_out.rust.len())
+    let bad = ffg_generate_api(ir.clone(), "t", "", "nie_ma_takiej")
+    t.has("API: nieznana nazwa jest zgloszona w skipped", bad.skipped.clone(), "nie_ma_takiej")
+    let same = ffg_generate_api(ir.clone(), "t", "", "")
+    t.same("API: pusta lista == eksport wszystkiego (zgodnosc wsteczna)", same.exports.clone(), all_out.exports.clone())
+
     !! pusty IR: tylko kod pomocniczy, zero eksportow
     let empty = ffg_generate("", "t", "")
     t.same("pusty IR: exports == []", empty.exports.clone(), "[]")
