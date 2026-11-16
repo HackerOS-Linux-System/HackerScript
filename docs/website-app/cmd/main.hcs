@@ -1,0 +1,94 @@
+use <mode:website>
+use <site:lang=pl>
+
+!!! Przyklad rozszerzonego trybu strony: router z nav_link, formularz z
+!!! preventDefault, sygnaly (bind_text/bind_list) i bezpieczny storage.
+!!! Budowanie:  hackerc website cmd/main.hcs -o dist --dev
+!!! (tryb history: route_mode("history") + `--base /nazwa-repo` na GitHub Pages)
+
+style {
+    nav { display: flex; gap: 1rem; padding: .5rem 0; }
+    .nav-link.active { font-weight: bold; text-decoration: none; }
+}
+
+style(.karta) {
+    :root { border: 1px solid #ccc; border-radius: .5rem; padding: .75rem; margin: .5rem 0; }
+    h3 { margin: 0 0 .25rem; }
+}
+
+let zadania = signal([])
+let licznik = signal(0)
+
+fun karta(tytul: Str, tresc: Str) [
+    let k = el("div", "")
+    dom_class(k, "karta")
+    child(k, "h3", tytul)
+    child(k, "p", tresc)
+    end k
+]
+
+fun dom() [
+    let out = route_outlet()
+    dom_append(out, karta("Licznik", "Klikniecia zliczane sygnalem"))
+    let p = child(out, "p", "")
+    bind_text(p, licznik)
+    let b = child(out, "button", "+1")
+    dom_on(b, "click", plus)
+]
+
+fun plus() [
+    sig_set(licznik, sig_get(licznik) + 1)
+    storage_set("licznik", (sig_get(licznik) as Str))
+]
+
+fun dodaj(e: Event) [
+    event_prevent(e)
+    let pole = dom_get("nowe")
+    let tekst = dom_value(pole)
+    if tekst != "" [
+        sig_push(zadania, tekst)
+        dom_set_value(pole, "")
+    ]
+]
+
+fun wiersz(x: Str, i: Int) [
+    end el("li", html_escape(x))
+]
+
+fun zadania_strona() [
+    let out = route_outlet()
+    let f = child(out, "form", "")
+    let pole = child(f, "input", "")
+    dom_attr(pole, "id", "nowe")
+    dom_attr(pole, "placeholder", "nowe zadanie")
+    child(f, "button", "Dodaj")
+    dom_on_event(f, "submit", dodaj)
+    let ul = child(out, "ul", "")
+    bind_list(ul, zadania, wiersz)
+]
+
+fun szukaj() [
+    let q = route_query("q")
+    dom_text(route_outlet(), "Szukano: " + q.unwrap_or("(nic)"))
+]
+
+fun main() [
+    page_title("Przyklad")
+    let nav = child(app_root(), "nav", "")
+    nav_child(nav, "/", "Start")
+    nav_child(nav, "/zadania", "Zadania")
+    nav_child(nav, "/szukaj?q=hacker", "Szukaj")
+    let tresc = child(app_root(), "div", "")
+    dom_attr(tresc, "id", "route-outlet")
+    match storage_get("licznik") [
+        Some(v) -> [
+            sig_set(licznik, str_to_int(v).unwrap_or(0))
+        ]
+        None -> [
+            let unused = 0
+        ]
+    ]
+    route("/", dom)
+    route("/zadania", zadania_strona)
+    route("/szukaj", szukaj)
+]
