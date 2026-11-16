@@ -1190,7 +1190,7 @@ fun transpile_js_native(prog: Program, site: Bool, native_blocks: List<Str>, nat
     let entry = ""
     if g.has_main [
         if site [
-            entry = "    const $start = () => {\n        try {\n            const r = main();\n            const go = () => (typeof hks_router_start === \"function\" ? hks_router_start() : undefined);\n            if (r && typeof r.then === \"function\") { r.then(go).catch((e) => console.error(e)); } else { const p = go(); if (p && typeof p.catch === \"function\") p.catch((e) => console.error(e)); }\n        } catch (e) { console.error(e); }\n    };\n    if (document.readyState === \"loading\") document.addEventListener(\"DOMContentLoaded\", $start); else $start();\n"
+            entry = "    const hks_fail = (e) => { if (typeof hks_report === \"function\") hks_report(e); else console.error(e); };\n    const $start = () => {\n        try {\n            const r = main();\n            const go = () => (typeof hks_router_start === \"function\" ? hks_router_start() : undefined);\n            if (r && typeof r.then === \"function\") { r.then(go).catch((e) => hks_fail(e)); } else { const p = go(); if (p && typeof p.catch === \"function\") p.catch((e) => hks_fail(e)); }\n        } catch (e) { hks_fail(e); }\n    };\n    if (document.readyState === \"loading\") document.addEventListener(\"DOMContentLoaded\", $start); else $start();\n"
         ] else [
             entry = "    Promise.resolve().then(() => main()).catch((e) => {\n        console.error(e instanceof Error ? e.message : e);\n        process.exit(e && e.message && String(e.message).startsWith(\"hks panic\") ? 101 : 1);\n    });\n"
         ]
