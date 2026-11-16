@@ -2344,7 +2344,7 @@ fun build_project(entry: Str, out_dir: Str, libs_root: Option<Str>, bootstrap_ro
                         if not use_dup [
                             use_lines.push(use_line)
                         ]
-                    ] elif use_k != "os" [
+                    ] elif use_k != "os" and use_k != "site" [
                         warnings.push(df.path.clone() + ": nieznana dyrektywa `use <" + use_k + ">` - znane: lang:kotlin|javascript, mode:website, os:linux|windows|macos|ios|android, crosscompile, arc:<architektura>")
                     ]
                 ]
