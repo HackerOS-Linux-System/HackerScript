@@ -1,0 +1,12 @@
+[package]
+-> name        => website-app
+-> version     => 0.6
+-> description => Przyklad rozszerzonego trybu strony: router z nav_link, formularz z preventDefault, sygnaly, style(.zakres).
+-> lang        => HackerScript
+-> using       => 0.6
+
+[layout]
+-> cmd => cmd
+
+[default-build]
+-> profile => release
