@@ -1,0 +1,577 @@
+get <std:string> import <str_split::str_join::str_replace>
+get <std:fs> import <create_dir_ok::copy_file_ok>
+
+!!! ROZBUDOWA 0.6 - budowanie strony (`use <mode:website>`): szkielet HTML (lang,
+!!! <head>, favicon/OG), minifikacja, tryb dev, 404.html dla routera `history`,
+!!! kopiowanie assetow, ostrzezenia (nieznane nazwy mostka DOM, Int > 2^53,
+!!! klasy bez CSS). Wolane z `cmd_site` w main.hcs. Opis: docs/WEBSITE.md.
+
+struct SiteOpts [
+    minify: Bool,
+    dev: Bool,
+    watch: Bool,
+    base: Str,
+    has_base: Bool,
+    assets: Str
+]
+
+fun site_opts_default() -> SiteOpts [
+    end SiteOpts(false, false, false, "", false, "")
+]
+
+!!! -- znaki -----------------------------------------------------------
+
+fun site_is_ident_char(c: Str) -> Bool [
+    if c == "_" [
+        end true
+    ]
+    end (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9")
+]
+
+fun site_is_digit(c: Str) -> Bool [
+    end c >= "0" and c <= "9"
+]
+
+!!! -- minifikacja -------------------------------------------------------
+
+!!! CSS: usuwa komentarze, zwija biale znaki, usuwa spacje wokol `{ } ; ,` i po `:`.
+!!! Napisy ("..." i '...') zostaja nietkniete. Spacja PRZED `:` zostaje (ma znaczenie
+!!! w selektorach: `.a :hover`).
+fun site_css_minify(css: Str) -> Str [
+    let out = ""
+    let n = css.len()
+    let i = 0
+    let pending_space = false
+    while i < n [
+        let c = css.char_at(i)
+        if c == "/" and i + 1 < n and css.char_at(i + 1) == "*" [
+            i = i + 2
+            while i + 1 < n and not (css.char_at(i) == "*" and css.char_at(i + 1) == "/") [
+                i = i + 1
+            ]
+            i = i + 2
+            pending_space = true
+        ] elif c == "\"" or c == "'" [
+            let q = c
+            let j = i + 1
+            while j < n and css.char_at(j) != q [
+                if css.char_at(j) == "\\" [
+                    j = j + 2
+                ] else [
+                    j = j + 1
+                ]
+            ]
+            if j < n [
+                j = j + 1
+            ]
+            if pending_space and out.len() > 0 [
+                let last = out.char_at(out.len() - 1)
+                if last != "{" and last != "}" and last != ";" and last != "," and last != ":" [
+                    out = out + " "
+                ]
+            ]
+            pending_space = false
+            out = out + css.slice(i, j)
+            i = j
+        ] elif c == " " or c == "\n" or c == "\t" or c == "\r" [
+            pending_space = true
+            i = i + 1
+        ] else [
+            let glue = c == "{" or c == "}" or c == ";" or c == ","
+            if pending_space and out.len() > 0 and not glue [
+                let last2 = out.char_at(out.len() - 1)
+                if last2 != "{" and last2 != "}" and last2 != ";" and last2 != "," and last2 != ":" [
+                    out = out + " "
+                ]
+            ]
+            pending_space = false
+            if c == ";" and i + 1 < n [
+                !! `;}` -> `}` (zbedny srednik przed zamknieciem bloku)
+                let k = i + 1
+                while k < n and (css.char_at(k) == " " or css.char_at(k) == "\n" or css.char_at(k) == "\t" or css.char_at(k) == "\r") [
+                    k = k + 1
+                ]
+                if k < n and css.char_at(k) == "}" [
+                    c = ""
+                ]
+            ]
+            out = out + c
+            i = i + 1
+        ]
+    ]
+    end out
+]
+
+!!! JS: ostrozna minifikacja liniowa - bez wiodacych spacji, bez pustych linii i
+!!! linii-komentarzy `// ...`. Gdy w pliku jest backtick (szablony wieloliniowe,
+!!! `native {JavaScript}`), zwraca tekst bez zmian.
+fun site_js_minify(js: Str) -> Str [
+    if str_contains_substring(js.clone(), "`") [
+        end js
+    ]
+    let lines = str_split(js.clone(), "\n")
+    let out: List<Str> = []
+    let i = 0
+    while i < lines.len() [
+        let ln = lines[i].clone()
+        let a = 0
+        while a < ln.len() and (ln.char_at(a) == " " or ln.char_at(a) == "\t" or ln.char_at(a) == "\r") [
+            a = a + 1
+        ]
+        let t = ln.slice(a, ln.len())
+        let skip = t.len() == 0
+        if t.len() >= 2 and t.slice(0, 2) == "//" [
+            skip = true
+        ]
+        if not skip [
+            out.push(t)
+        ]
+        i = i + 1
+    ]
+    end str_join(out, "\n") + "\n"
+]
+
+!!! -- HTML -------------------------------------------------------------
+
+fun site_dev_script() -> Str [
+    end "window.__HKS_DEV = true;\n(function () {\n  function box() {\n    var b = document.getElementById(\"hks-error-overlay\");\n    if (!b) {\n      b = document.createElement(\"div\");\n      b.id = \"hks-error-overlay\";\n      b.style.cssText = \"position:fixed;left:0;right:0;bottom:0;max-height:50%;overflow:auto;z-index:2147483647;background:#300;color:#fdd;font:12px/1.4 monospace;padding:8px 12px;white-space:pre-wrap;border-top:2px solid #f55\";\n      var x = document.createElement(\"button\");\n      x.textContent = \"x\";\n      x.style.cssText = \"float:right\";\n      x.onclick = function () { b.remove(); };\n      b.appendChild(x);\n      (document.body || document.documentElement).appendChild(b);\n    }\n    return b;\n  }\n  window.hks_dev_report = function (e) {\n    var d = document.createElement(\"div\");\n    d.textContent = String(e && e.stack ? e.stack : (e && e.message) || e);\n    box().appendChild(d);\n  };\n  window.addEventListener(\"error\", function (ev) { window.hks_dev_report(ev.error || ev.message); });\n  window.addEventListener(\"unhandledrejection\", function (ev) { window.hks_dev_report(ev.reason); });\n  if (location.protocol !== \"file:\") {\n    var last = null;\n    setInterval(function () {\n      fetch(\"__hks_version?\" + Date.now(), { cache: \"no-store\" })\n        .then(function (r) { return r.ok ? r.text() : null; })\n        .then(function (t) { if (t === null) return; if (last === null) last = t; else if (t !== last) location.reload(); })\n        .catch(function () {});\n    }, 700);\n  }\n})();\n"
+]
+
+fun site_spa404_script(base: Str) -> Str [
+    end str_replace("(function () {\n  var b = \"__BASE__\";\n  var p = location.pathname;\n  if (b && p.indexOf(b) === 0) p = p.slice(b.length);\n  try { sessionStorage.setItem(\"hks_redirect\", (p === \"\" ? \"/\" : p) + location.search); } catch (e) {}\n  location.replace((b || \"\") + \"/\");\n})();\n", "__BASE__", base)
+]
+
+!!! Strona: `css` = zebrane bloki style, `head_extra` = zebrane bloki `head`,
+!!! `lang` = atrybut <html lang> (domyslnie pl), `script_src` = sciezka do JS.
+fun site_page_html(title: Str, css: Str, lang: Str, head_extra: Str, script_src: Str, dev: Bool) -> Str [
+    let l: List<Str> = []
+    let lg = lang.clone()
+    if lg == "" [
+        lg = "pl"
+    ]
+    l.push("<!doctype html>")
+    l.push("<html lang=\"" + lg + "\">")
+    l.push("<head>")
+    l.push("<meta charset=\"utf-8\">")
+    l.push("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">")
+    l.push("<title>" + title + "</title>")
+    if head_extra.len() > 0 [
+        l.push(head_extra)
+    ]
+    l.push("<style>body { font-family: system-ui, sans-serif; margin: 0; line-height: 1.5; } #app { max-width: 52rem; margin: 0 auto; padding: 1rem; }</style>")
+    if css.len() > 0 [
+        l.push("<style>")
+        l.push(str_replace(css, "</style", "<\\/style"))
+        l.push("</style>")
+    ]
+    if dev [
+        l.push("<script>")
+        l.push(site_dev_script())
+        l.push("</script>")
+    ]
+    l.push("</head>")
+    l.push("<body>")
+    l.push("<div id=\"app\"></div>")
+    l.push("<script src=\"" + script_src + "\"></script>")
+    l.push("</body>")
+    l.push("</html>")
+    end str_join(l, "\n") + "\n"
+]
+
+!!! 404.html dla hostingu statycznego (GitHub Pages): zapamietuje zadana sciezke w
+!!! sessionStorage i przekierowuje na index; router (`route_mode("history")`) ja odtwarza.
+fun site_404_html(base: Str) -> Str [
+    let l: List<Str> = []
+    l.push("<!doctype html>")
+    l.push("<html>")
+    l.push("<head>")
+    l.push("<meta charset=\"utf-8\">")
+    l.push("<title>Przekierowanie...</title>")
+    l.push("<script>")
+    l.push(site_spa404_script(base))
+    l.push("</script>")
+    l.push("</head>")
+    l.push("<body></body>")
+    l.push("</html>")
+    end str_join(l, "\n") + "\n"
+]
+
+!!! -- ostrzezenia ----------------------------------------------------------
+
+fun site_known_names() -> List<Str> [
+    end str_split("alert app_root before_route bind_attr bind_checked bind_class bind_list bind_show bind_text bind_value child clear_interval clear_timeout computed dom_append dom_attr dom_checked dom_class dom_class_has dom_class_remove dom_class_toggle dom_clear dom_create dom_delegate dom_focus dom_get dom_get_attr dom_html dom_off dom_on dom_on_event dom_query dom_query_all dom_remove dom_remove_attr dom_set_checked dom_set_value dom_style dom_text dom_value effect effect_stop el event_checked event_code event_current event_key event_mod event_prevent event_stop event_target event_type event_value html_escape http_error_code http_get http_json http_last_body http_last_status http_post http_post_json http_request json_get nav_child nav_link navigate navigate_replace now_ms on_leave page_css page_favicon page_lang page_meta page_og page_theme_color page_title random route route_current route_href route_layout route_mode route_not_found route_outlet route_param route_query route_rest route_set_outlet session_clear session_get session_remove session_set set_interval set_timeout sig_flush sig_get sig_peek sig_push sig_remove_at sig_set sig_update signal sleep storage_available storage_clear storage_get storage_remove storage_set", " ")
+]
+
+fun site_list_has(xs: List<Str>, x: Str) -> Bool [
+    let i = 0
+    while i < xs.len() [
+        if xs[i] == x [
+            end true
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+fun site_min3(a: Int, b: Int, c: Int) -> Int [
+    let m = a
+    if b < m [
+        m = b
+    ]
+    if c < m [
+        m = c
+    ]
+    end m
+]
+
+fun site_levenshtein(a: Str, b: Str) -> Int [
+    let n = a.len()
+    let m = b.len()
+    let prev: List<Int> = []
+    let j = 0
+    while j <= m [
+        prev.push(j)
+        j = j + 1
+    ]
+    let i = 1
+    while i <= n [
+        let cur: List<Int> = []
+        cur.push(i)
+        let k = 1
+        while k <= m [
+            let cost = 1
+            if a.char_at(i - 1) == b.char_at(k - 1) [
+                cost = 0
+            ]
+            cur.push(site_min3(prev[k] + 1, cur[k - 1] + 1, prev[k - 1] + cost))
+            k = k + 1
+        ]
+        prev = cur
+        i = i + 1
+    ]
+    end prev[m]
+]
+
+!!! Najblizsza znana nazwa (odleglosc <= 2) albo "".
+fun site_suggest(name: Str, known: List<Str>) -> Str [
+    let best = ""
+    let best_d = 3
+    let i = 0
+    while i < known.len() [
+        let d = site_levenshtein(name, known[i].clone())
+        if d < best_d [
+            best_d = d
+            best = known[i].clone()
+        ]
+        i = i + 1
+    ]
+    end best
+]
+
+!!! Zrodlo bez komentarzy (wieloliniowych, `!!` do konca linii), blokow style/head;
+!!! napisy zostaja, ale ich zawartosc jest zastepowana spacjami (zeby skan
+!!! identyfikatorow ich nie widzial).
+fun site_code_only(source: Str) -> Str [
+    let src = strip_multiline_comments(source)
+    let out = ""
+    let n = src.len()
+    let i = 0
+    while i < n [
+        let c = src.char_at(i)
+        if c == "\"" or c == "'" [
+            let q = c
+            out = out + " "
+            i = i + 1
+            while i < n and src.char_at(i) != q and src.char_at(i) != "\n" [
+                if src.char_at(i) == "\\" and i + 1 < n [
+                    out = out + "  "
+                    i = i + 2
+                ] else [
+                    out = out + " "
+                    i = i + 1
+                ]
+            ]
+            if i < n and src.char_at(i) == q [
+                out = out + " "
+                i = i + 1
+            ]
+        ] elif c == "!" and i + 1 < n and src.char_at(i + 1) == "!" [
+            while i < n and src.char_at(i) != "\n" [
+                i = i + 1
+            ]
+        ] else [
+            out = out + c
+            i = i + 1
+        ]
+    ]
+    end out
+]
+
+fun site_family_prefix(name: Str) -> Bool [
+    let ps: List<Str> = ["dom_", "page_", "route_", "storage_", "session_", "event_", "sig_", "bind_", "nav_", "html_"]
+    let i = 0
+    while i < ps.len() [
+        let p = ps[i].clone()
+        if name.len() > p.len() and name.slice(0, p.len()) == p [
+            end true
+        ]
+        i = i + 1
+    ]
+    end false
+]
+
+!!! Nazwy funkcji zdefiniowanych w kodzie (`fun nazwa(`).
+fun site_defined_funs(code: Str) -> List<Str> [
+    let out: List<Str> = []
+    let n = code.len()
+    let i = 0
+    while i + 4 < n [
+        if code.slice(i, i + 4) == "fun " and (i == 0 or not site_is_ident_char(code.char_at(i - 1))) [
+            let j = i + 4
+            while j < n and code.char_at(j) == " " [
+                j = j + 1
+            ]
+            let s = j
+            while j < n and site_is_ident_char(code.char_at(j)) [
+                j = j + 1
+            ]
+            if j > s [
+                out.push(code.slice(s, j))
+            ]
+            i = j
+        ] else [
+            i = i + 1
+        ]
+    ]
+    end out
+]
+
+!!! Ostrzezenia o nieznanych nazwach mostka DOM/routera/sygnalow (literowki typu
+!!! `dom_tekst`, ktore inaczej wyszlyby dopiero w przegladarce).
+fun site_name_warnings(source: Str, path: Str) -> List<Str> [
+    let warns: List<Str> = []
+    let known = site_known_names()
+    let code = site_code_only(source)
+    let defined = site_defined_funs(code.clone())
+    let seen: List<Str> = []
+    let n = code.len()
+    let i = 0
+    while i < n [
+        if site_is_ident_char(code.char_at(i)) and (i == 0 or not site_is_ident_char(code.char_at(i - 1))) [
+            let j = i
+            while j < n and site_is_ident_char(code.char_at(j)) [
+                j = j + 1
+            ]
+            let name = code.slice(i, j)
+            let k = j
+            while k < n and code.char_at(k) == " " [
+                k = k + 1
+            ]
+            let called = k < n and code.char_at(k) == "("
+            if called and site_family_prefix(name.clone()) and not site_list_has(known.clone(), name.clone()) and not site_list_has(defined.clone(), name.clone()) and not site_list_has(seen.clone(), name.clone()) [
+                seen.push(name.clone())
+                let sug = site_suggest(name.clone(), known.clone())
+                let msg = path + ": ostrzezenie: nieznana funkcja `" + name + "` (nie ma jej w runtime strony ani w tym programie)"
+                if sug != "" [
+                    msg = msg + " - czy chodzilo o `" + sug + "`?"
+                ]
+                warns.push(msg)
+            ]
+            i = j
+        ] else [
+            i = i + 1
+        ]
+    ]
+    end warns
+]
+
+!!! `Int` w JavaScript to liczba zmiennoprzecinkowa: dokladna tylko do 2^53
+!!! (9007199254740992). Ostrzega o literalach calkowitych wiekszych od tego.
+fun site_big_int_warnings(source: Str, path: Str) -> List<Str> [
+    let warns: List<Str> = []
+    let code = site_code_only(source)
+    let n = code.len()
+    let i = 0
+    while i < n [
+        if site_is_digit(code.char_at(i)) and (i == 0 or not (site_is_ident_char(code.char_at(i - 1)) or code.char_at(i - 1) == ".")) [
+            let j = i
+            while j < n and site_is_digit(code.char_at(j)) [
+                j = j + 1
+            ]
+            let num = code.slice(i, j)
+            let is_float = j < n and code.char_at(j) == "."
+            let big = num.len() > 16 or (num.len() == 16 and num > "9007199254740992")
+            if big and not is_float [
+                warns.push(path + ": ostrzezenie: literal " + num + " jest wiekszy niz 2^53 - w JS `Int` to liczba zmiennoprzecinkowa i straci dokladnosc (wynik moze sie roznic od backendu Rust)")
+            ]
+            i = j
+        ] else [
+            i = i + 1
+        ]
+    ]
+    if str_contains_substring(code.clone(), "now_ms()") and (str_contains_substring(code.clone(), "wrapping_") or str_contains_substring(code.clone(), " << ")) [
+        warns.push(path + ": ostrzezenie: `now_ms()` razem z operacjami bitowymi/`wrapping_*` - w JS `Int` to float (dokladny do 2^53); haszowanie moze dac inny wynik niz w Rust")
+    ]
+    end warns
+]
+
+!!! Klasy uzyte w kodzie (`dom_class(el, "x")`, `dom_attr(el, "class", "a b")`,
+!!! `bind_class(el, "x", s)`, ...) bez odpowiadajacego selektora `.x` w blokach style.
+fun site_used_classes(source: Str) -> List<Str> [
+    let out: List<Str> = []
+    let src = strip_multiline_comments(source)
+    let keys: List<Str> = ["dom_class(", "dom_class_toggle(", "dom_class_remove(", "dom_class_has(", "bind_class("]
+    let n = src.len()
+    let ki = 0
+    while ki < keys.len() [
+        let key = keys[ki].clone()
+        let i = 0
+        while i + key.len() < n [
+            if src.slice(i, i + key.len()) == key [
+                let j = i + key.len()
+                let comma = false
+                let depth = 0
+                while j < n and not comma and src.char_at(j) != "\n" [
+                    let cj = src.char_at(j)
+                    if cj == "(" [
+                        depth = depth + 1
+                    ]
+                    if cj == ")" [
+                        depth = depth - 1
+                    ]
+                    if cj == "," and depth == 0 [
+                        comma = true
+                    ]
+                    j = j + 1
+                ]
+                if comma [
+                    while j < n and src.char_at(j) == " " [
+                        j = j + 1
+                    ]
+                    if j < n and src.char_at(j) == "\"" [
+                        let s = j + 1
+                        let e = s
+                        while e < n and src.char_at(e) != "\"" and src.char_at(e) != "\n" [
+                            e = e + 1
+                        ]
+                        out.push(src.slice(s, e))
+                    ]
+                ]
+                i = i + key.len()
+            ] else [
+                i = i + 1
+            ]
+        ]
+        ki = ki + 1
+    ]
+    let m = 0
+    while m + 8 < n [
+        if src.slice(m, m + 8) == "\"class\"," [
+            let j2 = m + 8
+            while j2 < n and src.char_at(j2) == " " [
+                j2 = j2 + 1
+            ]
+            if j2 < n and src.char_at(j2) == "\"" [
+                let s2 = j2 + 1
+                let e2 = s2
+                while e2 < n and src.char_at(e2) != "\"" and src.char_at(e2) != "\n" [
+                    e2 = e2 + 1
+                ]
+                let parts = str_split(src.slice(s2, e2), " ")
+                let pi = 0
+                while pi < parts.len() [
+                    if parts[pi] != "" [
+                        out.push(parts[pi].clone())
+                    ]
+                    pi = pi + 1
+                ]
+            ]
+            m = m + 8
+        ] else [
+            m = m + 1
+        ]
+    ]
+    end out
+]
+
+fun site_defined_classes(css: Str) -> List<Str> [
+    let out: List<Str> = []
+    let n = css.len()
+    let i = 0
+    while i < n [
+        let c = css.char_at(i)
+        if c == "/" and i + 1 < n and css.char_at(i + 1) == "*" [
+            i = i + 2
+            while i + 1 < n and not (css.char_at(i) == "*" and css.char_at(i + 1) == "/") [
+                i = i + 1
+            ]
+            i = i + 2
+        ] elif c == "\"" or c == "'" [
+            let q = c
+            i = i + 1
+            while i < n and css.char_at(i) != q [
+                i = i + 1
+            ]
+            i = i + 1
+        ] elif c == "." and i + 1 < n and not site_is_digit(css.char_at(i + 1)) [
+            let j = i + 1
+            while j < n and (site_is_ident_char(css.char_at(j)) or css.char_at(j) == "-") [
+                j = j + 1
+            ]
+            if j > i + 1 [
+                out.push(css.slice(i + 1, j))
+            ]
+            i = j
+        ] else [
+            i = i + 1
+        ]
+    ]
+    end out
+]
+
+fun site_class_warnings(source: Str, css: Str, path: Str) -> List<Str> [
+    let warns: List<Str> = []
+    if css.len() == 0 [
+        end warns
+    ]
+    let used = site_used_classes(source)
+    let defined = site_defined_classes(css)
+    let seen: List<Str> = []
+    let i = 0
+    while i < used.len() [
+        let u = used[i].clone()
+        if u != "active" and u != "nav-link" and not site_list_has(defined.clone(), u.clone()) and not site_list_has(seen.clone(), u.clone()) [
+            seen.push(u.clone())
+            warns.push(path + ": ostrzezenie: klasa `" + u + "` jest uzyta w kodzie, ale nie ma selektora `." + u + "` w blokach style (jesli styl pochodzi z zewnetrznego CSS - zignoruj)")
+        ]
+        i = i + 1
+    ]
+    end warns
+]
+
+!!! -- pliki ------------------------------------------------------------
+
+!!! Kopiuje drzewo katalogow `src` do `dest` (rekurencyjnie); zwraca liczbe plikow.
+fun site_copy_tree(src: Str, dest: Str) -> Int [
+    let count = 0
+    match list_dir(src.clone()) [
+        Err(e) -> [
+            if copy_file_ok(src.clone(), dest.clone()) [
+                end 1
+            ]
+            end 0
+        ]
+        Ok(names) -> [
+            create_dir_ok(dest.clone())
+            let i = 0
+            while i < names.len() [
+                let nm = names[i].clone()
+                if nm != "" and nm.char_at(0) != "." [
+                    count = count + site_copy_tree(src.clone() + "/" + nm.clone(), dest.clone() + "/" + nm.clone())
+                ]
+                i = i + 1
+            ]
+        ]
+    ]
+    end count
+]
