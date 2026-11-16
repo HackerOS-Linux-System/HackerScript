@@ -43,10 +43,10 @@ można dopisać jawnie). Bez `-o` wynik trafia do `<nazwa>-site/`.
 | `dom_text(el, t)`, `dom_html(el, html)` | zawartość |
 | `dom_attr(el, nazwa, wartosc)`, `dom_style(el, wlasciwosc, wartosc)`, `dom_class(el, klasa)` | atrybuty i style |
 | `dom_value(el)`, `dom_set_value(el, v)` | pola formularzy |
-| `dom_on(el, zdarzenie, funkcja)` | obsługa zdarzeń — funkcję podaje się **po nazwie** (może być `async`) |
+| `dom_on(el, zdarzenie, funkcja)` / `dom_on_event(...)` | obsługa zdarzeń — funkcję podaje się **po nazwie** (może być `async`); handler dostaje zdarzenie jako argument (`fun f(e)`), a `fun f()` bez argumentu nadal działa. Błędy w handlerze trafiają do `console.error` (i do nakładki w trybie `--dev`) |
 | `page_title(t)`, `page_css(css)` | tytuł i dodatkowy CSS |
-| `http_get(url)`, `http_post(url, body)` | `async`, zwracają `Result<Str, Str>` (użyj `await`) |
-| `storage_get(k)` → `Option<Str>`, `storage_set(k, v)` | `localStorage` |
+| `http_get(url)`, `http_post(url, body)` | `async`, zwracają `Result<Str, Str>` (użyj `await`); błąd statusu to `"HTTP 404"` (patrz niżej: `http_request`, `http_error_code`) |
+| `storage_get(k)` → `Option<Str>`, `storage_set(k, v)` | `localStorage` — bezpieczne: gdy przeglądarka go blokuje (tryb prywatny, `file://`), dane trzymane są w pamięci strony |
 | `set_timeout(f, ms)`, `set_interval(f, ms)`, `alert(t)`, `random()`, `now_ms()`, `sleep(ms)` | pomocnicze |
 
 Reszta Web API jest dostępna wprost, bo nieznane nazwy przechodzą przez
@@ -119,11 +119,96 @@ Zasady:
 
 Dynamicznie (w czasie działania) nadal możesz użyć `dom_style`, `dom_class`, `page_css(css)`.
 
+## Rozszerzenia mostka (ta runda)
+
+**Zdarzenia.** `dom_on_event(el, "keydown", on_key)` z `fun on_key(e)`; pomocnicze:
+`event_key(e)`, `event_code(e)`, `event_type(e)`, `event_prevent(e)` (= `preventDefault`), `event_stop(e)`,
+`event_target(e)`, `event_current(e)`, `event_value(e)`, `event_checked(e)`, `event_mod(e, "ctrl"|"shift"|"alt"|"meta")`.
+`dom_off(el, zdarzenie, funkcja)` zdejmuje handler (bez `funkcja` — wszystkie dla tego zdarzenia).
+`dom_delegate(rodzic, selektor, zdarzenie, f)` — jeden handler dla wielu dzieci; `f(e, element)`.
+
+**DOM.** `dom_class_remove`, `dom_class_toggle(el, k[, wymus])`, `dom_class_has`, `dom_remove(el)`,
+`dom_get_attr(el, k)` → `Option<Str>`, `dom_remove_attr`, `dom_query_all(sel)`, `dom_focus`,
+`dom_checked`/`dom_set_checked`, `clear_timeout(id)`, `clear_interval(id)`,
+`html_escape(s)` — **używaj przed `dom_html`** z danymi od użytkownika (XSS).
+`dom_clear(el)` czyści przez `textContent` (usuwa wszystkie dzieci i ich handlery razem z elementami).
+
+**Nagłówek strony w czasie działania.** `page_lang`, `page_meta(nazwa, treść)`, `page_og(właściwość, treść)`,
+`page_theme_color`, `page_favicon`. Dla SEO/podglądów linków używaj wersji statycznej (blok `head`, niżej) —
+roboty nie wykonują JavaScriptu.
+
+**Sieć.** `http_request(metoda, url, naglowki, body)` (`naglowki` to `dict()`), `http_post_json(url, tekst)`,
+`http_json(url)` (sprawdza, że odpowiedź to poprawny JSON), `json_get(tekst, "a.b.0")` → `Option<Str>`,
+`http_last_status()`, `http_last_body()`, `http_error_code(błąd)` → `Int` (np. 404; 0 = błąd sieci).
+Błąd statusu ma stały format `"HTTP <kod>"`.
+
+**Storage.** `storage_remove`, `storage_clear`, `storage_available()`; sesyjne: `session_get/set/remove/clear`.
+
+**Router.** `route_query("klucz")` → `Option<Str>` (z `?klucz=wartość`), trasa z `*` na końcu (`/docs/*`) i `route_rest()`,
+`before_route(f)` (`f(nowa, stara)` zwraca `false`, by anulować — adres wraca do poprzedniego), `on_leave(f)`,
+zagnieżdżone trasy: `route_layout("/admin", f)` — `f` rysuje ramkę w `route_outlet()` i wywołuje
+`route_set_outlet(element)`, by wskazać, gdzie trafia treść podtrasy (układy od zewnętrznego do wewnętrznego).
+`nav_link("/sciezka", "Tekst")` / `nav_child(rodzic, ...)` — odnośnik z klasą `nav-link`, który dostaje klasę
+`active` i `aria-current="page"` dla bieżącej trasy. `navigate_replace(sciezka)`.
+**Tryb `history`:** `route_mode("history")` na początku `main()` — adresy bez `#` (`pushState`). Na `file://`
+automatycznie wraca do trybu `#`. Hosting statyczny potrzebuje przekierowania, więc kompilator sam zapisuje
+`404.html` (wariant GitHub Pages); jeśli strona stoi w podkatalogu domeny, podaj `--base /nazwa-repo`.
+
+**Sygnały (reaktywność).**
+```
+let licznik = signal(0)
+fun main() [
+    let p = child(app_root(), "p", "")
+    bind_text(p, licznik)               !! tekst aktualizuje się sam
+    let b = child(app_root(), "button", "+1")
+    dom_on(b, "click", plus)
+]
+fun plus() [ sig_set(licznik, sig_get(licznik) + 1) ]
+```
+`signal(v)`, `sig_get(s)` (w `effect` zapisuje zależność), `sig_peek(s)`, `sig_set(s, v)`, `sig_update(s, f)`,
+`sig_push(s, x)`, `sig_remove_at(s, i)`, `effect(f)` (uruchamia od razu i po każdej zmianie odczytanych sygnałów),
+`effect_stop(e)`, `computed(f)`, `sig_flush()`; powiązania: `bind_text`, `bind_attr(el, nazwa, s)`,
+`bind_class(el, klasa, s)`, `bind_show(el, s)`, `bind_value(el, s)` (dwukierunkowo), `bind_checked`,
+`bind_list(rodzic, s, render)` gdzie `render(element, indeks)` zwraca węzeł (renderuje listę od nowa przy zmianie — bez kluczy).
+Aktualizacje są łączone (batch) i wykonują się w mikrozadaniu; `sig_flush()` wymusza natychmiast. Zależności
+po `await` wewnątrz `effect` nie są śledzone. Cykl (efekt zmieniający własne zależności) jest przerywany po 1000
+przebiegach z komunikatem. **Komponent** to zwykła funkcja zwracająca element: `fun karta(tytul) [ let k = el("div", ""); ...; end k ]`.
+
+## Budowanie strony: `hackerc website`
+
+```
+hackerc website a.hcs [b.hcs ...] [-o katalog] [--minify] [--dev] [--watch] [--base /sciezka] [--assets katalog]
+```
+- **Wiele stron:** każde wejście → `<nazwa>.html` + `<nazwa>.js`; wejście o nazwie `index` (albo pierwsze) → `index.html` + `app.js`.
+- **`use <site:lang=en>`** — atrybut `<html lang>` (domyślnie `pl`).
+- **Blok `head { ... }`** (na początku linii, jak `style`): surowy HTML wstawiany do `<head>` — `<meta name="description" ...>`,
+  `<link rel="icon" ...>`, `og:*`, `theme-color`. Klamry w środku muszą być zbalansowane.
+- **CSS zakresowy `style(.karta) { ... }`:** każdy selektor dostaje przedrostek `.karta ` (`:root`/`body`/`&` oznaczają sam
+  element zakresu; reguły w `@media`/`@supports` też; `@keyframes`/`@font-face` bez zmian).
+- **Assety:** katalog `public/` obok pliku wejściowego jest kopiowany do korzenia wyniku, `assets/` → `assets/`, `--assets DIR` → `DIR/`.
+- **`--minify`:** CSS (bez komentarzy i zbędnych spacji; napisy nietknięte) oraz JS (tylko usunięcie wcięć, pustych linii i
+  linii-komentarzy; pliki z backtickiem/`native` zostają bez zmian). To NIE jest minifikator z przemianowywaniem nazw.
+- **`--dev`:** nakładka z błędami na stronie (wyjątki z handlerów i `unhandledrejection`), oraz plik `__hks_version` do
+  automatycznego przeładowania. **`--watch`:** przebudowuje po zmianie źródeł (odpytywanie co 0,5 s; nie obserwuje assetów)
+  i włącza `--dev`; serwer uruchom osobno: `python3 -m http.server -d <katalog>`.
+- **Ostrzeżenia przy budowaniu:** nieznana funkcja o prefiksie mostka (`dom_tekst` → „czy chodziło o `dom_text`?”),
+  literały całkowite > 2^53 (w JS `Int` to `float`), klasy użyte w kodzie bez selektora w blokach `style`.
+
+`hackerc fmt` zachowuje bloki `style`/`head` dokładnie tak, jak je napisano (z nagłówkiem `style(.x)`), ale zbiera je
+na końcu pliku.
+
 ## Weryfikacja
 
 Blok `style { }` sprawdzono na przykładzie z `docs/website-style/` (CSS ze stringami i komentarzami
 zawierającymi klamry, `@media`, kilka bloków, `fmt` idempotentny) oraz na prawdziwej stronie
 (porównanie wstawionego CSS z oryginalnym arkuszem). Nie testowano w prawdziwej przeglądarce.
+
+**Ta runda:** runtime (zdarzenia, DOM, sieć, storage, sygnały, router w trybach `#` i `history`) ma 17 testów w jsdom
+(`tests/website/run.sh`; wyciągają kod bezpośrednio z `hackerc/cmd/js_runtime.hcs`). Logikę `css_scope`/minifikacji CSS
+sprawdzono w prototypach Pythona, a pliki `.hcs` — starym `hackerc 0.5 check` (składnia/typy). **Nie** uruchomiono
+samego kompilatora 0.6 (brak toolchaina Rust i binarki 0.6), więc `lexer.hcs`, `main.hcs`, `website_build.hcs` oraz natywne
+fragmenty std (`run_capture_timeout`, `hkdf_*`, `term_read_key`) wymagają pełnej weryfikacji `bit build` + `verify.sh`.
+Nie testowano w prawdziwej przeglądarce (Playwright).
 
 Przykładowa strona (struct + `impl`, lista, zmienne globalne, zdarzenia
 `click`, pole `input`, `async fun`) została uruchomiona w **jsdom**
@@ -134,10 +219,8 @@ przeglądarce ani na urządzeniach mobilnych.
 
 ## Ograniczenia
 
-- tylko `index.html` + `app.js` (routing tylko po `#hash`, patrz wyżej; brak SSR); jedna strona na plik wejściowy
-  (wiele podstron = wiele wejść `hackerc build`, każde do własnego katalogu `-o`);
-  styl przez blok `style { ... }`, `page_css(...)`/`dom_style(...)` albo własny `<link>`
-  dopisany do wygenerowanego `index.html`
+- brak SSR; jedna strona na plik wejściowy (wiele podstron = wiele plików wejściowych w jednym wywołaniu `hackerc website`);
+  `bind_list` renderuje listę od nowa (bez kluczy); `--minify` JS jest tylko liniowy
 - `native {...}` i `get <npm:...>` niedostępne w trybie strony
 - ograniczenia backendu JavaScript z `docs/JAVASCRIPT.md` (m.in.
   `Int` = liczba zmiennoprzecinkowa, kanały wymagają `await`)
