@@ -178,25 +178,30 @@ fun trim_str(s: Str) -> Str [
 !!! `is_expr_end_char`/cofania sie przez biale znaki (uzywanej w
 !!! poprzedniej wersji tej funkcji, dla starej skladni `!=`/`=!`).
 fun strip_multiline_comments(source: Str) -> Str [
-    end scan_comments_and_styles(source, false)
+    end scan_comments_and_styles(source, 0)
 ]
 
-!!! ROZBUDOWA 0.6 - bloki `style { ... }` w `use <mode:website>` (docs/WEBSITE.md).
+!!! ROZBUDOWA 0.6 - bloki `style { ... }` i `head { ... }` w `use <mode:website>`
+!!! (docs/WEBSITE.md).
 !!!
-!!! `style {` na POCZATKU linii otwiera blok z surowym CSS-em, zamkniety
-!!! pasujacym `}` (z uwzglednieniem stringow CSS i komentarzy `/* */`).
+!!! `style {` / `head {` na POCZATKU linii otwiera blok z surowa trescia (CSS albo
+!!! HTML do <head>), zamkniety pasujacym `}` (z uwzglednieniem stringow i
+!!! komentarzy `/* */`). `style(.klasa) {` to CSS ZAKRESOWY: kazdy selektor dostaje
+!!! przedrostek `.klasa ` (patrz `css_scope`).
 !!! Dla lexera/parsera blok jest "niewidzialny" - zamieniany na te sama
 !!! liczbe `\n`, jak komentarz `!> <!` - wiec `check`/`build`/`lsp` w ogole
-!!! go nie widza. Tresc blokow zbiera `collect_style_css` (generator strony).
+!!! go nie widza. Tresc blokow zbieraja `collect_style_css` / `collect_head_html`.
 !!!
 !!! Zwraca indeks pierwszego znaku PO `{` albo 0, gdy w `i` nie zaczyna sie
-!!! blok `style {` (przed `style` w linii moga byc tylko biale znaki).
-fun style_block_open(source: Str, i: Int) -> Int [
+!!! blok `kw {` (przed `kw` w linii moga byc tylko biale znaki). Dla `style`
+!!! dozwolony jest zakres w nawiasach: `style(.karta) {`.
+fun block_open_kw(source: Str, i: Int, kw: Str) -> Int [
     let n = source.len()
-    if i + 6 > n [
+    let kl = kw.len()
+    if i + kl + 1 > n [
         end 0
     ]
-    if source.slice(i, i + 5) != "style" [
+    if source.slice(i, i + kl) != kw [
         end 0
     ]
     let ok = true
@@ -215,14 +220,41 @@ fun style_block_open(source: Str, i: Int) -> Int [
     if not ok [
         end 0
     ]
-    let j = i + 5
+    let j = i + kl
     while j < n and (source.char_at(j) == " " or source.char_at(j) == "\t") [
         j = j + 1
+    ]
+    if kw == "style" and j < n and source.char_at(j) == "(" [
+        let depth = 0
+        let closed = false
+        while j < n and not closed and source.char_at(j) != "\n" [
+            let pc2 = source.char_at(j)
+            if pc2 == "(" [
+                depth = depth + 1
+            ]
+            if pc2 == ")" [
+                depth = depth - 1
+                if depth == 0 [
+                    closed = true
+                ]
+            ]
+            j = j + 1
+        ]
+        if not closed [
+            end 0
+        ]
+        while j < n and (source.char_at(j) == " " or source.char_at(j) == "\t") [
+            j = j + 1
+        ]
     ]
     if j < n and source.char_at(j) == "{" [
         end j + 1
     ]
     end 0
+]
+
+fun style_block_open(source: Str, i: Int) -> Int [
+    end block_open_kw(source, i, "style")
 ]
 
 !!! `start` = indeks pierwszego znaku po `{`. Zwraca indeks ZA pasujacym `}`
@@ -269,17 +301,158 @@ fun style_block_close(source: Str, start: Int) -> Int [
     end j
 ]
 
-!!! Tresc wszystkich blokow `style { ... }` zrodla (bez zewnetrznych `{ }`),
-!!! rozdzielona pustym wierszem. Pusty napis = brak blokow.
-fun collect_style_css(source: Str) -> Str [
-    end scan_comments_and_styles(source, true)
+!!! Obciecie bialych znakow z obu stron (lexer nie importuje std:string).
+fun css_trim(s: Str) -> Str [
+    let a = 0
+    let b = s.len()
+    while a < b and (s.char_at(a) == " " or s.char_at(a) == "\n" or s.char_at(a) == "\t" or s.char_at(a) == "\r") [
+        a = a + 1
+    ]
+    while b > a and (s.char_at(b - 1) == " " or s.char_at(b - 1) == "\n" or s.char_at(b - 1) == "\t" or s.char_at(b - 1) == "\r") [
+        b = b - 1
+    ]
+    end s.slice(a, b)
 ]
 
-!!! Wspolna petla: `want_css == false` -> zrodlo bez komentarzy wieloliniowych
-!!! i blokow `style` (to widzi lexer); `want_css == true` -> zebrany CSS.
-fun scan_comments_and_styles(source: Str, want_css: Bool) -> Str [
+!!! Dodaje `scope` jako przedrostek KAZDEGO selektora z listy `a, b > c`.
+!!! `:root`, `html`, `body` i `&` oznaczaja sam element zakresu.
+fun css_scope_selectors(sel: Str, scope: Str) -> Str [
+    let out = ""
+    let cur = ""
+    let depth = 0
+    let i = 0
+    let n = sel.len()
+    while i <= n [
+        let at_end = i == n
+        let c = ""
+        if not at_end [
+            c = sel.char_at(i)
+        ]
+        if c == "(" or c == "[" [
+            depth = depth + 1
+        ]
+        if c == ")" or c == "]" [
+            depth = depth - 1
+        ]
+        if at_end or (c == "," and depth == 0) [
+            let part = css_trim(cur.clone())
+            if part.len() > 0 [
+                let scoped = scope + " " + part
+                if part == ":root" or part == "html" or part == "body" [
+                    scoped = scope
+                ] elif part.char_at(0) == "&" [
+                    scoped = scope + part.slice(1, part.len())
+                ] elif part.len() > 5 and part.slice(0, 5) == ":root" [
+                    scoped = scope + part.slice(5, part.len())
+                ]
+                if out != "" [
+                    out = out + ", "
+                ]
+                out = out + scoped
+            ]
+            cur = ""
+        ] else [
+            cur = cur + c
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+!!! CSS zakresowy: przedrostek `scope` przed selektorami regul; reguly wewnatrz
+!!! @media/@supports/@container/@layer tez; @keyframes, @font-face, @import itp.
+!!! zostaja bez zmian. Tresc deklaracji kopiowana doslownie.
+fun css_scope(css: Str, scope: Str) -> Str [
+    let out = ""
+    let n = css.len()
+    let i = 0
+    while i < n [
+        let sel_start = i
+        let found_brace = false
+        let found_semi = false
+        while i < n and not found_brace and not found_semi [
+            let c = css.char_at(i)
+            if c == "/" and i + 1 < n and css.char_at(i + 1) == "*" [
+                i = i + 2
+                while i + 1 < n and not (css.char_at(i) == "*" and css.char_at(i + 1) == "/") [
+                    i = i + 1
+                ]
+                i = i + 2
+            ] elif c == "{" [
+                found_brace = true
+            ] elif c == ";" [
+                found_semi = true
+            ] else [
+                i = i + 1
+            ]
+        ]
+        if i > n [
+            i = n
+        ]
+        if found_semi [
+            out = out + css.slice(sel_start, i + 1)
+            i = i + 1
+        ] elif found_brace [
+            let header = css_trim(css.slice(sel_start, i))
+            let body_start = i + 1
+            let body_end = style_block_close(css, body_start)
+            if body_end == 0 [
+                out = out + css.slice(sel_start, n)
+                i = n
+            ] else [
+                let body = css.slice(body_start, body_end - 1)
+                if header.len() > 0 and header.char_at(0) == "@" [
+                    let nested = header.len() > 6 and (header.slice(0, 6) == "@media" or header.slice(0, 6) == "@layer")
+                    if header.len() > 9 and header.slice(0, 9) == "@supports" [
+                        nested = true
+                    ]
+                    if header.len() > 10 and header.slice(0, 10) == "@container" [
+                        nested = true
+                    ]
+                    if nested [
+                        out = out + header + " {" + css_scope(body, scope) + "}"
+                    ] else [
+                        out = out + header + " {" + body + "}"
+                    ]
+                ] else [
+                    out = out + css_scope_selectors(header, scope) + " {" + body + "}"
+                ]
+                i = body_end
+            ]
+        ] else [
+            out = out + css.slice(sel_start, n)
+            i = n
+        ]
+    ]
+    end out
+]
+
+!!! Tresc wszystkich blokow `style { ... }` zrodla (bez zewnetrznych `{ }`),
+!!! rozdzielona pustym wierszem; bloki `style(.klasa)` sa juz przepisane przez
+!!! `css_scope`. Pusty napis = brak blokow.
+fun collect_style_css(source: Str) -> Str [
+    end scan_comments_and_styles(source, 1)
+]
+
+!!! Tresc wszystkich blokow `head { ... }` (HTML wstawiany do <head>).
+fun collect_head_html(source: Str) -> Str [
+    end scan_comments_and_styles(source, 2)
+]
+
+!!! Bloki `style`/`head` dokladnie tak, jak zapisano w zrodle (z naglowkiem
+!!! `style(.x) {`), po jednym na akapit - uzywa tego `hackerc fmt`.
+fun collect_site_blocks_raw(source: Str) -> Str [
+    end scan_comments_and_styles(source, 3)
+]
+
+!!! Wspolna petla. `mode`: 0 -> zrodlo bez komentarzy wieloliniowych i blokow
+!!! `style`/`head` (to widzi lexer); 1 -> zebrany CSS; 2 -> zebrany HTML z
+!!! `head`; 3 -> bloki w oryginalnej postaci (dla `fmt`).
+fun scan_comments_and_styles(source: Str, mode: Int) -> Str [
     let out = ""
     let css = ""
+    let head_html = ""
+    let raw_blocks = ""
     let i = 0
     let n = source.len()
     while i < n [
@@ -288,22 +461,43 @@ fun scan_comments_and_styles(source: Str, want_css: Bool) -> Str [
         let is_open = c == "!" and i + 1 < n and source.char_at(i + 1) == ">"
         let style_open = 0
         let style_end = 0
-        !! 0.6 (wydajnosc) - `style_block_open` materializuje caly zrodlowy Vec<char> przy
-        !! KAZDYM wywolaniu; wolamy ja tylko przy faktycznym slowie `style`.
+        let kw = "style"
+        !! 0.6 (wydajnosc) - `block_open_kw` materializuje caly zrodlowy Vec<char> przy
+        !! KAZDYM wywolaniu; wolamy ja tylko przy faktycznym slowie `style` / `head`.
         if c == "s" and i + 5 < n and source.slice(i, i + 5) == "style" [
-            style_open = style_block_open(source, i)
-            if style_open > 0 [
-                style_end = style_block_close(source, style_open)
-                if style_end == 0 [
-                    style_open = 0
-                ]
+            style_open = block_open_kw(source, i, "style")
+        ] elif c == "h" and i + 4 < n and source.slice(i, i + 4) == "head" [
+            kw = "head"
+            style_open = block_open_kw(source, i, "head")
+        ]
+        if style_open > 0 [
+            style_end = style_block_close(source, style_open)
+            if style_end == 0 [
+                style_open = 0
             ]
         ]
         if style_open > 0 [
-            if css != "" [
-                css = css + "\n"
+            let body = source.slice(style_open, style_end - 1)
+            if kw == "head" [
+                if head_html != "" [
+                    head_html = head_html + "\n"
+                ]
+                head_html = head_html + body
+            ] else [
+                let header = css_trim(source.slice(i + 5, style_open - 1))
+                let piece = body
+                if header.len() > 2 and header.char_at(0) == "(" [
+                    piece = css_scope(body, css_trim(header.slice(1, header.len() - 1)))
+                ]
+                if css != "" [
+                    css = css + "\n"
+                ]
+                css = css + piece
             ]
-            css = css + source.slice(style_open, style_end - 1)
+            if raw_blocks != "" [
+                raw_blocks = raw_blocks + "\n"
+            ]
+            raw_blocks = raw_blocks + source.slice(i, style_end)
             let sblock = source.slice(i, style_end)
             let sk = 0
             while sk < sblock.len() [
@@ -359,8 +553,14 @@ fun scan_comments_and_styles(source: Str, want_css: Bool) -> Str [
             i = i + 1
         ]
     ]
-    if want_css [
+    if mode == 1 [
         end css
+    ]
+    if mode == 2 [
+        end head_html
+    ]
+    if mode == 3 [
+        end raw_blocks
     ]
     end out
 ]
