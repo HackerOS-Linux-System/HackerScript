@@ -11,6 +11,7 @@ include <ffi>
 include <lsp>
 include <kotlin_backend>
 include <javascript_backend>
+include <website_build>
 get <std:io> import <file_readable>
 get <std:fs> import <create_dir_ok>
 get <std:string> import <str_ends_with::str_join::str_replace>
@@ -184,7 +185,8 @@ struct JsLoader [
     errors: List<Str>,
     css: List<Str>,
     native_blocks: List<Str>,
-    native_engines: List<Str>
+    native_engines: List<Str>,
+    head: List<Str>
 ]
 
 struct JsParse [
@@ -291,6 +293,10 @@ impl JsLoader [
                 if own_css.len() > 0 [
                     self.css.push(own_css)
                 ]
+                let own_head = collect_head_html(source.clone())
+                if own_head.len() > 0 [
+                    self.head.push(own_head)
+                ]
                 end out
             ]
         ]
@@ -366,14 +372,17 @@ fun site_index_html(title: Str, css: Str) -> Str [
     end str_join(l, "\n") + "\n"
 ]
 
-!!! `hackerc js <plik.hcs> [-o wynik.js]` (lang:javascript) oraz
-!!! `hackerc website <plik.hcs> [-o katalog]` (mode:website).
+!!! `hackerc js <plik.hcs> [-o wynik.js]` (lang:javascript). Tryb strony
+!!! (`site == true`) przejmuje `cmd_site` nizej.
 fun cmd_js(src_path: Str, out_path: Str, site: Bool) -> Int [
+    if site [
+        end cmd_site([src_path.clone()], out_path.clone(), site_opts_default())
+    ]
     if not file_readable(src_path.clone()) [
         elog(c_red("hackerc:") + " nie znaleziono pliku " + src_path)
         end 1
     ]
-    let loader = JsLoader([], [], [], [], [])
+    let loader = JsLoader([], [], [], [], [], [])
     let body = loader.load(src_path.clone())
     if loader.errors.len() > 0 [
         log(str_join(loader.errors.clone(), "\n"))
@@ -401,7 +410,7 @@ fun cmd_js(src_path: Str, out_path: Str, site: Bool) -> Int [
                 if dk == "os" and dval != "linux" and dval != "windows" and dval != "macos" and dval != "ios" and dval != "android" [
                     elog(c_red("hackerc:") + " nieznana wartosc `use <os:" + dval + ">` - znane: linux, windows, macos, ios, android")
                 ]
-                if dk != "mode" and dk != "lang" and dk != "crosscompile" and dk != "arc" and dk != "os" [
+                if dk != "mode" and dk != "lang" and dk != "crosscompile" and dk != "arc" and dk != "os" and dk != "site" [
                     elog(c_red("hackerc:") + " nieznana dyrektywa `use <" + dk + ">`")
                 ]
             ]
@@ -412,10 +421,10 @@ fun cmd_js(src_path: Str, out_path: Str, site: Bool) -> Int [
         dw = dw + 1
     ]
     let site_css = str_join(loader.css.clone(), "\n")
-    if not site and site_css.len() > 0 [
+    if site_css.len() > 0 [
         elog(c_bold_yellow("hackerc:") + " bloki `style { ... }` dzialaja tylko w `use <mode:website>` - pominieto")
     ]
-    match transpile_js_native(Program(body, [], [], []), site, loader.native_blocks.clone(), loader.native_engines.clone()) [
+    match transpile_js_native(Program(body, [], [], []), false, loader.native_blocks.clone(), loader.native_engines.clone()) [
         Err(msgs) -> [
             elog(c_red("hackerc js:") + " " + src_path)
             elog(msgs)
@@ -423,52 +432,302 @@ fun cmd_js(src_path: Str, out_path: Str, site: Bool) -> Int [
         ]
         Ok(js) -> [
             let stem = js_stem(src_path.clone())
-            if not site [
-                let dest = out_path.clone()
-                if dest == "" [
-                    dest = js_dirname(src_path.clone()) + "/" + stem + ".js"
+            let dest = out_path.clone()
+            if dest == "" [
+                dest = js_dirname(src_path.clone()) + "/" + stem + ".js"
+            ]
+            match write_file(dest.clone(), js) [
+                Ok(_w) -> [
+                    log(c_bold_green("hackerc js:") + " " + dest + "  (uruchom: node " + dest + ")")
+                    end 0
                 ]
-                match write_file(dest.clone(), js) [
-                    Ok(_w) -> [
-                        log(c_bold_green("hackerc js:") + " " + dest + "  (uruchom: node " + dest + ")")
-                        end 0
+                Err(e) -> [
+                    elog(c_red("hackerc:") + " " + dest + ": " + e)
+                    end 1
+                ]
+            ]
+        ]
+    ]
+]
+
+!!! Nazwy plikow wyjsciowych strony dla wejscia nr `idx` z `srcs`: `index.html` +
+!!! `app.js` dla wejscia o nazwie `index` (albo pierwszego, gdy zadne tak sie nie
+!!! nazywa), inaczej `<nazwa>.html` + `<nazwa>.js`. Zwraca [html, js].
+fun site_out_names(srcs: List<Str>, idx: Int) -> List<Str> [
+    let stem = js_stem(srcs[idx].clone())
+    let has_index = false
+    let k = 0
+    while k < srcs.len() [
+        if js_stem(srcs[k].clone()) == "index" [
+            has_index = true
+        ]
+        k = k + 1
+    ]
+    let is_index = stem == "index" or (not has_index and idx == 0)
+    if is_index [
+        end ["index.html", "app.js"]
+    ]
+    end [stem + ".html", stem + ".js"]
+]
+
+fun site_trim_base(b: Str) -> Str [
+    let out = b.clone()
+    while out.len() > 0 and out.char_at(out.len() - 1) == "/" [
+        out = out.slice(0, out.len() - 1)
+    ]
+    end out
+]
+
+!!! Buduje jedna strone: `src_path` -> `dir/<html_name>` + `dir/<js_name>`.
+!!! Zwraca 0 albo 1 (blad). `js_out` dostaje wygenerowany JS (do wykrycia trybu history).
+fun site_build_one(src_path: Str, dir: Str, html_name: Str, js_name: Str, opts: SiteOpts) -> Int [
+    if not file_readable(src_path.clone()) [
+        elog(c_red("hackerc:") + " nie znaleziono pliku " + src_path)
+        end 1
+    ]
+    let loader = JsLoader([], [], [], [], [], [])
+    let body = loader.load(src_path.clone())
+    if loader.errors.len() > 0 [
+        log(str_join(loader.errors.clone(), "\n"))
+        end 1
+    ]
+    let lang = ""
+    let dw = 0
+    while dw < body.len() [
+        match body[dw].clone() [
+            UseStmt(dk, dv) -> [
+                let dval = ""
+                match dv.clone() [
+                    Some(x) -> [
+                        dval = x
                     ]
-                    Err(e) -> [
-                        elog(c_red("hackerc:") + " " + dest + ": " + e)
+                    None -> [
+                        let unused = 0
+                    ]
+                ]
+                if dk == "mode" and dval != "website" [
+                    elog(c_red("hackerc:") + " nieznana wartosc `use <mode:" + dval + ">` - znane: website")
+                ]
+                if dk == "lang" and dval != "kotlin" and dval != "javascript" and dval != "js" [
+                    elog(c_red("hackerc:") + " nieznana wartosc `use <lang:" + dval + ">` - znane: kotlin, javascript")
+                ]
+                if dk == "os" and dval != "linux" and dval != "windows" and dval != "macos" and dval != "ios" and dval != "android" [
+                    elog(c_red("hackerc:") + " nieznana wartosc `use <os:" + dval + ">` - znane: linux, windows, macos, ios, android")
+                ]
+                if dk == "site" [
+                    if dval.len() > 5 and dval.slice(0, 5) == "lang=" [
+                        lang = dval.slice(5, dval.len())
+                    ] else [
+                        elog(c_red("hackerc:") + " nieznana wartosc `use <site:" + dval + ">` - znane: lang=<kod>, np. `use <site:lang=en>`")
+                    ]
+                ]
+                if dk != "mode" and dk != "lang" and dk != "crosscompile" and dk != "arc" and dk != "os" and dk != "site" [
+                    elog(c_red("hackerc:") + " nieznana dyrektywa `use <" + dk + ">`")
+                ]
+            ]
+            _ -> [
+                let unused2 = 0
+            ]
+        ]
+        dw = dw + 1
+    ]
+    let site_css = str_join(loader.css.clone(), "\n")
+    let head_html = str_join(loader.head.clone(), "\n")
+    !!! ostrzezenia (nie przerywaja budowania)
+    let vi = 0
+    while vi < loader.visited.len() [
+        match read_file(loader.visited[vi].clone()) [
+            Ok(vsrc) -> [
+                let vp = loader.visited[vi].clone()
+                let ws = site_name_warnings(vsrc.clone(), vp.clone())
+                let wb = site_big_int_warnings(vsrc.clone(), vp.clone())
+                let wc = site_class_warnings(vsrc.clone(), site_css.clone(), vp.clone())
+                let wi = 0
+                while wi < ws.len() [
+                    elog(c_bold_yellow("hackerc:") + " " + ws[wi].clone())
+                    wi = wi + 1
+                ]
+                wi = 0
+                while wi < wb.len() [
+                    elog(c_bold_yellow("hackerc:") + " " + wb[wi].clone())
+                    wi = wi + 1
+                ]
+                wi = 0
+                while wi < wc.len() [
+                    elog(c_bold_yellow("hackerc:") + " " + wc[wi].clone())
+                    wi = wi + 1
+                ]
+            ]
+            Err(_ve) -> [
+                let unused3 = 0
+            ]
+        ]
+        vi = vi + 1
+    ]
+    match transpile_js_native(Program(body, [], [], []), true, loader.native_blocks.clone(), loader.native_engines.clone()) [
+        Err(msgs) -> [
+            elog(c_red("hackerc js:") + " " + src_path)
+            elog(msgs)
+            end 1
+        ]
+        Ok(js) -> [
+            let js_text = js.clone()
+            let css_text = site_css.clone()
+            if opts.minify [
+                js_text = site_js_minify(js.clone())
+                css_text = site_css_minify(site_css.clone())
+            ]
+            let script_src = js_name.clone()
+            if opts.has_base [
+                script_src = site_trim_base(opts.base.clone()) + "/" + js_name
+            ]
+            match write_file(dir + "/" + js_name, js_text) [
+                Ok(_w1) -> [
+                    let unused4 = 0
+                ]
+                Err(e1) -> [
+                    elog(c_red("hackerc:") + " " + dir + "/" + js_name + ": " + e1)
+                    end 1
+                ]
+            ]
+            let title = js_stem(src_path.clone())
+            let page = site_page_html(title, css_text, lang.clone(), head_html.clone(), script_src, opts.dev)
+            match write_file(dir + "/" + html_name, page) [
+                Ok(_w2) -> [
+                    let unused5 = 0
+                ]
+                Err(e2) -> [
+                    elog(c_red("hackerc:") + " " + dir + "/" + html_name + ": " + e2)
+                    end 1
+                ]
+            ]
+            if str_contains_substring(js.clone(), "route_mode(\"history\")") [
+                match write_file(dir + "/404.html", site_404_html(site_trim_base(opts.base.clone()))) [
+                    Ok(_w3) -> [
+                        log(c_bold_cyan("hackerc website:") + " tryb history -> " + dir + "/404.html (fallback dla GitHub Pages; ustaw --base, gdy strona nie jest w korzeniu domeny)")
+                    ]
+                    Err(e3) -> [
+                        elog(c_red("hackerc:") + " " + dir + "/404.html: " + e3)
                         end 1
                     ]
                 ]
             ]
-            let dir = out_path.clone()
-            if dir == "" [
-                dir = js_dirname(src_path.clone()) + "/" + stem + "-site"
-            ]
-            if not create_dir_ok(dir.clone()) [
-                elog(c_red("hackerc:") + " nie mozna utworzyc katalogu " + dir)
-                end 1
-            ]
-            match write_file(dir.clone() + "/app.js", js) [
-                Ok(_w1) -> [
-                    let unused = 0
-                ]
-                Err(e1) -> [
-                    elog(c_red("hackerc:") + " " + dir + "/app.js: " + e1)
-                    end 1
-                ]
-            ]
-            match write_file(dir.clone() + "/index.html", site_index_html(stem.clone(), site_css.clone())) [
-                Ok(_w2) -> [
-                    let unused2 = 0
-                ]
-                Err(e2) -> [
-                    elog(c_red("hackerc:") + " " + dir + "/index.html: " + e2)
-                    end 1
-                ]
-            ]
-            log(c_bold_green("hackerc website:") + " " + dir + "/index.html  (otworz w przegladarce)")
             end 0
         ]
     ]
+]
+
+!!! Katalog wyjsciowy strony.
+fun site_out_dir(srcs: List<Str>, out_path: Str) -> Str [
+    if out_path != "" [
+        end out_path.clone()
+    ]
+    end js_dirname(srcs[0].clone()) + "/" + js_stem(srcs[0].clone()) + "-site"
+]
+
+!!! Buduje wszystkie wejscia + kopiuje assety. Zwraca kod wyjscia.
+fun site_build_all(srcs: List<Str>, out_path: Str, opts: SiteOpts) -> Int [
+    let dir = site_out_dir(srcs.clone(), out_path.clone())
+    if not create_dir_ok(dir.clone()) [
+        elog(c_red("hackerc:") + " nie mozna utworzyc katalogu " + dir)
+        end 1
+    ]
+    let i = 0
+    while i < srcs.len() [
+        let names = site_out_names(srcs.clone(), i)
+        let rc = site_build_one(srcs[i].clone(), dir.clone(), names[0].clone(), names[1].clone(), opts)
+        if rc != 0 [
+            end rc
+        ]
+        i = i + 1
+    ]
+    !!! assety: `public/` (zawartosc -> korzen), `assets/` (-> assets/), `--assets DIR` (-> DIR/)
+    let base_dir = js_dirname(srcs[0].clone())
+    let copied = 0
+    if dir_exists(base_dir.clone() + "/public") [
+        copied = copied + site_copy_tree(base_dir.clone() + "/public", dir.clone())
+    ]
+    if dir_exists(base_dir.clone() + "/assets") [
+        copied = copied + site_copy_tree(base_dir.clone() + "/assets", dir.clone() + "/assets")
+    ]
+    if opts.assets != "" [
+        if dir_exists(opts.assets.clone()) [
+            copied = copied + site_copy_tree(opts.assets.clone(), dir.clone() + "/" + js_stem(opts.assets.clone()))
+        ] else [
+            elog(c_bold_yellow("hackerc:") + " --assets: brak katalogu " + opts.assets)
+        ]
+    ]
+    if opts.dev [
+        match write_file(dir.clone() + "/__hks_version", (now_ms() as Str)) [
+            Ok(_wv) -> [
+                let unused6 = 0
+            ]
+            Err(_ev) -> [
+                let unused7 = 0
+            ]
+        ]
+    ]
+    let note = ""
+    if copied > 0 [
+        note = " + " + (copied as Str) + " plik(ow) assetow"
+    ]
+    log(c_bold_green("hackerc website:") + " " + dir + "/index.html" + note + "  (otworz w przegladarce)")
+    end 0
+]
+
+!!! Tresc wszystkich plikow zrodlowych (wejscia + `include`) - do wykrywania zmian.
+fun site_sources_text(srcs: List<Str>) -> Str [
+    let loader = JsLoader([], [], [], [], [], [])
+    let i = 0
+    while i < srcs.len() [
+        let unused = loader.load(srcs[i].clone())
+        i = i + 1
+    ]
+    let all = ""
+    let j = 0
+    while j < loader.visited.len() [
+        match read_file(loader.visited[j].clone()) [
+            Ok(t) -> [
+                all = all + "\n#" + loader.visited[j].clone() + "\n" + t
+            ]
+            Err(_e) -> [
+                all = all + "\n!" + loader.visited[j].clone()
+            ]
+        ]
+        j = j + 1
+    ]
+    end all
+]
+
+!!! `--watch`: przebudowuje przy kazdej zmianie zrodel (odpytywanie co 0.5 s),
+!!! wlacza tryb dev (nakladka z bledami + automatyczne przeladowanie strony).
+fun site_watch(srcs: List<Str>, out_path: Str, opts: SiteOpts) -> Int [
+    let dev_opts = SiteOpts(opts.minify, true, true, opts.base.clone(), opts.has_base, opts.assets.clone())
+    let dir = site_out_dir(srcs.clone(), out_path.clone())
+    log(c_bold_cyan("hackerc website:") + " --watch (Ctrl+C konczy). Serwer: python3 -m http.server -d " + dir)
+    let last = ""
+    let running = true
+    while running [
+        let cur = site_sources_text(srcs.clone())
+        if cur != last [
+            last = cur
+            let rc = site_build_all(srcs.clone(), out_path.clone(), dev_opts)
+            if rc != 0 [
+                elog(c_bold_yellow("hackerc website:") + " blad budowania - czekam na zmiane pliku")
+            ]
+        ]
+        let slept = run_command("sleep", ["0.5"])
+    ]
+    end 0
+]
+
+!!! `hackerc website <a.hcs> [b.hcs ...] [-o katalog] [--minify] [--dev] [--watch]
+!!! [--base /sciezka] [--assets katalog]`.
+fun cmd_site(srcs: List<Str>, out_path: Str, opts: SiteOpts) -> Int [
+    if opts.watch [
+        end site_watch(srcs.clone(), out_path.clone(), opts)
+    ]
+    end site_build_all(srcs.clone(), out_path.clone(), opts)
 ]
 
 fun cmd_lint(src_path: Str) -> Int [
@@ -1048,6 +1307,8 @@ fun print_usage() [
     log("      hlib inspect <plik.hlib>")
     log("      hlib verify <plik.hlib> [--pubkey HEX]")
     log("      hlib keygen [-o klucz.key]")
+    log("    js                  hackerc js <plik.hcs> [-o wynik.js] - JavaScript (use <lang:javascript>)")
+    log("    website             hackerc website <a.hcs> [b.hcs ...] [-o katalog] [--minify] [--dev] [--watch] [--base /sciezka] [--assets katalog] - strona (use <mode:website>), docs/WEBSITE.md")
     log("    emit-module         transpiluje JEDEN plik do JEDNEGO modulu .rs, bez wiedzy o reszcie projektu - uzywane WEWNETRZNIE przez `bit build` przy `using <inna-wersja>`, patrz docs/MULTI_VERSION.md")
     log("      emit-module <plik.hcs> -o <plik.rs> --module-name <nazwa>")
     log("")
@@ -1120,6 +1381,50 @@ fun first_positional(argv: List<Str>, value_flags: List<Str>) -> Str [
         i = i + 1
     ]
     end ""
+]
+
+!!! Wszystkie argumenty pozycyjne (bez flag i ich wartosci).
+fun all_positionals(argv: List<Str>, value_flags: List<Str>) -> List<Str> [
+    let out: List<Str> = []
+    let i = 0
+    let n = argv.len()
+    while i < n [
+        let tok = argv[i].clone()
+        if starts_with_dash(tok.clone()) [
+            if cli_list_contains_str(value_flags.clone(), tok.clone()) [
+                i = i + 1
+            ]
+        ] else [
+            out.push(tok.clone())
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+!!! Opcje budowania strony z flag CLI.
+fun site_opts_from_flags(argv: List<Str>) -> SiteOpts [
+    let base = ""
+    let has_base = false
+    match find_flag_value(argv.clone(), "", "--base") [
+        Some(v) -> [
+            base = v
+            has_base = true
+        ]
+        None -> [
+            let unused = 0
+        ]
+    ]
+    let assets = ""
+    match find_flag_value(argv.clone(), "", "--assets") [
+        Some(a) -> [
+            assets = a
+        ]
+        None -> [
+            let unused2 = 0
+        ]
+    ]
+    end SiteOpts(has_flag(argv.clone(), "--minify"), has_flag(argv.clone(), "--dev"), has_flag(argv.clone(), "--watch"), base, has_base, assets)
 ]
 
 !!! Punkt wejscia - parytet z `main(argv)` (cli.py), WLACZAJAC
@@ -1211,7 +1516,7 @@ fun main() [
 
     if first == "js" or first == "website" [
         let _rest_j = argv.remove(0)
-        let src_j = first_positional(argv, ["-o", "--output"])
+        let src_j = first_positional(argv, ["-o", "--output", "--base", "--assets"])
         if src_j == "" [
             log("hackerc " + first + ": brak wymaganego argumentu 'source'")
             exit(1)
@@ -1225,12 +1530,15 @@ fun main() [
                 let unused = 0
             ]
         ]
-        exit(cmd_js(src_j, out_j, first == "website"))
+        if first == "website" [
+            exit(cmd_site(all_positionals(argv, ["-o", "--output", "--base", "--assets"]), out_j, site_opts_from_flags(argv)))
+        ]
+        exit(cmd_js(src_j, out_j, false))
     ]
 
     if first == "check" or first == "lint" or first == "build" or first == "fmt" [
         let _rest = argv.remove(0)
-        let value_flags: List<Str> = ["-o", "--output", "--crate-name", "--libs-root", "--bootstrap-root", "--bin-name"]
+        let value_flags: List<Str> = ["-o", "--output", "--crate-name", "--libs-root", "--bootstrap-root", "--bin-name", "--base", "--assets"]
         let src = first_positional(argv, value_flags)
         if src == "" [
             log("hackerc " + first + ": brak wymaganego argumentu 'source'")
@@ -1267,7 +1575,10 @@ fun main() [
                     let unused = 0
                 ]
             ]
-            exit(cmd_js(src.clone(), js_out, js_target == "website"))
+            if js_target == "website" [
+                exit(cmd_site([src.clone()], js_out, site_opts_from_flags(argv)))
+            ]
+            exit(cmd_js(src.clone(), js_out, false))
         ]
         !!! first == "build"
         let out_dir = default_build_out_dir(src.clone())
