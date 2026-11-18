@@ -8,7 +8,7 @@
 -> using       => 0.6
 
 [workspace]
--> members => [hackerc, hack3rc, libs/core, libs/std]
+-> members => [hackerc, libs/core, libs/std]
 
 [build]
 -> link => static
