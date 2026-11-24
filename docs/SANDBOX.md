@@ -8,28 +8,48 @@ Polecenie jest uruchamiane przez `sh -c` w izolacji. Wewnątrz bloku nie wolno
 używać znaku `$` (jest ogranicznikiem), więc np. `$(...)` i `$?` trzeba zastąpić
 inną konstrukcją albo wynieść do skryptu.
 
-## Izolacja (0.6)
+## Izolacja
 
 Metody są próbowane po kolei, pierwsza, która się uda, wygrywa:
 
-1. `unshare(CLONE_NEWNET | CLONE_NEWNS)` + bind-remount `/` jako tylko-do-odczytu
+1. `unshare(CLONE_NEWNET | CLONE_NEWNS | CLONE_NEWIPC | CLONE_NEWUTS | CLONE_NEWPID)`
    (wymaga `CAP_SYS_ADMIN`);
 2. to samo przez `CLONE_NEWUSER` (user namespace z mapowaniem uid/gid) — działa bez
    roota, o ile jądro/AppArmor pozwala na nieuprzywilejowane user namespace;
-3. `bwrap` (bubblewrap), jeśli jest zainstalowany i działa.
+3. `bwrap` (bubblewrap) z `--unshare-net --unshare-pid --unshare-ipc --unshare-uts`,
+   jeśli jest zainstalowany i działa.
 
-Efekt: proces widzi tylko interfejs `lo` (brak sieci), a system plików jest
-tylko do odczytu. Błąd izolacji jest wykrywany jako błąd `spawn`, nie po kodzie
-wyjścia polecenia.
+W metodach 1 i 2 (0.7) po `unshare(CLONE_NEWPID)` proces robi `fork`: rodzic czeka i
+przekazuje kod wyjścia, a potomek jest **PID 1** w nowej przestrzeni, montuje własny
+`/proc` (nie widzi procesów hosta), po czym `/` oraz **każdy punkt montowania** z
+`/proc/self/mountinfo` (poza `/dev` i `/proc`) jest zdejmowany do tylko-do-odczytu.
+
+Efekt: proces widzi tylko interfejs `lo` (brak sieci), własne PID/IPC/UTS, a system
+plików jest tylko do odczytu. Błąd izolacji jest wykrywany jako błąd `spawn`, nie po
+kodzie wyjścia polecenia.
 
 Gdy żadna metoda nie działa: domyślnie (`HKS_SANDBOX` nieustawione albo `strict`)
 program **panikuje i polecenie nie jest wykonywane** (fail-closed).
 `HKS_SANDBOX=best-effort` uruchamia je jawnie bez izolacji (z ostrzeżeniem na
 stderr), `HKS_SANDBOX=off` pomija izolację w ogóle.
 
-## seccomp (metody 1 i 2)
+`HKS_SANDBOX_SKIP=1,2` pomija wskazane metody — pozwala sprawdzić kaskadę i maszyny bez
+user namespaces (np. `HKS_SANDBOX_SKIP=1,2` wymusza `bwrap`, a bez `bwrap` daje
+fail-closed).
 
-Po założeniu izolacji, przed `exec`, proces dostaje `PR_SET_NO_NEW_PRIVS` i filtr
+### Zgoda w kodzie: `allow_unsandboxed` (0.7)
+
+```
+$ echo bez-izolacji $ allow_unsandboxed
+```
+
+Słowo kluczowe zaraz po zamykającym `$` (w tej samej linii) uruchamia **ten jeden blok**
+przez zwykłe `sh -c` bez izolacji — jawna zgoda w kodzie źródłowym zamiast zmiennej
+środowiskowej. Wynik widać w diffie i przeglądzie kodu. Pozostałe bloki nadal są izolowane.
+
+## seccomp (wszystkie metody)
+
+Po założeniu izolacji, przed `exec` (metody 1 i 2), proces dostaje `PR_SET_NO_NEW_PRIVS` i filtr
 seccomp-BPF. To **denylista**: wywołania systemowe poniżej zwracają `EPERM`.
 
 `ptrace`, `mount`, `umount2`, `pivot_root`, `chroot`, `reboot`, `kexec_load`,
@@ -47,8 +67,9 @@ Wyłączenie: `HKS_SANDBOX_SECCOMP=off`. Sprawdzenie z poziomu polecenia:
 
 **Ograniczenia.** To denylista, nie allowlista — zmniejsza powierzchnię ucieczki,
 ale nie jest pełnym modelem uprawnień (np. nie ogranicza `open`/`connect` w obrębie
-dozwolonych zasobów). Metoda 3 (`bwrap`) nie dostaje tego filtra, bo zablokowałby
-własne wywołania `bwrap`.
+dozwolonych zasobów). Metoda 3 (`bwrap`) dostaje ten sam program BPF przez pipe (`--seccomp FD`); `bwrap`
+zakłada go już po własnej konfiguracji przestrzeni nazw, więc nie blokuje własnych wywołań
+(sprawdzone: `unshare` wewnątrz bloku zwraca `EPERM`).
 
 ## Limity zasobów (wszystkie metody, domyślnie bez limitu)
 
@@ -71,8 +92,10 @@ Limity są ustawiane w procesie potomnym przez `setrlimit` (miękki = twardy).
 
 ## Znane ograniczenia
 
-* Remount tylko-do-odczytu obejmuje montowanie `/`; osobne montowania (np. osobny
-  `/home`) mogą pozostać zapisywalne.
-* Brak izolacji PID/IPC; brak Windows/macOS.
-* Nie sprawdzono metody 3 (`bwrap`) ani maszyny z wyłączonymi user namespace na
-  poziomie jądra.
+* To nadal denylista seccomp (nie allowlista) i `/dev` pozostaje zapisywalny
+  (potrzebne `/dev/null`, `/dev/tty`).
+* Brak Windows/macOS.
+* Sprawdzone realnym uruchomieniem (kontener, uid 0): metody 1 i 2, metoda 3 z
+  zainstalowanym `bwrap`, kaskada przez `HKS_SANDBOX_SKIP`, fail-closed i
+  `best-effort`. **Nie** sprawdzono maszyny, na której jądro nie ma user namespaces
+  (tylko symulacja przez `HKS_SANDBOX_SKIP`).
