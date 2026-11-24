@@ -489,3 +489,99 @@ kompilatora C (bo `rquickjs-sys` kompiluje C QuickJS przez `cc`).
 * `region` nie sprawdza w żaden sposób, że poprzedzający go `get
   <extern:...>` rzeczywiście istnieje w tym samym pliku (best-effort
   parser, patrz wyżej).
+
+
+## Rozszerzenia 0.7
+
+### Krotki
+
+```
+fun pair(a: Int, b: Str) -> (Int, Str) [
+    end (a, b)
+]
+
+let (n, s) = pair(7, "siedem")   !! destrukturyzacja
+let t = pair(1, "a")
+log(t.0, t.1)                    !! dostep po indeksie; t.0.1 dla krotek zagniezdzonych
+```
+
+Typ krotki `(A, B, ...)` jest w AST listą „cons” (`Tuple<A, Tuple<B, TupleEnd>>`),
+w Rust daje zwykłą krotkę. `_` w `let (a, _) = ...` pomija element. JavaScript: tablica
+(`t.0` → `t[0]`); Kotlin: `Pair`/`Triple` (2 i 3 elementy).
+
+### Interpolacja napisów
+
+```
+log(f"n={n}, suma={n + 1}, klamry: {{ok}}")
+```
+
+Tylko napisy z prefiksem `f` (zwykłe napisy z `{}` zostają bez zmian). Wyrażenie w `{...}`
+jest rzutowane przez `as Str`. `{{`/`}}` to literalne klamry. W wyrażeniu nie można użyć
+cudzysłowu.
+
+### Jawne argumenty typu i ograniczenia generyków
+
+```
+let y = first<Int>([10, 20, 30])
+fun show<T: Shape>(x: T) -> Str [ end x.describe() ]      !! ograniczenia: <T: A + B>
+```
+
+`nazwa<Typ>(...)` jest rozpoznawane tylko gdy `<` stoi bez spacji po identyfikatorze, a po
+`>` następuje `(` — inaczej to porównanie.
+
+### `trait` i `impl Trait for Typ`
+
+```
+trait Shape [
+    fun area(self) -> Int                  !! wymagana (bez ciala)
+    fun describe(self) -> Str [            !! domyslna
+        end "pole=" + (self.area() as Str)
+    ]
+]
+
+impl Shape for Rect [
+    fun area(self) -> Int [ end self.w * self.h ]
+]
+```
+
+Metody traitów biorą `&self` (mutowanie przez trait nie jest obsługiwane).
+
+### Domknięcia i typ `Fn`
+
+```
+let dbl = fn(x: Int) -> Int = x * 2                       !! krotka forma
+let acc = fn(a: Int, b: Int) -> Int [ end (a + b) * 10 ]  !! blok
+fun apply(f: Fn(Int) -> Int, v: Int) -> Int [ end f(v) ]
+fun make_adder(n: Int) -> Fn(Int) -> Int [ end fn(x: Int) -> Int = x + n ]
+```
+
+`Fn(A, B) -> R` to w Rust `impl Fn(A, B) -> R`: działa w parametrach, wynikach i zmiennych,
+**nie** w polach struktur. Domknięcie zwracane z funkcji jest generowane z `move`.
+Typuj parametry (`x: Int`) — bez nich `rustc` może nie wywnioskować typu.
+
+### `defer` i `Drop`
+
+```
+defer [ log("sprzatanie") ]          !! wykonywane przy wyjsciu z bloku, w kolejnosci LIFO
+
+impl Drop for Guard [
+    fun drop(self) [ log("drop", self.name) ]
+]
+```
+
+Uwaga: kompilator często klonuje wartości, a `Drop` wykonuje się dla **każdej** kopii
+struktury. Zmienna będąca tylko strażnikiem RAII wywołuje `W0001` — nazwij ją z `_`.
+`defer` przechwytuje zmienne przez referencję, więc nie zmieniaj ich po zadeklarowaniu
+`defer`, który z nich korzysta.
+
+### Konstruktor `new`
+
+Automatyczny konstruktor struktury nazywa się teraz `hks_new`, więc `fun new(...)` w
+`impl` nie powoduje konfliktu (`E0592`). Kod w blokach `native {Rust}`, który wołał
+`Typ::new(...)` dla struktur HackerScript, trzeba zmienić na `Typ::hks_new(...)`.
+
+### Crate'y, których biblioteka nazywa się inaczej niż paczka
+
+`get <crates:md-5::0.10>` generuje `use md5::*` (tabela: `md-5`→`md5`, `sha-1`→`sha1`,
+`rust-crypto`→`crypto`, `pbkdf2-hmac`→`pbkdf2`). Przy crate'ach, których glob psuje
+nazwy z preludium (np. `argon2` ma własny `Result`), użyj `get <crates:argon2::0.5> import <Argon2>`.
