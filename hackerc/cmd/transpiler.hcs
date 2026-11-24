@@ -1172,6 +1172,10 @@ fun sandbox_dollar_scan(source: Str, from: Int) -> Int [
     end -1
 ]
 
+fun is_ident_char_local(c: Str) -> Bool [
+    end c == "_" or (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9")
+]
+
 fun extract_sandbox_blocks(source: Str) -> SandboxExtraction [
     let blocks: List<Str> = []
     let out = ""
@@ -1199,10 +1203,35 @@ fun extract_sandbox_blocks(source: Str) -> SandboxExtraction [
             ] else [
                 let raw = source.slice(dollar_at + 1, close_at)
                 let dedented = trim_str_local(dedent_text(raw))
+                !!! 0.6+: `$ polecenie $ allow_unsandboxed` - jawna zgoda w kodzie
+                !!! zrodlowym na uruchomienie BEZ izolacji (zamiast zmiennej
+                !!! HKS_SANDBOX). Slowo kluczowe musi byc w tej samej linii zaraz po
+                !!! zamykajacym `$`; blok dostaje znacznik na poczatku tekstu.
+                let after = close_at + 1
+                let kw = "allow_unsandboxed"
+                let kk = after
+                while kk < n and (source.char_at(kk) == " " or source.char_at(kk) == "\t") [
+                    kk = kk + 1
+                ]
+                let unsandboxed = false
+                if kk + kw.len() <= n and source.slice(kk, kk + kw.len()) == kw [
+                    let tail_ok = kk + kw.len() == n
+                    if not tail_ok [
+                        let tc = source.char_at(kk + kw.len())
+                        tail_ok = not (is_ident_char_local(tc))
+                    ]
+                    if tail_ok [
+                        unsandboxed = true
+                        after = kk + kw.len()
+                    ]
+                ]
+                if unsandboxed [
+                    dedented = "@@UNSANDBOXED@@" + dedented
+                ]
                 let idx = blocks.len()
                 blocks.push(dedented)
-                out = out + "__sandbox__(" + (idx as Str) + ")" + newline_padding(source, dollar_at, close_at + 1)
-                i = close_at + 1
+                out = out + "__sandbox__(" + (idx as Str) + ")" + newline_padding(source, dollar_at, after)
+                i = after
             ]
         ]
     ]
