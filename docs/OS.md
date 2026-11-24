@@ -42,4 +42,3 @@ deklaruje wtedy, że wspiera **wszystkie** wymienione systemy.
 
 * Deklaracja jest **na poziomie projektu** — brak warunkowej kompilacji pojedynczych plików.
 * `hackerc` tylko zapisuje wskazówkę `target`; wybór `--target` w `cargo` należy do `bit`.
-* `hack3rc` akceptuje dyrektywę, ale kieruje się własnym `--target`.
