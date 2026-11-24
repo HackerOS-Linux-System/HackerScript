@@ -503,6 +503,37 @@ impl JsGen [
             ListLit(items) -> [
                 end "[" + self.join(items.clone()) + "]"
             ]
+            TupleLit(titems) -> [
+                !!! (0.7) krotka = tablica JS; `t.0` -> `t[0]` (patrz Attr)
+                end "[" + self.join(titems.clone()) + "]"
+            ]
+            TypeApp(tinner, targs) -> [
+                end self.expr(tinner.clone())
+            ]
+            Lambda(lparams, lret, lbody) -> [
+                let jps: List<Str> = []
+                let jk = 0
+                while jk < lparams.len() [
+                    jps.push(lparams[jk].name.clone())
+                    jk = jk + 1
+                ]
+                if lbody.len() == 1 [
+                    match lbody[0].clone() [
+                        ReturnStmt(rv) -> [
+                            match rv [
+                                Some(re) -> [
+                                    end "((" + join_str_list(jps, ", ") + ") => (" + self.expr(re) + "))"
+                                ]
+                                None -> [
+                                ]
+                            ]
+                        ]
+                        _ -> [
+                        ]
+                    ]
+                ]
+                end "(() => { throw new Error('hackerc/js: domkniecia z blokowym cialem nie sa jeszcze obslugiwane'); })"
+            ]
             BinOp(op, l, r) -> [
                 end self.binop(op.clone(), l.clone(), r.clone())
             ]
@@ -533,6 +564,10 @@ impl JsGen [
                 end "hks_at(" + self.expr(target.clone()) + ", " + self.expr(idx.clone()) + ")"
             ]
             Attr(target, nm) -> [
+                let nm_s: Str = nm.clone()
+                if nm_s.len() > 0 and nm_s.char_at(0) >= "0" and nm_s.char_at(0) <= "9" [
+                    end self.expr(target.clone()) + "[" + nm + "]"
+                ]
                 end self.expr(target.clone()) + "." + nm
             ]
             Cast(inner, ty) -> [
