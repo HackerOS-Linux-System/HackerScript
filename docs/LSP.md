@@ -178,3 +178,20 @@ tylko otwarty dokument.
 Naprawiony przy okazji błąd: diagnostyka parsera (`[hackerc-self] parser: ...`) trafiała na
 **stdout**, co psuło ramkowanie protokołu, gdy edytowany dokument miał błąd składni; teraz idzie na
 stderr.
+
+## 0.7 — rename / references w całym workspace
+
+Dla **symboli najwyższego poziomu** (`fun`/`struct`/`enum`/`const` zadeklarowane bez wcięcia) `rename`
+zwraca `WorkspaceEdit` z `changes` dla **wielu plików**, a `references` — `Location` z wielu plików.
+Korzeń workspace'u to najbliższy katalog nad plikiem z `Bit.hk` albo `build.hl`; przeszukiwane są pliki
+`.hcs` (poza ukrytymi katalogami, `target`, `out`, `node_modules`). Otwarty dokument jest czytany z pamięci
+(niezapisane zmiany), pozostałe pliki z dysku.
+
+Symbol jest traktowany jako globalny tylko gdy analiza zasięgu otwartego dokumentu **nie** zawęziła
+wyników (czyli nie jest zmienną lokalną, parametrem ani metodą) i istnieje jego deklaracja najwyższego
+poziomu w workspace'ie. Zmienne lokalne, parametry i metody zostają w zasięgu pliku, jak w 0.6.
+
+Ograniczenie: w pozostałych plikach dopasowanie jest **tekstowe** (całe słowo, poza napisami i
+komentarzami), więc rename może dotknąć zmiennej lub pola o tej samej nazwie w innym pliku — sprawdź
+diff. Sprawdzone realnym protokołem LSP (JSON-RPC po stdio) na workspace'ie z dwoma plikami; nie w
+prawdziwym edytorze. Serwer nie zna jeszcze składni 0.7 w podpowiedziach (`trait`, `defer`, `fn(...)`, `f"..."`).
