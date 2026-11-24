@@ -12,6 +12,7 @@ enum TokKind [
     Op,
     Number,
     StrLit,
+    FStrLit,
     Ident,
     Keyword,
     DocComment,
@@ -83,7 +84,7 @@ fun is_keyword(w: Str) -> Bool [
                "true", "false", "null", "struct", "enum", "match", "break",
                "continue", "gc", "pub", "self", "and", "or", "not", "as",
                "impl", "include", "native", "region", "use",
-               "async", "await", "spawn"]
+               "async", "await", "spawn", "fn", "defer", "trait"]
     let i = 0
     while i < kws.len() [
         if kws[i] == w [
@@ -650,6 +651,31 @@ fun tokenize(source: Str) -> List<Token> [
                 j = j + 1
             ]
             tokens.push(Token(Number, src.slice(i, j), line, col, false))
+            i = j
+        ] elif c == "f" and i + 1 < n and src.char_at(i + 1) == "\"" and not (i > 0 and is_alnum(src.char_at(i - 1))) [
+            !!! (0.7) `f"tekst {wyrazenie}"` - interpolacja; znacznik na poczatku wartosci
+            !!! tokenu, rozwijany w parserze (`parse_interpolated`).
+            let j = i + 2
+            let buf = ""
+            while j < n and src.char_at(j) != "\"" and src.char_at(j) != "\n" [
+                if src.char_at(j) == "\\" and j + 1 < n [
+                    let esc = src.char_at(j + 1)
+                    let resolved = resolve_escape(esc)
+                    if resolved == "" [
+                        buf = buf + "\\" + esc
+                    ] else [
+                        buf = buf + resolved
+                    ]
+                    j = j + 2
+                ] else [
+                    buf = buf + src.char_at(j)
+                    j = j + 1
+                ]
+            ]
+            if j < n and src.char_at(j) == "\"" [
+                j = j + 1
+            ]
+            tokens.push(Token(FStrLit, buf, line, col, false))
             i = j
         ] elif c == "\"" or c == "'" [
             let quote = c
