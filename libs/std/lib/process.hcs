@@ -1,4 +1,5 @@
 get <std:string> import <str_trim::str_join>
+get <crates:libc::0.2> import <c_int>
 
 !! Jak `run_command`, ale przy niepowodzeniu opakowuje komunikat
 !! bledu informacja O KTORYM programie/argumentach chodzilo -
@@ -462,4 +463,167 @@ fun run_lines(program: Str, args: List<Str>) -> Result<ProcLines, Str> [
             end ok(ProcLines(code, lines, flags))
         ]
     ]
+]
+
+
+!! ---------------------------------------------------------------------
+!! 0.7: limit czasu, surowe bajty, grupy procesow.
+!! ---------------------------------------------------------------------
+
+!! Jak `run_capture_input`, ale z LIMITEM CZASU `timeout_ms` (ms, >= 1). Po
+!! przekroczeniu proces (i na Uniksie cala jego GRUPA procesow, wiec takze
+!! potomkowie) dostaje SIGKILL, a wynik to `Err("przekroczono limit czasu ...")`.
+!! Czesciowe wyjscie przy przekroczeniu jest tracone. `input` trafia na stdin.
+fun run_capture_timeout(program: Str, args: List<Str>, input: Str, timeout_ms: Int) -> Result<CmdOutput, Str> [
+    if timeout_ms < 1 [
+        end err("timeout_ms musi byc >= 1")
+    ]
+    let started = false
+    let timed_out = false
+    let code = 0
+    let so = ""
+    let se = ""
+    let why = ""
+    native {Rust} [
+        use std::io::{Read, Write};
+        use std::process::{Command, Stdio};
+        let mut cmd = Command::new(&program);
+        cmd.args(args.iter()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        match cmd.spawn() {
+            Ok(mut child) => {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let data = input.clone();
+                    std::thread::spawn(move || { let _ = stdin.write_all(data.as_bytes()); });
+                }
+                let mut o = child.stdout.take().unwrap();
+                let mut e = child.stderr.take().unwrap();
+                let ho = std::thread::spawn(move || { let mut v: Vec<u8> = Vec::new(); let _ = o.read_to_end(&mut v); v });
+                let he = std::thread::spawn(move || { let mut v: Vec<u8> = Vec::new(); let _ = e.read_to_end(&mut v); v });
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(st)) => { started = true; code = st.code().unwrap_or(-1) as i64; break; }
+                        Ok(None) => {
+                            if std::time::Instant::now() >= deadline {
+                                timed_out = true;
+                                #[cfg(unix)]
+                                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        Err(err) => { why = format!("{}", err); break; }
+                    }
+                }
+                so = String::from_utf8_lossy(&ho.join().unwrap_or_default()).to_string();
+                se = String::from_utf8_lossy(&he.join().unwrap_or_default()).to_string();
+            }
+            Err(err) => { why = format!("{}", err); }
+        }
+    ]
+    if timed_out [
+        end err("przekroczono limit czasu (" + (timeout_ms as Str) + " ms): " + program)
+    ]
+    if started [
+        end ok(CmdOutput(code, so, se))
+    ]
+    end err("nie udalo sie uruchomic '" + program + "': " + why)
+]
+
+!! Wynik z SUROWYMI bajtami (0..=255) - dla programow, ktore zwracaja dane
+!! binarne (obrazy, archiwa), gdzie `CmdOutput` zniekształciłby je (lossy UTF-8).
+struct CmdBytes [
+    code: Int,
+    stdout: List<Int>,
+    stderr: List<Int>
+]
+
+!! Uruchamia `program` z `args` (stdin zamkniety) i zwraca stdout/stderr jako
+!! surowe bajty. Err tylko gdy nie udalo sie uruchomic procesu.
+fun run_capture_bytes(program: Str, args: List<Str>) -> Result<CmdBytes, Str> [
+    let started = false
+    let code = 0
+    let so: List<Int> = []
+    let se: List<Int> = []
+    let why = ""
+    native {Rust} [
+        use std::process::{Command, Stdio};
+        match Command::new(&program).args(args.iter()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output() {
+            Ok(o) => {
+                started = true;
+                code = o.status.code().unwrap_or(-1) as i64;
+                so = o.stdout.iter().map(|b| *b as i64).collect();
+                se = o.stderr.iter().map(|b| *b as i64).collect();
+            }
+            Err(e) => { why = format!("{}", e); }
+        }
+    ]
+    if started [
+        end ok(CmdBytes(code, so, se))
+    ]
+    end err("nie udalo sie uruchomic '" + program + "': " + why)
+]
+
+!! Jak `proc_spawn`, ale proces startuje w NOWEJ GRUPIE procesow (Unix) - dzieki
+!! temu `proc_kill_group` zabija go razem z potomkami. Poza Uniksem dziala jak
+!! `proc_spawn`.
+fun proc_spawn_group(program: Str, args: List<Str>) -> Result<Int, Str> [
+    let handle = 0
+    let why = ""
+    native {Rust} [
+        let mut cmd = Command::new(&program);
+        cmd.args(args.iter()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        match cmd.spawn() {
+            Ok(mut child) => {
+                let (tx, rx) = mpsc::channel::<(bool, String)>();
+                if let Some(o) = child.stdout.take() { hks_proc_pump(o, false, tx.clone()); }
+                if let Some(e) = child.stderr.take() { hks_proc_pump(e, true, tx.clone()); }
+                drop(tx);
+                let stdin = child.stdin.take();
+                let entry = HksProcEntry { child, stdin, rx, pending: VecDeque::new(), eof: false };
+                let mut reg = hks_proc_registry().lock().unwrap();
+                let id = reg.next;
+                reg.next += 1;
+                reg.procs.insert(id, Arc::new(Mutex::new(entry)));
+                handle = id;
+            }
+            Err(e) => { why = format!("{}", e); }
+        }
+    ]
+    if handle > 0 [
+        end ok(handle)
+    ]
+    end err("nie udalo sie uruchomic '" + program + "': " + why)
+]
+
+!! Zabija CALA grupe procesow uchwytu (SIGKILL na `-pid`) - dziala dla procesow
+!! z `proc_spawn_group`. Dla zwyklego `proc_spawn` (ta sama grupa co program)
+!! wywolanie jest ODMAWIANE (zwraca false), zeby nie zabic wlasnego procesu.
+fun proc_kill_group(handle: Int) -> Bool [
+    let done = false
+    native {Rust} [
+        #[cfg(unix)]
+        if let Some(arc) = hks_proc_get(handle) {
+            let e = arc.lock().unwrap();
+            let pid = e.child.id() as i32;
+            unsafe {
+                if libc::getpgid(pid) == pid && pid != libc::getpgrp() {
+                    done = libc::kill(-pid, libc::SIGKILL) == 0;
+                }
+            }
+        }
+    ]
+    end done
 ]
