@@ -365,7 +365,7 @@ fun bit_module_file_path(bit_root: Str, name: Str, version: Option<Str>) -> Str 
 !!! sprawdzane bylo WYLACZNIE `<d>/<member>/lib` - poprawne dla
 !!! czlonkow-bibliotek (`libs/core`, `libs/std`), ale FALSZYWE dla
 !!! czlonkow-binarek trzymajacych zrodlo w `cmd/` zamiast `lib/`
-!!! (`hackerc`, `bit`, `playground`, `hack3rc` - patrz
+!!! (`hackerc`, `bit`, `playground` - patrz
 !!! konwencja `cmd/main.hcs` od 0.4).
 !!! Dla `include <work:hackerc::ast_nodes>` (patrz
 !!! `playground/cmd/main.hcs`) `find_workspace_root` zawsze zwracalo
@@ -407,7 +407,7 @@ fun find_workspace_root(start: Str, member_name: Str) -> Option<Str> [
 !!! w `libs/std/lib/mod.hcs`.
 !!!
 !!! NAPRAWA (ta runda, parytet z `find_workspace_root` wyzej): dla
-!!! czlonkow-binarek (`hackerc`/`bit`/`playground`/`hack3rc`), ktore
+!!! czlonkow-binarek (`hackerc`/`bit`/`playground`), ktore
 !!! NIE MAJA `<member>/lib/`, sciezka `lib/...` po prostu nie istnieje
 !!! - wiec probujemy najpierw wariant `lib/` (priorytet, jak dotad, dla
 !!! czlonkow-bibliotek), a gdy plik tam nie istnieje, spadamy na
@@ -1338,7 +1338,7 @@ fun collect_project_signatures(entry: Str, libs_root: Option<Str>, bootstrap_roo
     end ProjectSignatures(sigs, disc.warnings)
 ]
 
-!!! NOWOSC (hack3rc 0.2) - features crate'ow w `get <crates:...>`.
+!!! NOWOSC (0.2) - features crate'ow w `get <crates:...>`.
 !!! Skladnia: `get <crates:nazwa::wersja+feature1+feature2>` - czesc po
 !!! pierwszym `+` to lista features Cargo, np.
 !!! `get <crates:cranelift-codegen::0.116+all-arch>` daje
