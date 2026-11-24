@@ -13,8 +13,8 @@ niewielkiego fragmentu kodu, ktory nigdy nie bedzie wymagal wydajnosci.
 [cols="1,3"]
 |===
 | Status | *Bootstrap osiagniety + FFI 0.3 + workspace 0.4 + 0.5 + 0.6 (`use <os:...>`, cache budowania, ~6x szybsza transpilacja; 0.5: escape'y `\xHH`/`\u{...}`, JSON `\uXXXX`; 0.6: `Dict.items()`, `log()` dla struct/enum, LSP `rename`/`references`/`documentSymbol`, `toml_stringify`, nowe testy)* - `hackerc`
-(transpilator) i `hack3rc` (kompilator AOT) sa dzis w calosci
-napisane w samym HackerScript (`.hcs`), nie w Pythonie/Rust jak w
+(transpilator) jest dzis w calosci
+napisany w samym HackerScript (`.hcs`), nie w Pythonie/Rust jak w
 wersji `0.0.1`. Menedzerem pakietow i narzedziem budowania jest
 `bit` - osobny projekt (napisany w H#, repozytorium bit-io/bit),
 ktory czyta `Bit.hk`, instaluje zaleznosci i wola `hackerc`. Od `0.3` dochodzi przeprojektowane
@@ -84,8 +84,7 @@ HackerScript/
     playground.hcs           demo/checker uzywany przez playground WASM
     lsp.hcs, lsp_features.hcs   Language Server (hover, definition, completion, rename, references, symbole)
     javascript_backend.hcs, js_runtime.hcs, kotlin_backend.hcs   backendy JS i Kotlin
-  hack3rc/cmd/         kompilator AOT (Cranelift), W CALOSCI w HackerScript
-  Bit.hk                  workspace (czlonkowie: hackerc, hack3rc, libs/core, libs/std)
+  Bit.hk                  workspace (czlonkowie: hackerc, libs/core, libs/std)
   libs/
     core/lib/memory/        4 alokatory: arena, chained_arena, stack_allocator, pool_allocator
     std/lib/                fs, io, string, math, path, json, toml, hk, env,
@@ -105,7 +104,6 @@ HackerScript/
     OS.md                     use <os:...> + target_os() (0.6)
     PERFORMANCE.md            wydajnosc transpilacji + cache budowania (0.6)
     BIT.md                    kontrakt bit <-> hackerc
-    HACK3RC.md                kompilator AOT (Cranelift)
     FAST_DIRECT.md            fast direct {backend} - 20 backendow (dynamicznie, bez statycznego linkowania)
     LSP.md                    Language Server (hackerc lsp)
     MULTI_VERSION.md          using <wersja> per plik
@@ -116,7 +114,6 @@ HackerScript/
     WORK_INCLUDE_FIX.md       naprawa duplikacji modulow include <work:...>
     ROADMAP.md                 historia + aktualny stan; lista otwartych punktow: CHANGELOG.md
   tests/                  testy hackerc: run.sh, cases/, errors/, js/, net/, lsp/, check_links.sh
-  hack3rc/tests/          testy hack3rc: run.sh, cases/ (roznicowe z hackerc), errors/
   CHANGELOG.md            zmiany per wersja + aktualna lista otwartych punktow
   SESSION_LOG.md          dziennik pracy (mapa odwolan 'Tura N' z kodu)
   scripts/                install.sh/remove.sh (HackerOS) + skrypty .hl
@@ -292,24 +289,30 @@ teraz `v0.4`. Pelny opis: `docs/SYNTAX.md` (sekcje "`get <work:...>`",
 
 | `0.5`
 | *Wewnetrzna.* Escape'y w napisach i JSON `\\uXXXX`, backend JavaScript, tryb strony, FFI Go/Java/Kotlin,
-`direct {backend}`, pierwszy LSP, kompilator AOT `hack3rc`. Opis per sesja: `docs/ROADMAP.md`.
+`direct {backend}`, pierwszy LSP. Opis per sesja: `docs/ROADMAP.md`.
 
 | `0.6`
 a|
 *Ta wersja. Wydajnosc i cele.* `use <os:linux|windows|macos|ios|android>` (guard `compile_error!`,
 wskazowka `target` dla `bit`, `target_os()`, `std:os`); transpilacja ~6x szybsza
 (bez gleboki klonow sygnatur, `push_str` zamiast `format!`, prefiltr leksera); cache budowania
-(`.hks-cache`) i zapis plikow tylko przy zmianie; nowe CI (stage0 -> hackerc -> hack3rc), `tests/`,
-`hack3rc/tests/`. Ta runda: `Dict.items()` (`for k, v in d.items()`), `log()` dla struct/enum, `toml_stringify` i `[[tablice]]` w TOML,
+(`.hks-cache`) i zapis plikow tylko przy zmianie; nowe CI (stage0 -> hackerc), `tests/`. Ta runda: `Dict.items()` (`for k, v in d.items()`), `log()` dla struct/enum, `toml_stringify` i `[[tablice]]` w TOML,
 `http_download`/`http_get_lines`, `run_tee`, LSP `rename`/`references`/`documentSymbol` i `definition` miedzy plikami,
 naprawy: `get <extern:...>`, `hackerc fmt` i literaly napisow, `for x in lista`, classpath Javy w runtime.
 Szczegoly i lista otwartych punktow: `CHANGELOG.md`, `docs/OS.md`, `docs/PERFORMANCE.md`.
+
+| `0.7` (zmiany w źródłach, numer wydania w `Bit.hk` bez zmian)
+| *Rozszerzenia języka i narzędzi.* Krotki i destrukturyzacja, interpolacja `f"..."`, jawne argumenty typu i
+ograniczenia generyków, `trait`/`impl Trait for`, domknięcia i `Fn`, `defer`/`Drop`, konstruktor `hks_new`,
+`allow_unsandboxed`, sandbox z PID/IPC i seccomp także dla `bwrap`, `hackerc website --ssr`, LSP `rename`/
+`references` w workspace, `std:cybersecurity::{kdf,sign}`, `std:process`/`std:term`/`std:http` (limit czasu,
+grupy procesów, klawisze, strumieniowanie). Testy: `tests/run_lang.sh`, `tests/website/run.sh`. Co zostało: `docs/ROADMAP.md`.
 |===
 
 == Status projektu
 
-*Caly kompilator (`hackerc/cmd/`) i kompilator AOT (`hack3rc/cmd/`)
-sa dzis napisane w HackerScript* i weryfikowane strukturalnie przez
+*Caly kompilator (`hackerc/cmd/`)
+jest dzis napisany w HackerScript* i weryfikowane strukturalnie przez
 `hackerc check` + inspekcje, a *koncowo* przez CI
 (`.github/workflows/ci.yml`), ktore kompiluje i uruchamia
 wygenerowany crate na prawdziwym runnerze z Rustem - to jedyne
