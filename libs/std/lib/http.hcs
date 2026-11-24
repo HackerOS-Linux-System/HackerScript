@@ -209,3 +209,147 @@ fun http_delete(url: Str) -> Result<Str, Str> [
     ]
     end err("DELETE " + url + " nie powiodl sie: " + out)
 ]
+
+!! ---------------------------------------------------------------------
+!! 0.7: STRUMIENIOWANIE odpowiedzi (SSE, NDJSON, duze pliki) - czytanie ciala
+!! w miare nadchodzenia, bez ladowania calosci do pamieci.
+!! ---------------------------------------------------------------------
+!!
+!!     let h = http_stream_open("http://localhost:8080/events")    !! Result<Int, Str>
+!!     loop: match http_stream_read_line(h) [ Some(l) -> [ ... ] None -> [ koniec ] ]
+!!     http_stream_close(h)
+!!
+!! Uchwyt (Int > 0) jest wspolny w procesie. Odczyt BLOKUJE do nadejscia danych
+!! (limit polaczenia ureq: 30 s bez danych konczy sie koncem strumienia).
+
+native {Rust} [
+    use std::collections::HashMap;
+    use std::io::{BufRead, BufReader, Read};
+    use std::sync::{Mutex, OnceLock};
+
+    pub struct HksHttpStream {
+        pub reader: BufReader<Box<dyn Read + Send + Sync + 'static>>,
+        pub status: i64,
+    }
+
+    pub struct HksHttpRegistry {
+        pub next: i64,
+        pub streams: HashMap<i64, HksHttpStream>,
+    }
+
+    pub fn hks_http_registry() -> &'static Mutex<HksHttpRegistry> {
+        static REG: OnceLock<Mutex<HksHttpRegistry>> = OnceLock::new();
+        REG.get_or_init(|| Mutex::new(HksHttpRegistry { next: 1, streams: HashMap::new() }))
+    }
+
+    pub fn hks_http_register(resp: ureq::Response) -> i64 {
+        let status = resp.status() as i64;
+        let reader = BufReader::new(resp.into_reader());
+        let mut reg = hks_http_registry().lock().unwrap();
+        let id = reg.next;
+        reg.next += 1;
+        reg.streams.insert(id, HksHttpStream { reader, status });
+        id
+    }
+]
+
+!! Otwiera GET i zwraca uchwyt strumienia (kod 2xx); inny kod -> `Err("HTTP <kod>")`.
+fun http_stream_open(url: Str) -> Result<Int, Str> [
+    let handle = 0
+    let why = ""
+    native {Rust} [
+        match ureq::get(&url).call() {
+            Ok(resp) => { handle = hks_http_register(resp); }
+            Err(ureq::Error::Status(code, _resp)) => { why = format!("HTTP {}", code); }
+            Err(e) => { why = format!("{}", e); }
+        }
+    ]
+    if handle > 0 [
+        end ok(handle)
+    ]
+    end err(why)
+]
+
+!! Jak `http_stream_open`, ale POST z cialem `body` i `Content-Type`.
+fun http_stream_open_post(url: Str, body: Str, content_type: Str) -> Result<Int, Str> [
+    let handle = 0
+    let why = ""
+    native {Rust} [
+        match ureq::post(&url).set("Content-Type", &content_type).send_string(&body) {
+            Ok(resp) => { handle = hks_http_register(resp); }
+            Err(ureq::Error::Status(code, _resp)) => { why = format!("HTTP {}", code); }
+            Err(e) => { why = format!("{}", e); }
+        }
+    ]
+    if handle > 0 [
+        end ok(handle)
+    ]
+    end err(why)
+]
+
+!! Kod statusu HTTP otwartego strumienia (0 = nieznany uchwyt).
+fun http_stream_status(handle: Int) -> Int [
+    let st = 0
+    native {Rust} [
+        if let Some(s) = hks_http_registry().lock().unwrap().streams.get(&handle) { st = s.status; }
+    ]
+    end st
+]
+
+!! Nastepna linia ciala (bez `\n`/`\r`), blokujaco. `None` po koncu strumienia,
+!! bledzie albo dla nieznanego uchwytu. Bajty spoza UTF-8 sa zastepowane.
+fun http_stream_read_line(handle: Int) -> Option<Str> [
+    let got = false
+    let line = ""
+    native {Rust} [
+        let mut reg = hks_http_registry().lock().unwrap();
+        if let Some(s) = reg.streams.get_mut(&handle) {
+            let mut buf: Vec<u8> = Vec::new();
+            match s.reader.read_until(b'\n', &mut buf) {
+                Ok(0) | Err(_) => {}
+                Ok(_) => {
+                    while buf.last() == Some(&b'\n') || buf.last() == Some(&b'\r') { buf.pop(); }
+                    line = String::from_utf8_lossy(&buf).to_string();
+                    got = true;
+                }
+            }
+        }
+    ]
+    if got [
+        end some(line)
+    ]
+    end none()
+]
+
+!! Do `max_bytes` (1..=1048576) surowych bajtow ciala; moze zwrocic mniej.
+!! `None` po koncu strumienia/bledzie/nieznanym uchwycie.
+fun http_stream_read_bytes(handle: Int, max_bytes: Int) -> Option<List<Int>> [
+    if max_bytes < 1 or max_bytes > 1048576 [
+        end none()
+    ]
+    let got = false
+    let data: List<Int> = []
+    native {Rust} [
+        let mut reg = hks_http_registry().lock().unwrap();
+        if let Some(s) = reg.streams.get_mut(&handle) {
+            let mut buf = vec![0u8; max_bytes as usize];
+            match s.reader.read(&mut buf) {
+                Ok(0) | Err(_) => {}
+                Ok(n) => { data = buf[..n].iter().map(|b| *b as i64).collect(); got = true; }
+            }
+        }
+    ]
+    if got [
+        end some(data)
+    ]
+    end none()
+]
+
+!! Zamyka strumien i zwalnia uchwyt. `false` dla nieznanego uchwytu.
+fun http_stream_close(handle: Int) -> Bool [
+    let removed = false
+    native {Rust} [
+        removed = hks_http_registry().lock().unwrap().streams.remove(&handle).is_some();
+    ]
+    end removed
+]
