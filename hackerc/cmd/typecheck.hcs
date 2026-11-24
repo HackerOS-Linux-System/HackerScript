@@ -39,7 +39,7 @@ fun is_builtin_func(name: Str) -> Bool [
     !! skan zrodla PRZY KAZDEJ z nich) zamienial build w wielosekundowa
     !! petle - realna regresja wydajnosci znaleziona i naprawiona w tej
     !! samej turze.
-    end name == "log" or name == "elog" or name == "__direct__" or name == "__fast_direct__" or name == "__native__" or name == "__sandbox__" or name == "some" or name == "none" or name == "ok" or name == "err" or name == "read_file" or name == "write_file" or name == "dict" or name == "set" or name == "chan" or name == "env_var" or name == "run_command" or name == "run_command_combined" or name == "http_get" or name == "current_dir" or name == "read_stdin_line" or name == "read_stdin_exact" or name == "write_stdout" or name == "run_command_inherit" or name == "sha256_hex" or name == "now_ms" or name == "target_os" or name == "args" or name == "exit" or name == "copy_file" or name == "create_dir" or name == "dir_exists" or name == "list_dir" or name == "path_exists" or name == "remove_dir_all" or name == "remove_file"
+    end name == "__defer__" or name == "log" or name == "elog" or name == "__direct__" or name == "__fast_direct__" or name == "__native__" or name == "__sandbox__" or name == "some" or name == "none" or name == "ok" or name == "err" or name == "read_file" or name == "write_file" or name == "dict" or name == "set" or name == "chan" or name == "env_var" or name == "run_command" or name == "run_command_combined" or name == "http_get" or name == "current_dir" or name == "read_stdin_line" or name == "read_stdin_exact" or name == "write_stdout" or name == "run_command_inherit" or name == "sha256_hex" or name == "now_ms" or name == "target_os" or name == "args" or name == "exit" or name == "copy_file" or name == "create_dir" or name == "dir_exists" or name == "list_dir" or name == "path_exists" or name == "remove_dir_all" or name == "remove_file"
 ]
 
 fun str_starts_with_underscore(s: Str) -> Bool [
@@ -253,7 +253,7 @@ impl FnChecker [
     !!! `expr_as_ident_name` w typeinfer.hcs).
     fun check_call(self, name: Str, arg_count: Int) [
         let call_k = self.next_call_index(name.clone())
-        if is_builtin_func(name) or self.sigs.structs.contains(name) or self.sigs.variant_owner.contains(name) or self.imported_names.contains(name) [
+        if is_builtin_func(name) or self.sigs.structs.contains(name) or self.sigs.variant_owner.contains(name) or self.imported_names.contains(name) or self.vars.contains(name) [
             end
         ]
         match self.sigs.functions.fetch(name) [
@@ -339,6 +339,35 @@ impl FnChecker [
             ]
             Cast(target, type_ref) -> [
                 self.visit_expr(target)
+            ]
+            TupleLit(titems) -> [
+                let tk = 0
+                while tk < titems.len() [
+                    self.visit_expr(titems[tk].clone())
+                    tk = tk + 1
+                ]
+            ]
+            TypeApp(tinner, targs) -> [
+                self.visit_expr(tinner)
+            ]
+            Lambda(lparams, lret, lbody) -> [
+                !!! (0.7) domkniecie: parametry sa zmiennymi lokalnymi, cialo to osobny
+                !!! zakres bez wpisow w tabeli pozycji (stad zachowanie indeksu i pos_ok).
+                let lk = 0
+                while lk < lparams.len() [
+                    self.declare_var(lparams[lk].name.clone(), lparams[lk].type_ref.clone())
+                    self.mark_used(lparams[lk].name.clone())
+                    lk = lk + 1
+                ]
+                let saved_idx = self.stmt_idx
+                let saved_ok = self.pos_ok
+                let saved_ret = self.ret_type.clone()
+                self.pos_ok = false
+                self.ret_type = lret.clone()
+                self.visit_stmts(lbody)
+                self.stmt_idx = saved_idx
+                self.pos_ok = saved_ok
+                self.ret_type = saved_ret
             ]
             TryOp(target) -> [
                 self.visit_expr(target)
@@ -894,7 +923,7 @@ impl Checker [
         let ret_type_for_e0002 = checker.ret_type.clone()
         match ret_type_for_e0002 [
             Some(rt) -> [
-                if not has_value_return(body) [
+                if not has_value_return(body) and not is_bodyless_marker(body.clone()) [
                     let fname_for_e0002 = checker.fn_name.clone()
                     checker.diags.push(Diagnostic("error", "E0002", "funkcja '" + fname_for_e0002 + "' deklaruje typ zwracany " + rt.name + ", ale nigdzie nie ma 'end <wartosc>'", start_line, 0, 1, ""))
                 ]
@@ -1032,4 +1061,27 @@ fun if_range_suffix(min_args: Int, max_args: Int) -> Str [
         end ""
     ]
     end ".." + (max_args as Str)
+]
+
+
+!!! (0.7) metoda `trait` bez ciala ma znacznik `[ExprStmt(NullLit)]` - nie podlega E0002.
+fun is_bodyless_marker(body: List<Stmt>) -> Bool [
+    if body.len() != 1 [
+        end false
+    ]
+    match body[0].clone() [
+        ExprStmt(e) -> [
+            match e [
+                NullLit -> [
+                    end true
+                ]
+                _ -> [
+                    end false
+                ]
+            ]
+        ]
+        _ -> [
+            end false
+        ]
+    ]
 ]
