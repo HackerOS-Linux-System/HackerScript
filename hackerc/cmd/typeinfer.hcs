@@ -730,10 +730,44 @@ fun infer_expr_type_sv(expr: Expr, sigs: Signatures, vars: Dict<Str, Option<Type
                 ]
             ]
         ]
+        TupleLit(items) -> [
+            let tl: List<TypeRef> = []
+            let ti = 0
+            while ti < items.len() [
+                match infer_expr_type_sv(items[ti].clone(), sigs, vars) [
+                    Some(et) -> [
+                        tl.push(et)
+                    ]
+                    None -> [
+                        end none()
+                    ]
+                ]
+                ti = ti + 1
+            ]
+            end some(make_tuple_type(tl))
+        ]
+        Lambda(lparams, lret, lbody) -> [
+            end none()
+        ]
+        TypeApp(inner, targs) -> [
+            end infer_expr_type_sv(inner, sigs, vars)
+        ]
         Attr(target, name) -> [
             let target_t = infer_expr_type_sv(target, sigs, vars)
             match target_t [
                 Some(tt) -> [
+                    let name_s: Str = name.clone()
+                    if tt.name == "Tuple" and name_s.len() > 0 and is_digit(name_s.char_at(0)) [
+                        let telems = tuple_type_elems(tt.clone())
+                        let tidx = 0
+                        while tidx < telems.len() [
+                            if (tidx as Str) == name [
+                                end some(telems[tidx].clone())
+                            ]
+                            tidx = tidx + 1
+                        ]
+                        end none()
+                    ]
                     match sigs.structs.fetch(tt.name) [
                         Some(s) -> [
                             let fields = struct_decl_fields(s)
