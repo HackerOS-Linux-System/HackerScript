@@ -471,7 +471,7 @@ fun site_out_names(srcs: List<Str>, idx: Int) -> List<Str> [
 ]
 
 fun site_trim_base(b: Str) -> Str [
-    let out = b.clone()
+    let out: Str = b.clone()
     while out.len() > 0 and out.char_at(out.len() - 1) == "/" [
         out = out.slice(0, out.len() - 1)
     ]
@@ -480,6 +480,32 @@ fun site_trim_base(b: Str) -> Str [
 
 !!! Buduje jedna strone: `src_path` -> `dir/<html_name>` + `dir/<js_name>`.
 !!! Zwraca 0 albo 1 (blad). `js_out` dostaje wygenerowany JS (do wykrycia trybu history).
+!!! (0.7) `--ssr`: uruchamia skrypt Node/jsdom. Brak Node/jsdom to OSTRZEZENIE
+!!! (strona dziala dalej, tylko bez prerenderingu), nie blad budowania.
+fun site_prerender(dir: Str, html_name: Str, js_name: Str, base: Str, script_src: Str) [
+    let script_path = dir + "/__hks_ssr.cjs"
+    match write_file(script_path.clone(), site_ssr_script()) [
+        Ok(_w) -> [
+            let unused = 0
+        ]
+        Err(e) -> [
+            elog(c_red("hackerc website --ssr:") + " nie mozna zapisac skryptu: " + e)
+            end
+        ]
+    ]
+    let out = run_command_combined("node", [script_path.clone(), dir.clone(), html_name, js_name, base, script_src])
+    remove_file(script_path)
+    if str_contains_substring(out.clone(), "NOJSDOM") [
+        elog(c_bold_yellow("hackerc website --ssr:") + " brak modulu jsdom - prerendering pominiety (zainstaluj: npm i -g jsdom)")
+        end
+    ]
+    if str_contains_substring(out.clone(), "OK ") [
+        log(c_bold_cyan("hackerc website:") + " SSR (prerendering) wykonany: " + out)
+    ] else [
+        elog(c_bold_yellow("hackerc website --ssr:") + " prerendering nie powiodl sie (Node dostepny?): " + out)
+    ]
+]
+
 fun site_build_one(src_path: Str, dir: Str, html_name: Str, js_name: Str, opts: SiteOpts) -> Int [
     if not file_readable(src_path.clone()) [
         elog(c_red("hackerc:") + " nie znaleziono pliku " + src_path)
@@ -601,6 +627,9 @@ fun site_build_one(src_path: Str, dir: Str, html_name: Str, js_name: Str, opts: 
                     end 1
                 ]
             ]
+            if opts.ssr [
+                site_prerender(dir.clone(), html_name.clone(), js_name.clone(), site_trim_base(opts.base.clone()), script_src.clone())
+            ]
             if str_contains_substring(js.clone(), "route_mode(\"history\")") [
                 match write_file(dir + "/404.html", site_404_html(site_trim_base(opts.base.clone()))) [
                     Ok(_w3) -> [
@@ -702,7 +731,7 @@ fun site_sources_text(srcs: List<Str>) -> Str [
 !!! `--watch`: przebudowuje przy kazdej zmianie zrodel (odpytywanie co 0.5 s),
 !!! wlacza tryb dev (nakladka z bledami + automatyczne przeladowanie strony).
 fun site_watch(srcs: List<Str>, out_path: Str, opts: SiteOpts) -> Int [
-    let dev_opts = SiteOpts(opts.minify, true, true, opts.base.clone(), opts.has_base, opts.assets.clone())
+    let dev_opts = SiteOpts(opts.minify, true, true, opts.base.clone(), opts.has_base, opts.assets.clone(), opts.ssr)
     let dir = site_out_dir(srcs.clone(), out_path.clone())
     log(c_bold_cyan("hackerc website:") + " --watch (Ctrl+C konczy). Serwer: python3 -m http.server -d " + dir)
     let last = ""
@@ -1308,7 +1337,7 @@ fun print_usage() [
     log("      hlib verify <plik.hlib> [--pubkey HEX]")
     log("      hlib keygen [-o klucz.key]")
     log("    js                  hackerc js <plik.hcs> [-o wynik.js] - JavaScript (use <lang:javascript>)")
-    log("    website             hackerc website <a.hcs> [b.hcs ...] [-o katalog] [--minify] [--dev] [--watch] [--base /sciezka] [--assets katalog] - strona (use <mode:website>), docs/WEBSITE.md")
+    log("    website             hackerc website <a.hcs> [b.hcs ...] [-o katalog] [--minify] [--dev] [--watch] [--ssr] [--base /sciezka] [--assets katalog] - strona (use <mode:website>), docs/WEBSITE.md")
     log("    emit-module         transpiluje JEDEN plik do JEDNEGO modulu .rs, bez wiedzy o reszcie projektu - uzywane WEWNETRZNIE przez `bit build` przy `using <inna-wersja>`, patrz docs/MULTI_VERSION.md")
     log("      emit-module <plik.hcs> -o <plik.rs> --module-name <nazwa>")
     log("")
@@ -1424,7 +1453,7 @@ fun site_opts_from_flags(argv: List<Str>) -> SiteOpts [
             let unused2 = 0
         ]
     ]
-    end SiteOpts(has_flag(argv.clone(), "--minify"), has_flag(argv.clone(), "--dev"), has_flag(argv.clone(), "--watch"), base, has_base, assets)
+    end SiteOpts(has_flag(argv.clone(), "--minify"), has_flag(argv.clone(), "--dev"), has_flag(argv.clone(), "--watch"), base, has_base, assets, has_flag(argv.clone(), "--ssr"))
 ]
 
 !!! Punkt wejscia - parytet z `main(argv)` (cli.py), WLACZAJAC
