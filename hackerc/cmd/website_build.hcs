@@ -12,11 +12,12 @@ struct SiteOpts [
     watch: Bool,
     base: Str,
     has_base: Bool,
-    assets: Str
+    assets: Str,
+    ssr: Bool
 ]
 
 fun site_opts_default() -> SiteOpts [
-    end SiteOpts(false, false, false, "", false, "")
+    end SiteOpts(false, false, false, "", false, "", false)
 ]
 
 !!! -- znaki -----------------------------------------------------------
@@ -113,7 +114,7 @@ fun site_js_minify(js: Str) -> Str [
     let out: List<Str> = []
     let i = 0
     while i < lines.len() [
-        let ln = lines[i].clone()
+        let ln: Str = lines[i].clone()
         let a = 0
         while a < ln.len() and (ln.char_at(a) == " " or ln.char_at(a) == "\t" or ln.char_at(a) == "\r") [
             a = a + 1
@@ -565,7 +566,7 @@ fun site_copy_tree(src: Str, dest: Str) -> Int [
             create_dir_ok(dest.clone())
             let i = 0
             while i < names.len() [
-                let nm = names[i].clone()
+                let nm: Str = names[i].clone()
                 if nm != "" and nm.char_at(0) != "." [
                     count = count + site_copy_tree(src.clone() + "/" + nm.clone(), dest.clone() + "/" + nm.clone())
                 ]
@@ -574,4 +575,60 @@ fun site_copy_tree(src: Str, dest: Str) -> Int [
         ]
     ]
     end count
+]
+
+!!! (0.7) `hackerc website --ssr`: skrypt Node (jsdom) prerenderujacy zawartosc `#app`
+!!! do statycznego HTML (SEO, szybki pierwszy ekran). Klient po starcie czyści
+!!! prerenderowana zawartosc (`data-hks-ssr`, patrz `app_root()` w runtime) i
+!!! renderuje od nowa - to prerendering, nie pelna hydratacja.
+fun site_ssr_script() -> Str [
+    let l: List<Str> = []
+    l.push("const fs = require(\"fs\");")
+    l.push("const path = require(\"path\");")
+    l.push("let JSDOM = null;")
+    l.push("try { JSDOM = require(\"jsdom\").JSDOM; } catch (e) {")
+    l.push("    try {")
+    l.push("        const root = require(\"child_process\").execSync(\"npm root -g\").toString().trim();")
+    l.push("        JSDOM = require(path.join(root, \"jsdom\")).JSDOM;")
+    l.push("    } catch (e2) { console.log(\"NOJSDOM\"); process.exit(3); }")
+    l.push("}")
+    l.push("const args = process.argv.slice(2);")
+    l.push("const dir = args[0], htmlName = args[1], jsName = args[2], base = args[3], scriptSrc = args[4];")
+    l.push("const html = fs.readFileSync(path.join(dir, htmlName), \"utf8\");")
+    l.push("const js = fs.readFileSync(path.join(dir, jsName), \"utf8\");")
+    l.push("const sleep = (ms) => new Promise((r) => setTimeout(r, ms));")
+    l.push("async function render(url) {")
+    l.push("    const dom = new JSDOM(html, { runScripts: \"outside-only\", url: \"http://localhost\" + url, pretendToBeVisual: true });")
+    l.push("    const w = dom.window;")
+    l.push("    try { w.eval(js); } catch (e) { console.log(\"ERR \" + e.message); }")
+    l.push("    await sleep(150);")
+    l.push("    const app = w.document.getElementById(\"app\");")
+    l.push("    const inner = app ? app.innerHTML : \"\";")
+    l.push("    let mode = \"hash\";")
+    l.push("    let routes = [];")
+    l.push("    try { const info = w.__hks_route_info ? w.__hks_route_info() : null; if (info) { mode = info.mode; routes = Array.from(info.routes, (x) => Array.from(x)); } } catch (e) {}")
+    l.push("    w.close();")
+    l.push("    return { inner: inner, mode: mode, routes: routes };")
+    l.push("}")
+    l.push("function inject(inner) {")
+    l.push("    return html.replace(\"<div id=\\\"app\\\"></div>\", () => \"<div id=\\\"app\\\" data-hks-ssr>\" + inner + \"</div>\");")
+    l.push("}")
+    l.push("(async () => {")
+    l.push("    const first = await render(\"/\");")
+    l.push("    fs.writeFileSync(path.join(dir, htmlName), inject(first.inner));")
+    l.push("    let n = 1;")
+    l.push("    if (first.mode === \"history\") {")
+    l.push("        const abs = scriptSrc.startsWith(\"/\") ? scriptSrc : (base || \"\") + \"/\" + scriptSrc;")
+    l.push("        for (const parts of first.routes) {")
+    l.push("            if (parts.length === 0 || parts.some((p) => p === \"\" || p[0] === \":\" || p === \"*\")) continue;")
+    l.push("            const r = await render(\"/\" + parts.join(\"/\"));")
+    l.push("            const out = path.join(dir, ...parts, \"index.html\");")
+    l.push("            fs.mkdirSync(path.dirname(out), { recursive: true });")
+    l.push("            fs.writeFileSync(out, inject(r.inner).split(\"src=\\\"\" + scriptSrc + \"\\\"\").join(\"src=\\\"\" + abs + \"\\\"\"));")
+    l.push("            n++;")
+    l.push("        }")
+    l.push("    }")
+    l.push("    console.log(\"OK \" + n);")
+    l.push("})();")
+    end str_join(l, "\n")
 ]
