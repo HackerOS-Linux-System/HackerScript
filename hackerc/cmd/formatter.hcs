@@ -60,6 +60,48 @@ impl Formatter [
     !!! bug udokumentowany w formatter.py, naprawiony TAM i tu od
     !!! razu w pierwszej wersji).
     fun fmt_type(self, t: TypeRef) -> Str [
+        if t.name == "TupleEnd" [
+            end "()"
+        ]
+        if t.name == "Tuple" [
+            let tes = tuple_type_elems(t.clone())
+            let tparts: List<Str> = []
+            let tk = 0
+            while tk < tes.len() [
+                tparts.push(self.fmt_type(tes[tk].clone()))
+                tk = tk + 1
+            ]
+            if tparts.len() == 1 [
+                end "(" + tparts[0].clone() + ",)"
+            ]
+            end "(" + join_str_list(tparts, ", ") + ")"
+        ]
+        if t.name == "Fn" [
+            let fps: List<Str> = []
+            match t.generic.clone() [
+                Some(fg) -> [
+                    let fes = tuple_type_elems(fg)
+                    let fk = 0
+                    while fk < fes.len() [
+                        fps.push(self.fmt_type(fes[fk].clone()))
+                        fk = fk + 1
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+            let fr = ""
+            match t.generic2.clone() [
+                Some(frt) -> [
+                    if frt.name != "TupleEnd" [
+                        fr = " -> " + self.fmt_type(frt)
+                    ]
+                ]
+                None -> [
+                ]
+            ]
+            end "Fn(" + join_str_list(fps, ", ") + ")" + fr
+        ]
         match t.generic.clone() [
             Some(g) -> [
                 match t.generic2.clone() [
@@ -103,6 +145,14 @@ impl Formatter [
         ]
     ]
 
+    fun fmt_block_flat(self, stmts: List<Stmt>) [
+        let i = 0
+        while i < stmts.len() [
+            self.fmt_stmt(stmts[i].clone())
+            i = i + 1
+        ]
+    ]
+
     fun fmt_block(self, stmts: List<Stmt>) [
         self.indent = self.indent + 1
         let i = 0
@@ -138,10 +188,22 @@ impl Formatter [
     ]
 
     fun fmt_type_params(self, type_params: List<Str>) -> Str [
-        if type_params.len() == 0 [
+        let names = tp_names(type_params.clone())
+        if names.len() == 0 [
             end ""
         ]
-        end "<" + join_str_list(type_params, ", ") + ">"
+        let shown: List<Str> = []
+        let nk = 0
+        while nk < names.len() [
+            let b = tp_bound_of(type_params.clone(), names[nk].clone())
+            if b != "" [
+                shown.push(names[nk].clone() + ": " + b)
+            ] else [
+                shown.push(names[nk].clone())
+            ]
+            nk = nk + 1
+        ]
+        end "<" + join_str_list(shown, ", ") + ">"
     ]
 
     fun fmt_fun(self, name: Str, params: List<Param>, ret: Option<TypeRef>, body: List<Stmt>, is_pub: Bool, type_params: List<Str>, is_async: Bool) [
@@ -526,7 +588,16 @@ impl Formatter [
                 self.emit("]")
             ]
             ImplDecl(struct_name, methods, type_params) -> [
-                self.emit("impl " + struct_name + self.fmt_type_params(type_params) + " [")
+                let sn_s: Str = struct_name.clone()
+                let impl_head = "impl " + struct_name + self.fmt_type_params(type_params)
+                let impl_tr = tp_trait_of(type_params.clone())
+                if impl_tr != "" [
+                    impl_head = "impl " + impl_tr + " for " + struct_name + self.fmt_type_params(type_params)
+                ]
+                if sn_s.len() > 7 and sn_s.slice(0, 7) == "@trait:" [
+                    impl_head = "trait " + sn_s.slice(7, sn_s.len())
+                ]
+                self.emit(impl_head + " [")
                 self.indent = self.indent + 1
                 let i = 0
                 let n = methods.len()
@@ -566,6 +637,13 @@ impl Formatter [
     ]
 
     fun fmt_expr_stmt(self, e: Expr) [
+        let defer_body = defer_body_of(e.clone())
+        if defer_body.len() > 0 or is_defer_call(e.clone()) [
+            self.emit("defer [")
+            self.fmt_block(defer_body)
+            self.emit("]")
+            end
+        ]
         match e.clone() [
             StringLit(value, is_doc) -> [
                 if is_doc [
@@ -614,6 +692,65 @@ impl Formatter [
             ]
             IdentExpr(name) -> [
                 end name
+            ]
+            TupleLit(titems) -> [
+                let tstrs: List<Str> = []
+                let tk = 0
+                while tk < titems.len() [
+                    tstrs.push(self.fmt_expr(titems[tk].clone()))
+                    tk = tk + 1
+                ]
+                if tstrs.len() == 1 [
+                    end "(" + tstrs[0].clone() + ",)"
+                ]
+                end "(" + join_str_list(tstrs, ", ") + ")"
+            ]
+            TypeApp(tinner, targs) -> [
+                let tas: List<Str> = []
+                let tj = 0
+                while tj < targs.len() [
+                    tas.push(self.fmt_type(targs[tj].clone()))
+                    tj = tj + 1
+                ]
+                end self.fmt_expr(tinner) + "<" + join_str_list(tas, ", ") + ">"
+            ]
+            Lambda(lparams, lret, lbody) -> [
+                let lps: List<Str> = []
+                let lk = 0
+                while lk < lparams.len() [
+                    lps.push(self.fmt_param(lparams[lk].clone()))
+                    lk = lk + 1
+                ]
+                let lhead = "fn(" + join_str_list(lps, ", ") + ")"
+                match lret [
+                    Some(lr) -> [
+                        lhead = lhead + " -> " + self.fmt_type(lr)
+                    ]
+                    None -> [
+                    ]
+                ]
+                if lbody.len() == 1 [
+                    match lbody[0].clone() [
+                        ReturnStmt(rv) -> [
+                            match rv [
+                                Some(re) -> [
+                                    end lhead + " = " + self.fmt_expr(re)
+                                ]
+                                None -> [
+                                ]
+                            ]
+                        ]
+                        _ -> [
+                        ]
+                    ]
+                ]
+                let sub: Formatter = self.clone()
+                sub.lines = []
+                sub.indent = self.indent + 1
+                sub.fmt_block_flat(lbody)
+                let inner = join_str_list(sub.lines.clone(), "\n")
+                let saved_ind = self.indent
+                end lhead + " [\n" + inner + "\n" + repeat_str("    ", saved_ind) + "]"
             ]
             ListLit(items) -> [
                 let item_strs: List<Str> = []
@@ -745,4 +882,36 @@ fun main() [
     let src = "fun  add(a:Int,b:Int)->Int[\n  end a+b\n]\n"
     let out = format_source(src, "<demo>")
     log(out)
+]
+
+
+!!! (0.7) `defer [ ... ]` w AST to `__defer__(fn() [ ... ])`.
+fun is_defer_call(e: Expr) -> Bool [
+    match e [
+        Call(c, args) -> [
+            end expr_as_ident_name(c.clone()) == "__defer__" and args.len() == 1
+        ]
+        _ -> [
+            end false
+        ]
+    ]
+]
+
+fun defer_body_of(e: Expr) -> List<Stmt> [
+    match e [
+        Call(c, args) -> [
+            if expr_as_ident_name(c.clone()) == "__defer__" and args.len() == 1 [
+                match args[0].clone() [
+                    Lambda(dp, dr, dbody) -> [
+                        end dbody
+                    ]
+                    _ -> [
+                    ]
+                ]
+            ]
+        ]
+        _ -> [
+        ]
+    ]
+    end []
 ]
