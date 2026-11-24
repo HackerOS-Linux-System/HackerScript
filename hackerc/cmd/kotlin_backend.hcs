@@ -214,6 +214,43 @@ fun kt_expr(e: Expr) -> Str [
         ListLit(items) -> [
             end "mutableListOf(" + kt_join(items) + ")"
         ]
+        TupleLit(titems) -> [
+            !!! (0.7) krotki 2- i 3-elementowe -> Pair/Triple
+            if titems.len() == 2 [
+                end "Pair(" + kt_join(titems) + ")"
+            ]
+            if titems.len() == 3 [
+                end "Triple(" + kt_join(titems) + ")"
+            ]
+            end "__HKS_KT_UNSUPPORTED__"
+        ]
+        TypeApp(tinner, targs) -> [
+            end kt_expr(tinner)
+        ]
+        Lambda(lparams, lret, lbody) -> [
+            if lbody.len() == 1 [
+                match lbody[0].clone() [
+                    ReturnStmt(rv) -> [
+                        match rv [
+                            Some(re) -> [
+                                let kps: List<Str> = []
+                                let kk = 0
+                                while kk < lparams.len() [
+                                    kps.push(lparams[kk].name.clone())
+                                    kk = kk + 1
+                                ]
+                                end "{ " + join_str_list(kps, ", ") + " -> " + kt_expr(re) + " }"
+                            ]
+                            None -> [
+                            ]
+                        ]
+                    ]
+                    _ -> [
+                    ]
+                ]
+            ]
+            end "__HKS_KT_UNSUPPORTED__"
+        ]
         BinOp(op, l, r) -> [
             let kop = op.clone()
             if op == "and" [
