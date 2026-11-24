@@ -177,7 +177,7 @@ przebiegach z komunikatem. **Komponent** to zwykła funkcja zwracająca element:
 ## Budowanie strony: `hackerc website`
 
 ```
-hackerc website a.hcs [b.hcs ...] [-o katalog] [--minify] [--dev] [--watch] [--base /sciezka] [--assets katalog]
+hackerc website a.hcs [b.hcs ...] [-o katalog] [--minify] [--dev] [--watch] [--ssr] [--base /sciezka] [--assets katalog]
 ```
 - **Wiele stron:** każde wejście → `<nazwa>.html` + `<nazwa>.js`; wejście o nazwie `index` (albo pierwsze) → `index.html` + `app.js`.
 - **`use <site:lang=en>`** — atrybut `<html lang>` (domyślnie `pl`).
@@ -191,6 +191,15 @@ hackerc website a.hcs [b.hcs ...] [-o katalog] [--minify] [--dev] [--watch] [--b
 - **`--dev`:** nakładka z błędami na stronie (wyjątki z handlerów i `unhandledrejection`), oraz plik `__hks_version` do
   automatycznego przeładowania. **`--watch`:** przebudowuje po zmianie źródeł (odpytywanie co 0,5 s; nie obserwuje assetów)
   i włącza `--dev`; serwer uruchom osobno: `python3 -m http.server -d <katalog>`.
+- **`--ssr` (0.7):** prerendering. Po zbudowaniu kompilator uruchamia Node + jsdom, wykonuje
+  `app.js` i wstawia wyrenderowaną zawartość `#app` do HTML (`<div id="app" data-hks-ssr>`), więc roboty i
+  podglądy linków widzą treść, a pierwszy ekran jest od razu. W trybie `route_mode("history")` powstaje
+  dodatkowo `<trasa>/index.html` dla każdej trasy **statycznej** (bez `:param` i `*`); `--base` jest uwzględniany.
+  Klient po starcie czyści prerenderowaną zawartość (`app_root()` usuwa `data-hks-ssr`) i renderuje od nowa —
+  to prerendering, **nie** pełna hydratacja (jest krótki błysk przerenderowania, stan nie jest przejmowany).
+  Wymaga `jsdom` (`npm i jsdom` obok projektu albo `npm i -g jsdom`); bez Node/jsdom budowanie kończy się
+  ostrzeżeniem, a strona działa bez prerenderingu. Prerender wykonuje kod `main()` w jsdom, więc nie używaj
+  w nim API niedostępnych poza przeglądarką bez zabezpieczenia (`fetch` do zasobów itp.).
 - **Ostrzeżenia przy budowaniu:** nieznana funkcja o prefiksie mostka (`dom_tekst` → „czy chodziło o `dom_text`?”),
   literały całkowite > 2^53 (w JS `Int` to `float`), klasy użyte w kodzie bez selektora w blokach `style`.
 
@@ -203,12 +212,10 @@ Blok `style { }` sprawdzono na przykładzie z `docs/website-style/` (CSS ze stri
 zawierającymi klamry, `@media`, kilka bloków, `fmt` idempotentny) oraz na prawdziwej stronie
 (porównanie wstawionego CSS z oryginalnym arkuszem). Nie testowano w prawdziwej przeglądarce.
 
-**Ta runda:** runtime (zdarzenia, DOM, sieć, storage, sygnały, router w trybach `#` i `history`) ma 17 testów w jsdom
-(`tests/website/run.sh`; wyciągają kod bezpośrednio z `hackerc/cmd/js_runtime.hcs`). Logikę `css_scope`/minifikacji CSS
-sprawdzono w prototypach Pythona, a pliki `.hcs` — starym `hackerc 0.5 check` (składnia/typy). **Nie** uruchomiono
-samego kompilatora 0.6 (brak toolchaina Rust i binarki 0.6), więc `lexer.hcs`, `main.hcs`, `website_build.hcs` oraz natywne
-fragmenty std (`run_capture_timeout`, `hkdf_*`, `term_read_key`) wymagają pełnej weryfikacji `bit build` + `verify.sh`.
-Nie testowano w prawdziwej przeglądarce (Playwright).
+**Weryfikacja 0.7:** strona z `docs/website-app` została zbudowana kompilatorem 0.6 (zbudowanym ze źródeł) i
+uruchomiona w jsdom (router w trybie `#`, `nav_link`, sygnały). `--ssr` sprawdza `tests/website/run.sh` (tryb
+`history`: prerender tras statycznych, pominięcie tras z parametrem, brak dublowania po starcie klienta).
+Nadal **nie** testowano w prawdziwej przeglądarce (Playwright) ani na urządzeniach mobilnych.
 
 Przykładowa strona (struct + `impl`, lista, zmienne globalne, zdarzenia
 `click`, pole `input`, `async fun`) została uruchomiona w **jsdom**
@@ -219,7 +226,7 @@ przeglądarce ani na urządzeniach mobilnych.
 
 ## Ograniczenia
 
-- brak SSR; jedna strona na plik wejściowy (wiele podstron = wiele plików wejściowych w jednym wywołaniu `hackerc website`);
+- SSR to prerendering (bez hydratacji, patrz `--ssr`); jedna strona na plik wejściowy (wiele podstron = wiele plików wejściowych w jednym wywołaniu `hackerc website`);
   `bind_list` renderuje listę od nowa (bez kluczy); `--minify` JS jest tylko liniowy
 - `native {...}` i `get <npm:...>` niedostępne w trybie strony
 - ograniczenia backendu JavaScript z `docs/JAVASCRIPT.md` (m.in.
