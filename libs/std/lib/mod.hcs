@@ -5,6 +5,8 @@
 !!   get <std:cybersecurity::entropy>        - entropia Shannona (detekcja packerow), ct_eq
 !!   get <std:cybersecurity::hash>           - 0.6: md5/sha1/sha2/sha3/blake2/crc32 (tekst, bajty, plik)
 !!   get <std:cybersecurity::mac>            - 0.6: HMAC (sha1/256/384/512) + PBKDF2
+!!   get <std:cybersecurity::kdf>            - 0.7: HKDF (RFC 5869), scrypt, Argon2id (hash PHC + weryfikacja)
+!!   get <std:cybersecurity::sign>           - 0.7: podpisy Ed25519 (klucze/podpisy w hex)
 !!   get <std:cybersecurity::random>         - 0.6: bezpieczne bajty/tokeny/liczby (OsRng)
 !!   get <std:python>                       - 0.6: osadzony CPython, bledy jako Result, py_set_*/py_eval*
 !!   get <std:cybersecurity::cipher>         - 0.6: AEAD (chacha20poly1305, aes256gcm), losowy nonce,
