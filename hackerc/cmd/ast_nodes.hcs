@@ -21,7 +21,14 @@ enum Expr [
     Cast(Expr, TypeRef),
     TryOp(Expr),
     Attr(Expr, Str),
-    ListLit(List<Expr>)
+    ListLit(List<Expr>),
+    !! (0.7) Krotka `(a, b, c)`.
+    TupleLit(List<Expr>),
+    !! (0.7) Domkniecie `fn(x: Int) -> Int [ ... ]` albo `fn(x) x + 1`
+    !! (parametry, typ wyniku, cialo; krotkie ciało = `[ReturnStmt(e)]`).
+    Lambda(List<Param>, Option<TypeRef>, List<Stmt>),
+    !! (0.7) Jawne argumenty typu przy wywolaniu: `first<Int>(xs)`.
+    TypeApp(Expr, List<TypeRef>)
 ]
 
 !!! Jeden parametr `fun`/pole `struct` - `type_ref`/`default_expr` sa
@@ -257,4 +264,105 @@ fun stmt_tag(s: Stmt) -> Str [
             end "impl"
         ]
     ]
+]
+
+
+!!! (0.7) KROTKI W TYPACH. `TypeRef` ma tylko `generic`/`generic2`, wiec krotka
+!!! `(A, B, C)` to lista "cons": `Tuple<A, Tuple<B, Tuple<C, TupleEnd>>>`.
+!!! Jednoznaczne takze dla krotek zagniezdzonych (zagniezdzona krotka jest
+!!! `generic` komorki, nie jej ogonem).
+fun type_ref_id(t: TypeRef) -> TypeRef [
+    end t.clone()
+]
+
+fun make_tuple_type(elems: List<TypeRef>) -> TypeRef [
+    let acc = TypeRef("TupleEnd", none(), none())
+    let i = elems.len()
+    while i > 0 [
+        i = i - 1
+        acc = TypeRef("Tuple", some(elems[i].clone()), some(acc))
+    ]
+    end acc
+]
+
+fun tuple_type_elems(t: TypeRef) -> List<TypeRef> [
+    let out: List<TypeRef> = []
+    let cur = t.clone()
+    while cur.name == "Tuple" [
+        match cur.generic.clone() [
+            Some(g) -> [
+                out.push(type_ref_id(g))
+            ]
+            None -> [
+            ]
+        ]
+        match cur.generic2.clone() [
+            Some(rest) -> [
+                cur = type_ref_id(rest)
+            ]
+            None -> [
+                break
+            ]
+        ]
+    ]
+    end out
+]
+
+!!! (0.7) Parametry generyczne z ograniczeniami: `fun f<T: Show + Clone>(..)`.
+!!! Lista `type_params` trzyma zwykle nazwy (`"T"`); ograniczenia to osobny
+!!! wpis-znacznik `"@bound:T:Show+Clone"`, ktory generic_head* zamienia na
+!!! `T: Show + Clone` (a reszta kodu traktuje jak nieznana nazwe - nieszkodliwie).
+fun tp_names(tps: List<Str>) -> List<Str> [
+    let out: List<Str> = []
+    let i = 0
+    while i < tps.len() [
+        let s: Str = tps[i].clone()
+        if not (s.len() > 7 and s.slice(0, 7) == "@bound:") and not (s.len() > 7 and s.slice(0, 7) == "@trait:") [
+            out.push(s)
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+fun tp_bound_of(tps: List<Str>, name: Str) -> Str [
+    let prefix = "@bound:" + name + ":"
+    let i = 0
+    while i < tps.len() [
+        let s: Str = tps[i].clone()
+        if s.len() > prefix.len() and s.slice(0, prefix.len()) == prefix [
+            end str_replace_plus(s.slice(prefix.len(), s.len()))
+        ]
+        i = i + 1
+    ]
+    end ""
+]
+
+fun str_replace_plus(s: Str) -> Str [
+    let out = ""
+    let i = 0
+    while i < s.len() [
+        let c = s.char_at(i)
+        if c == "+" [
+            out = out + " + "
+        ] else [
+            out = out + c
+        ]
+        i = i + 1
+    ]
+    end out
+]
+
+!!! `@trait:Nazwa` w `type_params` ImplDecl = `impl Nazwa for Typ [ ... ]`;
+!!! nazwa ImplDecl zaczynajaca sie od `@trait:` = deklaracja `trait Nazwa [ ... ]`.
+fun tp_trait_of(tps: List<Str>) -> Str [
+    let i = 0
+    while i < tps.len() [
+        let s: Str = tps[i].clone()
+        if s.len() > 7 and s.slice(0, 7) == "@trait:" [
+            end s.slice(7, s.len())
+        ]
+        i = i + 1
+    ]
+    end ""
 ]
