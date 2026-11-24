@@ -274,6 +274,50 @@ fun rust_type_name(t: TypeRef, sigs: Signatures, type_params: List<Str>) -> Str 
     if list_contains_str(type_params, t.name) [
         end t.name
     ]
+    if t.name == "TupleEnd" [
+        end "()"
+    ]
+    if t.name == "Tuple" [
+        !!! (0.7) krotka `(A, B)` -> `(A, B)`; jednoelementowa `(A,)`
+        let tup_elems = tuple_type_elems(t.clone())
+        let tup_parts: List<Str> = []
+        let tpi = 0
+        while tpi < tup_elems.len() [
+            tup_parts.push(rust_type_name(tup_elems[tpi].clone(), sigs, type_params))
+            tpi = tpi + 1
+        ]
+        if tup_parts.len() == 1 [
+            end "(" + tup_parts[0].clone() + ",)"
+        ]
+        end "(" + join_str_list(tup_parts, ", ") + ")"
+    ]
+    if t.name == "Fn" [
+        !!! (0.7) typ domkniecia `Fn(A, B) -> R` -> `impl Fn(A, B) -> R`
+        let fn_ps: List<Str> = []
+        match t.generic.clone() [
+            Some(fg) -> [
+                let fn_elems = tuple_type_elems(fg)
+                let fpi = 0
+                while fpi < fn_elems.len() [
+                    fn_ps.push(rust_type_name(fn_elems[fpi].clone(), sigs, type_params))
+                    fpi = fpi + 1
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        let fn_ret = ""
+        match t.generic2.clone() [
+            Some(fr) -> [
+                if fr.name != "TupleEnd" [
+                    fn_ret = " -> " + rust_type_name(fr, sigs, type_params)
+                ]
+            ]
+            None -> [
+            ]
+        ]
+        end "impl Fn(" + join_str_list(fn_ps, ", ") + ")" + fn_ret
+    ]
     if t.name == "List" [
         if not type_ref_has_generic(t) [
             log("[hackerc-self] codegen: 'List' wymaga typu elementu, np. List<Int>")
@@ -826,6 +870,23 @@ fun walk_expr_for_char_indexing(e: Expr) -> List<Str> [
             out.extend(walk_expr_for_char_indexing(target))
             out.extend(walk_expr_for_char_indexing(index))
         ]
+        TupleLit(titems) -> [
+            let ti = 0
+            while ti < titems.len() [
+                out.extend(walk_expr_for_char_indexing(titems[ti].clone()))
+                ti = ti + 1
+            ]
+        ]
+        TypeApp(tinner, targs) -> [
+            out.extend(walk_expr_for_char_indexing(tinner))
+        ]
+        Lambda(lparams, lret, lbody) -> [
+            let li = 0
+            while li < lbody.len() [
+                out.extend(walk_stmt_for_char_indexing(lbody[li].clone()))
+                li = li + 1
+            ]
+        ]
         ListLit(items) -> [
             let i = 0
             let n = items.len()
@@ -1243,6 +1304,19 @@ impl MutTracker [
                 self.walk_expr(target)
                 self.walk_expr(index)
             ]
+            TupleLit(titems) -> [
+                let tj = 0
+                while tj < titems.len() [
+                    self.walk_expr(titems[tj])
+                    tj = tj + 1
+                ]
+            ]
+            TypeApp(tinner, targs) -> [
+                self.walk_expr(tinner)
+            ]
+            Lambda(lparams, lret, lbody) -> [
+                self.walk_stmts(lbody)
+            ]
             ListLit(items) -> [
                 let j = 0
                 let m = items.len()
@@ -1405,6 +1479,19 @@ impl SelfCallTracker [
             Index(target, index) -> [
                 self.walk_expr(target)
                 self.walk_expr(index)
+            ]
+            TupleLit(titems) -> [
+                let tj = 0
+                while tj < titems.len() [
+                    self.walk_expr(titems[tj])
+                    tj = tj + 1
+                ]
+            ]
+            TypeApp(tinner, targs) -> [
+                self.walk_expr(tinner)
+            ]
+            Lambda(lparams, lret, lbody) -> [
+                self.walk_stmts(lbody)
             ]
             ListLit(items) -> [
                 let j = 0
@@ -1977,7 +2064,7 @@ impl CodeGen [
     !!! nie "naprawiane" tutaj, bo cala reszta codegen.py polega na
     !!! DOKLADNIE tym zachowaniu).
     fun is_refable_type(self, t: TypeRef) -> Bool [
-        if t.name == "Str" or t.name == "List" or t.name == "Dict" [
+        if t.name == "Str" or t.name == "List" or t.name == "Dict" or t.name == "Tuple" [
             end true
         ]
         if self.sigs.structs.contains(t.name.clone()) [
@@ -2484,6 +2571,89 @@ impl CodeGen [
     !!! `wyrazenie as Typ` - `as Str` jest specjalne (`.to_string()`,
     !!! dziala dla KAZDEGO typu z `Display`/numerycznego), inne rzutuja
     !!! przez Rustowe `as`.
+    fun gen_type_args(self, targs: List<TypeRef>) -> Str [
+        let parts: List<Str> = []
+        let k = 0
+        while k < targs.len() [
+            parts.push(rust_type_name(targs[k].clone(), self.sigs, self.current_type_params))
+            k = k + 1
+        ]
+        end join_str_list(parts, ", ")
+    ]
+
+    !!! (0.7) Domkniecie -> `|a: T, b: U| -> R { ... }`. Cialo generowane przez zwykle
+    !!! `gen_stmts` do tymczasowego bufora (podmiana `self.output`), z zachowaniem i
+    !!! odtworzeniem stanu funkcji (typ wyniku, srodowisko, async). Pojedyncze
+    !!! `end wyrazenie` daje krotka forme `|a| wyrazenie`. `move` tylko gdy domkniecie
+    !!! jest zwracane z funkcji.
+    fun gen_lambda(self, lparams: List<Param>, lret: Option<TypeRef>, lbody: List<Stmt>, use_move: Bool) -> Str [
+        !!! Pracuje na LOKALNYM klonie generatora (`sub`), zeby `gen_expr` zostalo `&self`
+        !!! (mutacja `self` zrobilaby z niego `&mut self` i zepsula zagniezdzone `self.emit(&self.gen_expr(..))`).
+        let sub: CodeGen = self.clone()
+        sub.output = []
+        sub.indent = 1
+        sub.current_ret_type = lret.clone()
+        sub.in_async = false
+        let ps: List<Str> = []
+        let pi = 0
+        while pi < lparams.len() [
+            let lp = lparams[pi].clone()
+            sub.declare_env(lp.name.clone(), lp.type_ref.clone())
+            match lp.type_ref.clone() [
+                Some(lpt) -> [
+                    ps.push("mut " + lp.name.clone() + ": " + rust_type_name(lpt, self.sigs, self.current_type_params))
+                ]
+                None -> [
+                    ps.push("mut " + lp.name.clone())
+                ]
+            ]
+            pi = pi + 1
+        ]
+        let single: Option<Expr> = none()
+        if lbody.len() == 1 [
+            match lbody[0].clone() [
+                ReturnStmt(rv) -> [
+                    single = rv
+                ]
+                _ -> [
+                ]
+            ]
+        ]
+        let body_str = ""
+        match single [
+            Some(se) -> [
+                body_str = "{ " + sub.gen_return_expr(se) + " }"
+            ]
+            None -> [
+                sub.gen_stmts(lbody)
+                body_str = "{\n" + join_str_list(sub.output.clone(), "\n") + "\n" + self.indent_str_n(self.indent) + "}"
+            ]
+        ]
+        let head = ""
+        if use_move [
+            head = "move "
+        ]
+        head = head + "|" + join_str_list(ps, ", ") + "|"
+        match lret [
+            Some(lr) -> [
+                head = head + " -> " + rust_type_name(lr, self.sigs, self.current_type_params)
+            ]
+            None -> [
+            ]
+        ]
+        end head + " " + body_str
+    ]
+
+    fun indent_str_n(self, k: Int) -> Str [
+        let out = ""
+        let i = 0
+        while i < k [
+            out = out + "    "
+            i = i + 1
+        ]
+        end out
+    ]
+
     fun gen_cast(self, target: Expr, type_ref: TypeRef) -> Str [
         if type_ref.name == "Str" [
             end "(" + self.gen_expr(target) + ").to_string()"
@@ -2881,7 +3051,7 @@ impl CodeGen [
         ]
 
         if ident_name != "" and self.sigs.structs.contains(ident_name.clone()) [
-            end ident_name + "::new(" + self.gen_args_list(args) + ")"
+            end ident_name + "::hks_new(" + self.gen_args_list(args) + ")"
         ]
         if ident_name != "" [
             match self.sigs.functions.fetch(ident_name.clone()) [
@@ -2966,6 +3136,18 @@ impl CodeGen [
             ListLit(items) -> [
                 end "vec![" + self.gen_args_list(items) + "]"
             ]
+            TupleLit(titems) -> [
+                if titems.len() == 1 [
+                    end "(" + self.gen_args_list(titems) + ",)"
+                ]
+                end "(" + self.gen_args_list(titems) + ")"
+            ]
+            Lambda(lparams, lret, lbody) -> [
+                end self.gen_lambda(lparams, lret, lbody, false)
+            ]
+            TypeApp(tinner, targs) -> [
+                end self.gen_expr(tinner) + "::<" + self.gen_type_args(targs) + ">"
+            ]
             UnaryOp(op, operand) -> [
                 if op == "not" [
                     end "!(" + self.gen_expr(operand) + ")"
@@ -3018,6 +3200,23 @@ impl CodeGen [
                 end "(" + self.gen_expr(target) + ")?"
             ]
             Call(callee, args) -> [
+                let ta = typeapp_targs(callee.clone())
+                if ta.len() > 0 [
+                    !!! (0.7) `f<Int>(x)` -> `f::<i64>(x)` (takze `Typ<Int>(..)` -> `Typ::<i64>::hks_new(..)`)
+                    let tinner = typeapp_inner(callee.clone())
+                    let base = self.gen_call(tinner.clone(), args)
+                    let tnm = expr_as_ident_name(tinner.clone())
+                    let targ_str = self.gen_type_args(ta)
+                    if tnm != "" [
+                        if base.len() > tnm.len() + 1 and base.slice(0, tnm.len() + 1) == tnm.clone() + "(" [
+                            end tnm.clone() + "::<" + targ_str + ">" + base.slice(tnm.len(), base.len())
+                        ]
+                        if base.len() > tnm.len() + 2 and base.slice(0, tnm.len() + 2) == tnm.clone() + "::" [
+                            end tnm.clone() + "::<" + targ_str + ">" + base.slice(tnm.len(), base.len())
+                        ]
+                    ]
+                    end base
+                ]
                 end self.gen_call(callee, args)
             ]
         ]
@@ -3133,6 +3332,14 @@ impl CodeGen [
     !!! ten SAM mechanizm co juz zastosowany RECZNIE wielokrotnie w tej
     !!! sesji, np. w typecheck.hcs).
     fun gen_return_expr(self, value: Expr) -> Str [
+        let lam = value.clone()
+        match lam [
+            Lambda(rl_params, rl_ret, rl_body) -> [
+                end self.gen_lambda(rl_params, rl_ret, rl_body, true)
+            ]
+            _ -> [
+            ]
+        ]
         let rendered = self.gen_expr(value.clone())
         if self.expr_is_attr(value.clone()) [
             match self.current_ret_type.clone() [
@@ -3235,7 +3442,7 @@ impl CodeGen [
                 !! argumentow (np. `Wrapper` z `Wrapper(5)`) nie moze byc wypisany jako
                 !! `let w: Wrapper` - Rust wymaga argumentow, wiec zostawiamy wnioskowanie rustc.
                 let bare_generic = user_type_param_count(self.sigs, t.name.clone()) > 0 and not type_ref_has_generic(t.clone())
-                if not type_contains_any(t.clone()) and not bare_generic [
+                if not type_contains_any(t.clone()) and not bare_generic and t.name != "Fn" [
                     hint = ": " + rust_type_name(t, self.sigs, self.current_type_params)
                 ]
             ]
@@ -3881,7 +4088,13 @@ impl CodeGen [
             ]
         ]
         self.needs_sandbox = true
-        let sandbox_lines = sandbox_emit_lines(python_raw_string(raw))
+        let allow_unsandboxed = false
+        let marker = "@@UNSANDBOXED@@"
+        if raw.len() >= marker.len() and raw.slice(0, marker.len()) == marker [
+            allow_unsandboxed = true
+            raw = raw.slice(marker.len(), raw.len())
+        ]
+        let sandbox_lines = sandbox_emit_lines(python_raw_string(raw), allow_unsandboxed)
         for sandbox_line in sandbox_lines [
             self.emit(sandbox_line)
         ]
@@ -3893,6 +4106,22 @@ impl CodeGen [
             end
         ]
         let shape = self.call_shape(e.clone())
+        if shape.is_call and shape.ident_name == "__defer__" and shape.args.len() == 1 [
+            !!! (0.7) `defer [ ... ]` - strażnik z `Drop`, wykonany przy wyjściu z bloku (LIFO).
+            let dn = (self.output.len() as Str)
+            let dl = shape.args[0].clone()
+            match dl [
+                Lambda(dparams, dret, dbody) -> [
+                    let closure_src = self.gen_lambda(dparams, dret, dbody, false)
+                    self.emit("struct __HksDefer" + dn + "<F: FnMut()>(Option<F>);")
+                    self.emit("impl<F: FnMut()> Drop for __HksDefer" + dn + "<F> { fn drop(&mut self) { if let Some(mut f) = self.0.take() { f(); } } }")
+                    self.emit("let __hks_defer" + dn + " = __HksDefer" + dn + "(Some(" + closure_src + "));")
+                ]
+                _ -> [
+                ]
+            ]
+            end
+        ]
         if shape.is_call and shape.ident_name == "__direct__" and shape.args.len() == 1 [
             let idx_text = self.expr_number_lit_value(shape.args[0].clone())
             self.gen_direct(idx_text)
@@ -4155,7 +4384,8 @@ impl CodeGen [
     !!! (0.6) Naglowek generyczny z ograniczeniem `Debug` na kazdym parametrze:
     !!! `<T: std::fmt::Debug, U: std::fmt::Debug>` - uzywany WYLACZNIE przez
     !!! `emit_display_impl` (ponizej). Pusta lista parametrow daje pusty napis.
-    fun generic_head_debug(self, type_params: List<Str>) -> Str [
+    fun generic_head_debug(self, type_params_raw: List<Str>) -> Str [
+        let type_params = tp_names(type_params_raw)
         if type_params.len() == 0 [
             end ""
         ]
@@ -4197,7 +4427,8 @@ impl CodeGen [
     !!! 0.6 (generyki): jak `generic_head`, ale kazdy parametr z ograniczeniem
     !!! `Clone` (`<T: Clone>`) - elementy typu `T` sa klonowane przy indeksowaniu
     !!! i odczycie pol, wiec funkcje/`impl` generyczne tego wymagaja.
-    fun generic_head_clone(self, type_params: List<Str>) -> Str [
+    fun generic_head_clone(self, type_params_raw: List<Str>) -> Str [
+        let type_params = tp_names(type_params_raw.clone())
         if type_params.len() == 0 [
             end ""
         ]
@@ -4209,13 +4440,18 @@ impl CodeGen [
                 out = out + ", "
             ]
             out = out + type_params[i].clone() + ": Clone"
+            let extra_bound = tp_bound_of(type_params_raw.clone(), type_params[i].clone())
+            if extra_bound != "" [
+                out = out + " + " + extra_bound
+            ]
             i = i + 1
         ]
         out = out + ">"
         end out
     ]
 
-    fun generic_head(self, type_params: List<Str>) -> Str [
+    fun generic_head(self, type_params_raw: List<Str>) -> Str [
+        let type_params = tp_names(type_params_raw)
         if type_params.len() == 0 [
             end ""
         ]
@@ -4356,7 +4592,7 @@ impl CodeGen [
         let fields_init = self.struct_ctor_init(name.clone(), fields)
         self.emit("impl" + gen_head.clone() + " " + name.clone() + gen_head + " {")
         self.indent = self.indent + 1
-        self.emit("pub fn new(" + params + ") -> Self {")
+        self.emit("pub fn hks_new(" + params + ") -> Self {")
         self.indent = self.indent + 1
         self.emit(name + " { " + fields_init + " }")
         self.indent = self.indent - 1
@@ -4792,10 +5028,20 @@ impl CodeGen [
     ]
 
     fun gen_impl(self, struct_name: Str, methods: List<Stmt>, type_params: List<Str>) [
+        if struct_name.len() > 7 and struct_name.slice(0, 7) == "@trait:" [
+            self.gen_trait_decl(struct_name.slice(7, struct_name.len()), methods)
+            end
+        ]
         self.current_type_params = type_params.clone()
         let plain_head = self.generic_head(type_params.clone())
-        let gen_head = self.generic_head_clone(type_params)
-        self.emit("impl" + gen_head + " " + struct_name.clone() + plain_head + " {")
+        let gen_head = self.generic_head_clone(type_params.clone())
+        let trait_name = tp_trait_of(type_params.clone())
+        let start_line = self.output.len()
+        if trait_name != "" [
+            self.emit("impl" + gen_head + " " + trait_name + " for " + struct_name.clone() + plain_head + " {")
+        ] else [
+            self.emit("impl" + gen_head + " " + struct_name.clone() + plain_head + " {")
+        ]
         self.indent = self.indent + 1
         let i = 0
         let n = methods.len()
@@ -4806,7 +5052,114 @@ impl CodeGen [
         self.indent = self.indent - 1
         self.emit("}")
         self.emit("")
+        if trait_name != "" [
+            !!! metody w `impl Trait for Typ` nie moga miec `pub`; `Drop::drop` bierze `&mut self`
+            let li = start_line + 1
+            while li < self.output.len() [
+                let ln: Str = self.output[li].clone()
+                let trimmed_at = 0
+                while trimmed_at < ln.len() and ln.char_at(trimmed_at) == " " [
+                    trimmed_at = trimmed_at + 1
+                ]
+                let rest = ln.slice(trimmed_at, ln.len())
+                if rest.len() > 7 and rest.slice(0, 7) == "pub fn " [
+                    rest = rest.slice(4, rest.len())
+                ] elif rest.len() > 13 and rest.slice(0, 13) == "pub async fn " [
+                    rest = rest.slice(4, rest.len())
+                ]
+                if trait_name == "Drop" and rest.len() >= 14 and rest.slice(0, 14) == "fn drop(&self)" [
+                    rest = "fn drop(&mut self)" + rest.slice(14, rest.len())
+                ]
+                self.output[li] = ln.slice(0, trimmed_at) + rest
+                li = li + 1
+            ]
+        ]
         self.current_type_params = []
+    ]
+
+    !!! (0.7) `trait Nazwa [ fun m(self, x: Int) -> Int  fun d(self) [ ...domyslne... ] ]`.
+    !!! Metoda bez ciala (znacznik `[ExprStmt(NullLit)]`) = wymagana; z cialem = domyslna.
+    !!! Metody trait biora `&self` (mutowanie przez trait: nieobslugiwane).
+    fun gen_trait_decl(self, trait_name: Str, methods: List<Stmt>) [
+        self.emit("pub trait " + trait_name + " {")
+        self.indent = self.indent + 1
+        let i = 0
+        while i < methods.len() [
+            let m = methods[i].clone()
+            let mname = fun_decl_name(m.clone())
+            let mparams = fun_decl_params(m.clone())
+            let mret = fun_decl_ret_type(m.clone())
+            let mbody = fun_decl_body(m.clone())
+            let required = false
+            if mbody.len() == 1 [
+                match mbody[0].clone() [
+                    ExprStmt(be) -> [
+                        match be [
+                            NullLit -> [
+                                required = true
+                            ]
+                            _ -> [
+                            ]
+                        ]
+                    ]
+                    _ -> [
+                    ]
+                ]
+            ]
+            if required [
+                let ps = "&self"
+                let pj = 0
+                while pj < mparams.len() [
+                    let mp = mparams[pj].clone()
+                    if mp.name != "self" [
+                        match mp.type_ref.clone() [
+                            Some(mpt) -> [
+                                let base = rust_type_name(mpt.clone(), self.sigs, self.current_type_params)
+                                if self.is_refable_type(mpt) [
+                                    ps = ps + ", " + mp.name.clone() + ": &" + base
+                                ] else [
+                                    ps = ps + ", " + mp.name.clone() + ": " + base
+                                ]
+                            ]
+                            None -> [
+                                ps = ps + ", " + mp.name.clone() + ": i64"
+                            ]
+                        ]
+                    ]
+                    pj = pj + 1
+                ]
+                let rs = ""
+                match mret [
+                    Some(rt) -> [
+                        rs = " -> " + rust_type_name(rt, self.sigs, self.current_type_params)
+                    ]
+                    None -> [
+                    ]
+                ]
+                self.emit("fn " + mname + "(" + ps + ")" + rs + ";")
+            ] else [
+                let before = self.output.len()
+                self.gen_method("@trait:" + trait_name.clone(), m.clone())
+                let li = before
+                while li < self.output.len() [
+                    let ln: Str = self.output[li].clone()
+                    let trimmed_at = 0
+                    while trimmed_at < ln.len() and ln.char_at(trimmed_at) == " " [
+                        trimmed_at = trimmed_at + 1
+                    ]
+                    let rest = ln.slice(trimmed_at, ln.len())
+                    if rest.len() > 7 and rest.slice(0, 7) == "pub fn " [
+                        rest = rest.slice(4, rest.len())
+                    ]
+                    self.output[li] = ln.slice(0, trimmed_at) + rest
+                    li = li + 1
+                ]
+            ]
+            i = i + 1
+        ]
+        self.indent = self.indent - 1
+        self.emit("}")
+        self.emit("")
     ]
 
     !!! Parytet z `gen_get_import()` - `use crate::<modul>::...;` dla
@@ -4877,7 +5230,7 @@ impl CodeGen [
             !!! modulu, wiec w `use ...;` MUSIMY uzyc wersji z `_`
             !!! (str_replace_dash), inaczej `rustc` odrzuca skladnie
             !!! ("expected one of `::`, `;`, or `as`, found `-`").
-            let rust_mod_name = str_replace_dash(name.clone())
+            let rust_mod_name = crate_lib_name(name.clone())
             if details.len() > 0 [
                 self.emit("use " + rust_mod_name + "::{" + self.join_binds(details) + "};")
             ] else [
@@ -5489,4 +5842,51 @@ fun fast_direct_compiled_driver(b: Str) -> Str [
         end "import os, sys, tempfile, importlib, shutil, subprocess, uuid\n__n = 'hks_fd_' + uuid.uuid4().hex\n__d = tempfile.mkdtemp(prefix='hks_fd_cython_')\n__p = os.path.join(__d, __n + '.pyx')\nwith open(__p, 'w') as __f:\n    __f.write(__hks_code)\n__py = shutil.which('python3') or shutil.which('python')\nsubprocess.check_call([__py, '-m', 'Cython.Build.Cythonize', '-3', '-i', __p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\nsys.path.insert(0, __d)\nimportlib.import_module(__n)\n"
     ]
     end "import os, sys, tempfile, importlib, shutil, subprocess, uuid\n__n = 'hks_fd_' + uuid.uuid4().hex\n__d = tempfile.mkdtemp(prefix='hks_fd_pythran_')\n__p = os.path.join(__d, __n + '.py')\nwith open(__p, 'w') as __f:\n    __f.write(__hks_code)\n__py = shutil.which('python3') or shutil.which('python')\nsubprocess.check_call([__py, '-c', 'import sys; from pythran.run import run; sys.argv = sys.argv[1:]; run()', 'pythran', __p, '-o', os.path.join(__d, __n + '.so')], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\nsys.path.insert(0, __d)\n__m = importlib.import_module(__n)\nif hasattr(__m, 'main'):\n    __m.main()\n"
+]
+
+
+!!! Nazwa BIBLIOTEKI (identyfikator w `use ...;`) dla paczki Cargo. Domyslnie
+!!! to nazwa paczki z `-` zamienionym na `_`, ale czesc popularnych paczek ma
+!!! biblioteke nazwana inaczej niz paczka (np. paczka `md-5` -> `use md5::...`).
+fun crate_lib_name(name: Str) -> Str [
+    if name == "md-5" [
+        end "md5"
+    ]
+    if name == "sha-1" [
+        end "sha1"
+    ]
+    if name == "rust-crypto" [
+        end "crypto"
+    ]
+    if name == "pbkdf2-hmac" [
+        end "pbkdf2"
+    ]
+    end str_replace_dash(name)
+]
+
+
+fun typeapp_targs(e: Expr) -> List<TypeRef> [
+    match e [
+        TypeApp(inner, targs) -> [
+            end targs.clone()
+        ]
+        _ -> [
+            end []
+        ]
+    ]
+]
+
+fun typeapp_inner(e: Expr) -> Expr [
+    match e [
+        TypeApp(inner, targs) -> [
+            end expr_id(inner)
+        ]
+        _ -> [
+            end e.clone()
+        ]
+    ]
+]
+
+fun expr_id(e: Expr) -> Expr [
+    end e.clone()
 ]
