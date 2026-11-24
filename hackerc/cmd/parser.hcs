@@ -23,7 +23,11 @@ struct Parser [
     errors: List<Diagnostic>,
     stmt_lines: List<Int>,
     stmt_cols: List<Int>,
-    stmt_tags: List<Str>
+    stmt_tags: List<Str>,
+    !! (0.7) instrukcje dopisane przez desugaring (np. `let (a, b) = e`) - petle
+    !! blokow oprozniaja je zaraz po instrukcji, która je wytworzyła.
+    pending: List<Stmt>,
+    tmp_counter: Int
 ]
 
 impl Parser [
@@ -137,12 +141,24 @@ impl Parser [
         while not self.at_end() [
             let stmt = self.parse_statement()
             body.push(stmt)
+            self.drain_pending(body)
             self.skip_newlines_collect_comments()
         ]
         end Program(body, self.stmt_lines.clone(), self.stmt_cols.clone(), self.stmt_tags.clone())
     ]
 
     !!! -- instrukcje -------------------------------------------------------
+
+    fun drain_pending(self, into: List<Stmt>) [
+        if self.pending.len() > 0 [
+            let k = 0
+            while k < self.pending.len() [
+                into.push(self.pending[k].clone())
+                k = k + 1
+            ]
+            self.pending = []
+        ]
+    ]
 
     fun parse_block(self) -> List<Stmt> [
         self.expect(Open, none())
@@ -151,6 +167,7 @@ impl Parser [
         while not self.check(Close, none()) and not self.at_end() [
             let stmt = self.parse_statement()
             stmts.push(stmt)
+            self.drain_pending(stmts)
             self.skip_newlines_collect_comments()
         ]
         self.expect(Close, none())
@@ -278,6 +295,15 @@ impl Parser [
             ]
             if kw == "impl" [
                 end self.parse_impl()
+            ]
+            if kw == "trait" [
+                end self.parse_trait()
+            ]
+            if kw == "defer" [
+                !!! (0.7) `defer [ ... ]` -> `__defer__(fn() [ ... ])` (strażnik RAII)
+                self.advance()
+                let dbody = self.parse_block()
+                end ExprStmt(Call(IdentExpr("__defer__"), [Lambda([], none(), dbody)]))
             ]
             if kw == "match" [
                 end self.parse_match()
@@ -450,6 +476,40 @@ impl Parser [
     ]
 
     fun parse_type(self) -> TypeRef [
+        if self.check(LParen, none()) [
+            !!! (0.7) typ krotki `(A, B, ...)`
+            self.advance()
+            let elems: List<TypeRef> = []
+            while not self.check(RParen, none()) and not self.at_end() [
+                elems.push(self.parse_type())
+                if not self.check(Comma, none()) [
+                    break
+                ]
+                self.advance()
+            ]
+            self.expect(RParen, none())
+            end make_tuple_type(elems)
+        ]
+        if self.check(Ident, some("Fn")) and self.pos + 1 < self.toks.len() and self.toks[self.pos + 1].kind == LParen [
+            !!! (0.7) typ domkniecia `Fn(A, B) -> R`
+            self.advance()
+            self.advance()
+            let fparams: List<TypeRef> = []
+            while not self.check(RParen, none()) and not self.at_end() [
+                fparams.push(self.parse_type())
+                if not self.check(Comma, none()) [
+                    break
+                ]
+                self.advance()
+            ]
+            self.expect(RParen, none())
+            let fret = TypeRef("TupleEnd", none(), none())
+            if self.check(Op, some("->")) [
+                self.advance()
+                fret = self.parse_type()
+            ]
+            end TypeRef("Fn", some(make_tuple_type(fparams)), some(fret))
+        ]
         let name_tok = self.advance()
         let generic: Option<TypeRef> = none()
         let generic2: Option<TypeRef> = none()
@@ -467,6 +527,40 @@ impl Parser [
 
     fun parse_let(self, is_const: Bool) -> Stmt [
         self.advance()
+        if self.check(LParen, none()) [
+            !!! (0.7) `let (a, b) = wyrazenie` -> `let __tupN = wyrazenie` + `let a = __tupN.0` ...
+            let lt = self.cur()
+            self.advance()
+            let names: List<Str> = []
+            while not self.check(RParen, none()) and not self.at_end() [
+                names.push(self.expect(Ident, none()).value)
+                if not self.check(Comma, none()) [
+                    break
+                ]
+                self.advance()
+            ]
+            self.expect(RParen, none())
+            let tup_value: Option<Expr> = none()
+            if self.check(Op, some("=")) [
+                self.advance()
+                tup_value = some(self.parse_expr())
+            ]
+            self.tmp_counter = self.tmp_counter + 1
+            let tmp_name = "__tup" + (self.tmp_counter as Str)
+            let k = 0
+            while k < names.len() [
+                self.stmt_lines.push(lt.line)
+                self.stmt_cols.push(lt.col)
+                self.stmt_tags.push("let")
+                if names[k] != "_" [
+                    self.pending.push(LetStmt(names[k].clone(), none(), some(Attr(IdentExpr(tmp_name.clone()), (k as Str))), false))
+                ] else [
+                    self.pending.push(LetStmt("__hks_unused" + (self.tmp_counter as Str) + "_" + (k as Str), none(), some(Attr(IdentExpr(tmp_name.clone()), (k as Str))), false))
+                ]
+                k = k + 1
+            ]
+            end LetStmt(tmp_name, none(), tup_value, false)
+        ]
         let name = self.expect(Ident, none()).value
         let type_ref: Option<TypeRef> = none()
         if self.check(Colon, none()) [
@@ -524,7 +618,18 @@ impl Parser [
         ]
         self.advance()
         while not self.check(RAngle, none()) [
-            params.push(self.expect(Ident, none()).value)
+            let pname = self.expect(Ident, none()).value
+            params.push(pname.clone())
+            if self.check(Colon, none()) [
+                !!! (0.7) ograniczenia: `<T: Show + Clone>`
+                self.advance()
+                let bound = self.expect(Ident, none()).value
+                while self.check(Op, some("+")) [
+                    self.advance()
+                    bound = bound + "+" + self.expect(Ident, none()).value
+                ]
+                params.push("@bound:" + pname + ":" + bound)
+            ]
             if not self.check(Comma, none()) [
                 break
             ]
@@ -739,7 +844,17 @@ impl Parser [
     fun parse_impl(self) -> Stmt [
         self.expect(Keyword, some("impl"))
         let struct_name = self.expect(Ident, none()).value
+        let impl_trait = ""
+        if self.check(Keyword, some("for")) [
+            !!! (0.7) `impl Trait for Typ [ ... ]`
+            self.advance()
+            impl_trait = struct_name.clone()
+            struct_name = self.expect(Ident, none()).value
+        ]
         let type_params = self.parse_type_params()
+        if impl_trait != "" [
+            type_params.push("@trait:" + impl_trait)
+        ]
         self.expect(Open, none())
         self.skip_newlines()
         let methods: List<Stmt> = []
@@ -789,6 +904,47 @@ impl Parser [
         ]
         self.expect(Close, none())
         end ImplDecl(struct_name, methods, type_params)
+    ]
+
+    !!! (0.7) `trait Nazwa [ fun m(self) -> Int  fun d(self) [ ... ] ]`; metoda bez ciala dostaje
+    !!! znacznik `[ExprStmt(NullLit)]` (= wymagana).
+    fun parse_trait(self) -> Stmt [
+        self.expect(Keyword, some("trait"))
+        let tname = self.expect(Ident, none()).value
+        self.expect(Open, none())
+        self.skip_newlines()
+        let methods: List<Stmt> = []
+        while not self.check(Close, none()) and not self.at_end() [
+            if self.check(DocComment, none()) [
+                self.advance()
+                self.skip_newlines()
+            ] else [
+                let first_tok = self.cur()
+                self.stmt_lines.push(first_tok.line)
+                self.stmt_cols.push(first_tok.col)
+                self.stmt_tags.push("fun")
+                if self.check(Keyword, some("pub")) [
+                    self.advance()
+                ]
+                self.expect(Keyword, some("fun"))
+                let mname = self.expect(Ident, none()).value
+                let mtp = self.parse_type_params()
+                let mparams = self.parse_params()
+                let mret: Option<TypeRef> = none()
+                if self.check(Op, some("->")) [
+                    self.advance()
+                    mret = some(self.parse_type())
+                ]
+                let mbody: List<Stmt> = [ExprStmt(NullLit)]
+                if self.check(Open, none()) [
+                    mbody = self.parse_block()
+                ]
+                methods.push(FunDecl(mname, mparams, mret, mbody, true, mtp, false))
+                self.skip_newlines()
+            ]
+        ]
+        self.expect(Close, none())
+        end ImplDecl("@trait:" + tname, methods, [])
     ]
 
     !!! `match wyrazenie [ Wariant(bind, ...) -> [ ... ] ... _ -> [...] ]`.
@@ -930,8 +1086,32 @@ impl Parser [
                 expr = Call(expr, args)
             ] elif self.check(Op, some(".")) [
                 self.advance()
-                let name = self.expect(Ident, none()).value
-                expr = Attr(expr, name)
+                if self.check(Number, none()) [
+                    !!! (0.7) `t.0`, `t.0.1` (lekser skleja `0.1` w jeden Number)
+                    let numtok = self.advance().value
+                    let parts = for_num_parts(numtok)
+                    let pi = 0
+                    while pi < parts.len() [
+                        expr = Attr(expr, parts[pi].clone())
+                        pi = pi + 1
+                    ]
+                ] else [
+                    let name = self.expect(Ident, none()).value
+                    expr = Attr(expr, name)
+                ]
+            ] elif self.check(LAngle, none()) and self.looks_like_type_args() [
+                !!! (0.7) `nazwa<Typ, ...>(...)` - jawne argumenty typu
+                self.advance()
+                let targs: List<TypeRef> = []
+                while not self.check(RAngle, none()) and not self.at_end() [
+                    targs.push(self.parse_type())
+                    if not self.check(Comma, none()) [
+                        break
+                    ]
+                    self.advance()
+                ]
+                self.expect(RAngle, none())
+                expr = TypeApp(expr, targs)
             ] elif self.check(Keyword, some("as")) [
                 self.advance()
                 let cast_type = self.parse_type()
@@ -951,11 +1131,139 @@ impl Parser [
         end expr
     ]
 
+    !!! (0.7) Podglad: czy od biezacego `<` (BEZ spacji przed nim) idzie
+    !!! `<Typ[, Typ]...>(` - wtedy to jawne argumenty typu, a nie porownanie.
+    fun looks_like_type_args(self) -> Bool [
+        if not self.prev_is_ident_tight() [
+            end false
+        ]
+        let depth = 0
+        let k = self.pos
+        let guard = 0
+        while k < self.toks.len() and guard < 64 [
+            let tk = self.toks[k].clone()
+            if tk.kind == LAngle [
+                depth = depth + 1
+            ] elif tk.kind == RAngle [
+                depth = depth - 1
+                if depth == 0 [
+                    if k + 1 < self.toks.len() and self.toks[k + 1].kind == LParen [
+                        end true
+                    ]
+                    end false
+                ]
+            ] elif tk.kind == Ident or tk.kind == Comma or tk.kind == LParen or tk.kind == RParen [
+                depth = depth + 0
+            ] else [
+                end false
+            ]
+            k = k + 1
+            guard = guard + 1
+        ]
+        end false
+    ]
+
+    fun prev_is_ident_tight(self) -> Bool [
+        if self.pos == 0 [
+            end false
+        ]
+        let prev = self.toks[self.pos - 1].clone()
+        let cur = self.toks[self.pos].clone()
+        end prev.kind == Ident and prev.line == cur.line and prev.col + prev.value.len() == cur.col
+    ]
+
+    !!! (0.7) `f"a {x} b {y + 1}"` -> `"" + "a " + (x as Str) + ...`. `{{`/`}}` = literalne nawiasy.
+    fun parse_interpolated(self, content: Str, line: Int, col: Int) -> Expr [
+        let result: Expr = StringLit("", false)
+        let lit = ""
+        let i = 0
+        let n = content.len()
+        while i < n [
+            let c = content.char_at(i)
+            if c == "{" and i + 1 < n and content.char_at(i + 1) == "{" [
+                lit = lit + "{"
+                i = i + 2
+            ] elif c == "}" and i + 1 < n and content.char_at(i + 1) == "}" [
+                lit = lit + "}"
+                i = i + 2
+            ] elif c == "{" [
+                let depth = 1
+                let j = i + 1
+                while j < n and depth > 0 [
+                    if content.char_at(j) == "{" [
+                        depth = depth + 1
+                    ] elif content.char_at(j) == "}" [
+                        depth = depth - 1
+                    ]
+                    j = j + 1
+                ]
+                if depth != 0 [
+                    self.push_error("niezamkniety `{` w interpolowanym napisie", line, col, 1)
+                    i = n
+                ] else [
+                    if lit != "" [
+                        result = BinOp("+", result, StringLit(lit, false))
+                        lit = ""
+                    ]
+                    let inner = content.slice(i + 1, j - 1)
+                    let sub = Parser(tokenize(inner), 0, [], [], [], [], [], 0)
+                    let sub_expr = sub.parse_expr()
+                    let ei = 0
+                    while ei < sub.errors.len() [
+                        self.errors.push(sub.errors[ei].clone())
+                        ei = ei + 1
+                    ]
+                    result = BinOp("+", result, Cast(sub_expr, TypeRef("Str", none(), none())))
+                    i = j
+                ]
+            ] else [
+                lit = lit + c
+                i = i + 1
+            ]
+        ]
+        if lit != "" [
+            result = BinOp("+", result, StringLit(lit, false))
+        ]
+        end result
+    ]
+
+    !!! (0.7) `fn(x: Int) -> Int [ ... ]` / `fn(x: Int) -> Int = x + 1` / `fn(x) = x`.
+    fun parse_lambda(self) -> Expr [
+        self.advance()
+        let params = self.parse_params()
+        let ret_type: Option<TypeRef> = none()
+        if self.check(Op, some("->")) [
+            self.advance()
+            ret_type = some(self.parse_type())
+        ]
+        if self.check(Op, some("=")) [
+            self.advance()
+            let body_expr = self.parse_expr()
+            end Lambda(params, ret_type, [ReturnStmt(some(body_expr))])
+        ]
+        !!! cialo blokowe: instrukcje wewnatrz domkniecia nie wchodza do tabeli pozycji
+        let keep_l = self.stmt_lines.len()
+        let body = self.parse_block()
+        while self.stmt_lines.len() > keep_l [
+            self.stmt_lines.pop()
+            self.stmt_cols.pop()
+            self.stmt_tags.pop()
+        ]
+        end Lambda(params, ret_type, body)
+    ]
+
     fun parse_primary(self) -> Expr [
         let t = self.cur()
+        if t.kind == Keyword and t.value == "fn" [
+            end self.parse_lambda()
+        ]
         if t.kind == Number [
             self.advance()
             end NumberLit(t.value)
+        ]
+        if t.kind == FStrLit [
+            self.advance()
+            end self.parse_interpolated(t.value.clone(), t.line, t.col)
         ]
         if t.kind == StrLit [
             self.advance()
@@ -980,6 +1288,19 @@ impl Parser [
         if t.kind == LParen [
             self.advance()
             let e = self.parse_expr()
+            if self.check(Comma, none()) [
+                !!! (0.7) krotka `(a, b, ...)`
+                let items: List<Expr> = [e]
+                while self.check(Comma, none()) [
+                    self.advance()
+                    if self.check(RParen, none()) [
+                        break
+                    ]
+                    items.push(self.parse_expr())
+                ]
+                self.expect(RParen, none())
+                end TupleLit(items)
+            ]
             self.expect(RParen, none())
             end e
         ]
@@ -1006,6 +1327,27 @@ impl Parser [
     ]
 ]
 
+!!! (0.7) "0.1" -> ["0", "1"] (indeksy krotek zagniezdzonych `t.0.1`).
+fun for_num_parts(num: Str) -> List<Str> [
+    let out: List<Str> = []
+    let cur = ""
+    let i = 0
+    while i < num.len() [
+        let c = num.char_at(i)
+        if c == "." [
+            out.push(cur.clone())
+            cur = ""
+        ] else [
+            cur = cur + c
+        ]
+        i = i + 1
+    ]
+    if cur != "" [
+        out.push(cur.clone())
+    ]
+    end out
+]
+
 !!! `parse(source)` - odpowiednik wolnej funkcji `parse()` w parser.py
 !!! (tokenizuje, potem `Parser(tokens, 0).parse_program()`). Bledy
 !!! parsera (patrz `Parser.errors`) sa tu NADAL gubione (tylko `log()`
@@ -1017,7 +1359,7 @@ impl Parser [
 !!! `parse_checked()` ponizej zamiast tego.
 fun parse(source: Str) -> Program [
     let tokens = tokenize(source)
-    let p = Parser(tokens, 0, [], [], [], [])
+    let p = Parser(tokens, 0, [], [], [], [], [], 0)
     end p.parse_program()
 ]
 
@@ -1041,7 +1383,7 @@ struct ParseResult [
 !!! niepuste).
 fun parse_checked(source: Str) -> ParseResult [
     let tokens = tokenize(source)
-    let p = Parser(tokens, 0, [], [], [], [])
+    let p = Parser(tokens, 0, [], [], [], [], [], 0)
     let prog = p.parse_program()
     end ParseResult(prog, p.errors)
 ]
