@@ -347,6 +347,19 @@ native {Rust} [
         None
     }
 
+    pub fn hks_term_poll_byte(timeout_ms: i64) -> i64 {
+        let mut pfd = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+        let r = unsafe { libc::poll(&mut pfd, 1, timeout_ms as libc::c_int) };
+        if r == 0 { return -2; }
+        if r < 0 { return -1; }
+        hks_term_read_byte()
+    }
+
+    pub fn hks_bytes_text(b: &[i64]) -> String {
+        let v: Vec<u8> = b.iter().map(|x| *x as u8).collect();
+        String::from_utf8_lossy(&v).to_string()
+    }
+
     pub fn hks_term_read_byte() -> i64 {
         let mut b = [0u8; 1];
         let n = unsafe { libc::read(0, b.as_mut_ptr() as *mut libc::c_void, 1) };
@@ -543,4 +556,252 @@ fun term_height() -> Int [
         end h
     ]
     end 24
+]
+
+
+!! ---------------------------------------------------------------------
+!! 0.7: klawisze - nieblokujace czytanie i parsowanie sekwencji.
+!! ---------------------------------------------------------------------
+
+!! Bajty (0..=255) -> tekst UTF-8 (niepoprawne bajty zastapione).
+fun term_bytes_text(bytes: List<Int>) -> Str [
+    let t = ""
+    native {Rust} [
+        t = hks_bytes_text(&bytes);
+    ]
+    end t
+]
+
+fun term_key_modifier(m: Int) -> Str [
+    if m == 2 [
+        end "shift-"
+    ]
+    if m == 3 [
+        end "alt-"
+    ]
+    if m == 5 [
+        end "ctrl-"
+    ]
+    if m == 4 [
+        end "shift-alt-"
+    ]
+    if m == 6 [
+        end "ctrl-shift-"
+    ]
+    if m == 7 [
+        end "ctrl-alt-"
+    ]
+    end ""
+]
+
+fun term_key_final(c: Int) -> Str [
+    if c == 65 [
+        end "up"
+    ]
+    if c == 66 [
+        end "down"
+    ]
+    if c == 67 [
+        end "right"
+    ]
+    if c == 68 [
+        end "left"
+    ]
+    if c == 72 [
+        end "home"
+    ]
+    if c == 70 [
+        end "end"
+    ]
+    if c == 80 [
+        end "f1"
+    ]
+    if c == 81 [
+        end "f2"
+    ]
+    if c == 82 [
+        end "f3"
+    ]
+    if c == 83 [
+        end "f4"
+    ]
+    end ""
+]
+
+fun term_key_tilde(n: Int) -> Str [
+    if n == 1 or n == 7 [
+        end "home"
+    ]
+    if n == 2 [
+        end "insert"
+    ]
+    if n == 3 [
+        end "delete"
+    ]
+    if n == 4 or n == 8 [
+        end "end"
+    ]
+    if n == 5 [
+        end "pageup"
+    ]
+    if n == 6 [
+        end "pagedown"
+    ]
+    if n == 15 [
+        end "f5"
+    ]
+    if n == 17 [
+        end "f6"
+    ]
+    if n == 18 [
+        end "f7"
+    ]
+    if n == 19 [
+        end "f8"
+    ]
+    if n == 20 [
+        end "f9"
+    ]
+    if n == 21 [
+        end "f10"
+    ]
+    if n == 23 [
+        end "f11"
+    ]
+    if n == 24 [
+        end "f12"
+    ]
+    end ""
+]
+
+!! Zamienia bajty jednego klawisza (jak z `term_read_byte` w trybie raw) na nazwe:
+!! "enter", "tab", "backspace", "escape", "up"/"down"/"left"/"right", "home", "end",
+!! "insert", "delete", "pageup", "pagedown", "f1".."f12", "ctrl-a".."ctrl-z",
+!! "alt-<znak>", z modyfikatorami ("ctrl-up", "shift-left"); zwykly znak zwraca
+!! SAM ZNAK (jednoznakowy napis, takze wielobajtowy UTF-8). Pusty napis = nierozpoznane.
+fun term_parse_key(bytes: List<Int>) -> Str [
+    let n = bytes.len()
+    if n == 0 [
+        end ""
+    ]
+    let b0 = bytes[0]
+    if n == 1 [
+        if b0 == 13 or b0 == 10 [
+            end "enter"
+        ]
+        if b0 == 9 [
+            end "tab"
+        ]
+        if b0 == 127 or b0 == 8 [
+            end "backspace"
+        ]
+        if b0 == 27 [
+            end "escape"
+        ]
+        if b0 >= 1 and b0 <= 26 [
+            end "ctrl-" + term_bytes_text([96 + b0])
+        ]
+        if b0 >= 32 [
+            end term_bytes_text(bytes)
+        ]
+        end ""
+    ]
+    if b0 != 27 [
+        end term_bytes_text(bytes)
+    ]
+    let b1 = bytes[1]
+    if b1 == 79 and n == 3 [
+        end term_key_final(bytes[2])
+    ]
+    if b1 == 91 [
+        let last = bytes[n - 1]
+        if n == 3 [
+            end term_key_final(last)
+        ]
+        if last == 126 [
+            let num = 0
+            let i = 2
+            while i < n - 1 and bytes[i] >= 48 and bytes[i] <= 57 [
+                num = num * 10 + (bytes[i] - 48)
+                i = i + 1
+            ]
+            let base = term_key_tilde(num)
+            if base == "" [
+                end ""
+            ]
+            if i < n - 1 and bytes[i] == 59 [
+                let m = 0
+                let j = i + 1
+                while j < n - 1 and bytes[j] >= 48 and bytes[j] <= 57 [
+                    m = m * 10 + (bytes[j] - 48)
+                    j = j + 1
+                ]
+                end term_key_modifier(m) + base
+            ]
+            end base
+        ]
+        !! CSI 1;<mod><litera>
+        if n == 6 and bytes[2] == 49 and bytes[3] == 59 [
+            let base2 = term_key_final(last)
+            if base2 == "" [
+                end ""
+            ]
+            end term_key_modifier(bytes[4] - 48) + base2
+        ]
+        end ""
+    ]
+    if n >= 2 and b1 >= 32 [
+        let rest: List<Int> = []
+        let k = 1
+        while k < n [
+            rest.push(bytes[k])
+            k = k + 1
+        ]
+        end "alt-" + term_bytes_text(rest)
+    ]
+    end ""
+]
+
+!! Czeka do `timeout_ms` ms (ujemny = bez limitu) na klawisz i zwraca jego nazwe
+!! (patrz `term_parse_key`). `None` przy uplywie czasu, EOF albo gdy bajty nie
+!! tworza znanego klawisza. Wymaga `term_raw_enter()`, zeby klawisze docieraly
+!! pojedynczo. Tylko Uniks (poll(2)); Windows nie jest wspierany.
+fun term_read_key(timeout_ms: Int) -> Option<Str> [
+    let first = 0
+    native {Rust} [
+        first = hks_term_poll_byte(timeout_ms);
+    ]
+    if first < 0 [
+        end none()
+    ]
+    let bytes: List<Int> = [first]
+    if first == 27 [
+        let more = 0
+        let guard = 0
+        while guard < 8 [
+            native {Rust} [
+                more = hks_term_poll_byte(30);
+            ]
+            if more < 0 [
+                break
+            ]
+            bytes.push(more)
+            guard = guard + 1
+            !! koniec sekwencji CSI: bajt koncowy 0x40..0x7E (po `ESC [`), SS3: po `ESC O` jeden bajt, Alt+znak: jeden bajt
+            if bytes.len() == 2 and more != 91 and more != 79 [
+                break
+            ]
+            if bytes.len() == 3 and bytes[1] == 79 [
+                break
+            ]
+            if bytes.len() > 2 and bytes[1] == 91 and more >= 64 and more <= 126 [
+                break
+            ]
+        ]
+    ]
+    let name = term_parse_key(bytes)
+    if name == "" [
+        end none()
+    ]
+    end some(name)
 ]
