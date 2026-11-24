@@ -12,7 +12,8 @@ get <std:io> import <read_file_or::file_readable>
 !!! proste przyblizenie: brak rozroznienia zakresow (dwie funkcje o tej
 !!! samej nazwie w roznych `impl` -> pierwsza). (0.6) `definition` szuka
 !!! tez w plikach dolaczonych przez `include <nazwa>` (rodzenstwo na
-!!! dysku); `rename`/`references` dzialaja na otwartym dokumencie.
+!!! dysku); `rename`/`references`: zmienne lokalne/metody w otwartym dokumencie,
+!!! symbole najwyzszego poziomu w calym workspace'ie (0.7).
 
 struct DeclInfo [
     line: Int,
@@ -808,6 +809,148 @@ fun lsp_range_json(line: Int, c1: Int, c2: Int) -> Str [
     end "{\"start\":{\"line\":" + (line as Str) + ",\"character\":" + (c1 as Str) + "},\"end\":{\"line\":" + (line as Str) + ",\"character\":" + (c2 as Str) + "}}"
 ]
 
+
+!!! ---------------------------------------------------------------
+!!! (0.7) rename / references w CALYM workspace (symbole najwyzszego poziomu).
+!!! Zmienne lokalne, parametry i metody zostaja w zasiegu otwartego dokumentu
+!!! (analiza zasiegu `lsp_collect_occurrences`). Inne pliki .hcs workspace'u
+!!! czytane sa z dysku; dla nich dopasowanie jest TEKSTOWE (cale slowo, poza
+!!! napisami i komentarzami), wiec zmiana moze dotknac tez zmiennej o tej samej
+!!! nazwie - sprawdz diff.
+!!! ---------------------------------------------------------------
+
+fun lsp_path_of_uri(uri: Str) -> Str [
+    let path: Str = uri.clone()
+    if str_starts_with(path.clone(), "file://") [
+        path = path.slice(7, path.len())
+    ]
+    end path
+]
+
+!!! Korzen workspace'u: najblizszy katalog nad plikiem z `Bit.hk` albo `build.hl`.
+fun lsp_workspace_root(dir: Str) -> Str [
+    let cur: Str = dir.clone()
+    let guard = 0
+    while guard < 16 [
+        if file_readable(cur.clone() + "/Bit.hk") or file_readable(cur.clone() + "/build.hl") [
+            end cur
+        ]
+        let parent = lsp_dir_of_path(cur.clone())
+        if parent == cur or parent == "." [
+            end dir
+        ]
+        cur = parent
+        guard = guard + 1
+    ]
+    end dir
+]
+
+fun lsp_collect_hcs_files(dir: Str, depth: Int) -> List<Str> [
+    let out: List<Str> = []
+    if depth > 8 [
+        end out
+    ]
+    match list_dir(dir.clone()) [
+        Ok(names) -> [
+            let i = 0
+            while i < names.len() [
+                let nm: Str = names[i].clone()
+                let skip = nm.len() == 0 or nm.char_at(0) == "." or nm == "target" or nm == "out" or nm == "node_modules"
+                if not skip [
+                    let full = dir.clone() + "/" + nm.clone()
+                    if nm.len() > 4 and nm.slice(nm.len() - 4, nm.len()) == ".hcs" [
+                        out.push(full)
+                    ] elif dir_exists(full.clone()) [
+                        out.extend(lsp_collect_hcs_files(full, depth + 1))
+                    ]
+                ]
+                i = i + 1
+            ]
+        ]
+        Err(e) -> [
+        ]
+    ]
+    end out
+]
+
+!!! Czy `word` jest deklaracja najwyzszego poziomu (fun/struct/enum/const bez
+!!! wciecia) w ktoryms z plikow `texts`.
+fun lsp_toplevel_decl_in(texts: List<Str>, word: Str) -> Bool [
+    let t = 0
+    while t < texts.len() [
+        let lines = split_lines(texts[t].clone())
+        let i = 0
+        while i < lines.len() [
+            let ln: Str = lines[i].clone()
+            if ln.len() > 0 and ln.char_at(0) != " " and ln.char_at(0) != "\t" [
+                match lsp_decl_on_line(ln) [
+                    Some(d) -> [
+                        if d.name == word and (d.kind == "fun" or d.kind == "struct" or d.kind == "enum" or d.kind == "const") [
+                            end true
+                        ]
+                    ]
+                    None -> [
+                    ]
+                ]
+            ]
+            i = i + 1
+        ]
+        t = t + 1
+    ]
+    end false
+]
+
+fun lsp_count_word_in_lines(lines: List<Str>, word: Str) -> Int [
+    let total = 0
+    let i = 0
+    while i < lines.len() [
+        total = total + lsp_word_cols(lines[i].clone(), word.clone()).len()
+        i = i + 1
+    ]
+    end total
+]
+
+!!! Jesli symbol pod kursorem jest globalny, zwraca liste (uri, tekst) plikow
+!!! workspace'u (otwarty dokument z pamieci, reszta z dysku); inaczej pusta lista.
+!!! Para jest zapisana jako dwa elementy kolejno: uri, tekst.
+fun lsp_global_symbol_files(uri: Str, source: Str, line: Int, character: Int, word: Str) -> List<Str> [
+    let none_files: List<Str> = []
+    let lines = split_lines(source.clone())
+    let occ = lsp_collect_occurrences(lines.clone(), line, character)
+    if occ.lines.len() != lsp_count_word_in_lines(lines.clone(), word.clone()) [
+        end none_files
+    ]
+    let path = lsp_path_of_uri(uri.clone())
+    let root = lsp_workspace_root(lsp_dir_of_path(path.clone()))
+    let files = lsp_collect_hcs_files(root, 0)
+    let uris: List<Str> = []
+    let texts: List<Str> = []
+    uris.push(uri.clone())
+    texts.push(source.clone())
+    let k = 0
+    while k < files.len() [
+        if files[k] != path [
+            let txt = read_file_or(files[k].clone(), "")
+            if txt != "" [
+                uris.push("file://" + files[k].clone())
+                texts.push(txt)
+            ]
+        ]
+        k = k + 1
+    ]
+    if not lsp_toplevel_decl_in(texts.clone(), word.clone()) [
+        end none_files
+    ]
+    let out: List<Str> = []
+    let m = 0
+    while m < uris.len() [
+        out.push(uris[m].clone())
+        out.push(texts[m].clone())
+        m = m + 1
+    ]
+    end out
+]
+
 !!! Poprawna nazwa identyfikatora i nie slowo kluczowe.
 fun lsp_valid_new_name(name: Str) -> Bool [
     if name.len() == 0 [
@@ -837,6 +980,40 @@ fun lsp_rename_json(uri: Str, source: Str, line: Int, character: Int, new_name: 
     if word == "" or not lsp_valid_new_name(new_name.clone()) [
         end "null"
     ]
+    let gfiles = lsp_global_symbol_files(uri.clone(), source.clone(), line, character, word.clone())
+    if gfiles.len() > 0 [
+        let changes = ""
+        let nfiles = 0
+        let gi = 0
+        while gi < gfiles.len() [
+            let flines = split_lines(gfiles[gi + 1].clone())
+            let fedits = ""
+            let fcount = 0
+            let li = 0
+            while li < flines.len() [
+                let cols = lsp_word_cols(flines[li].clone(), word.clone())
+                let ci = 0
+                while ci < cols.len() [
+                    if fcount > 0 [
+                        fedits = fedits + ","
+                    ]
+                    fedits = fedits + "{\"range\":" + lsp_range_json(li, cols[ci], cols[ci] + word.len()) + ",\"newText\":" + json_escape_string(new_name.clone()) + "}"
+                    fcount = fcount + 1
+                    ci = ci + 1
+                ]
+                li = li + 1
+            ]
+            if fcount > 0 [
+                if nfiles > 0 [
+                    changes = changes + ","
+                ]
+                changes = changes + json_escape_string(gfiles[gi].clone()) + ":[" + fedits + "]"
+                nfiles = nfiles + 1
+            ]
+            gi = gi + 2
+        ]
+        end "{\"changes\":{" + changes + "}}"
+    ]
     let edits = ""
     let count = 0
     let occ = lsp_collect_occurrences(lines.clone(), line, character)
@@ -861,6 +1038,31 @@ fun lsp_references_json(uri: Str, source: Str, line: Int, character: Int) -> Str
     let word = lsp_word_at(lsp_line_or_empty(lines.clone(), line), character)
     if word == "" [
         end "[]"
+    ]
+    let gfiles = lsp_global_symbol_files(uri.clone(), source.clone(), line, character, word.clone())
+    if gfiles.len() > 0 [
+        let gout = ""
+        let gcount = 0
+        let gi = 0
+        while gi < gfiles.len() [
+            let flines = split_lines(gfiles[gi + 1].clone())
+            let li = 0
+            while li < flines.len() [
+                let cols = lsp_word_cols(flines[li].clone(), word.clone())
+                let ci = 0
+                while ci < cols.len() [
+                    if gcount > 0 [
+                        gout = gout + ","
+                    ]
+                    gout = gout + "{\"uri\":" + json_escape_string(gfiles[gi].clone()) + ",\"range\":" + lsp_range_json(li, cols[ci], cols[ci] + word.len()) + "}"
+                    gcount = gcount + 1
+                    ci = ci + 1
+                ]
+                li = li + 1
+            ]
+            gi = gi + 2
+        ]
+        end "[" + gout + "]"
     ]
     let out = ""
     let count = 0
