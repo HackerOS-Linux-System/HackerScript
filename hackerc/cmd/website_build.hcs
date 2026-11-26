@@ -199,8 +199,154 @@ fun site_404_html(base: Str) -> Str [
 
 !!! -- ostrzezenia ----------------------------------------------------------
 
+!!! ===== 0.7: BLEDY czytelnosci w trybie website ===================================
+!!! Tryb `website` odrzuca skladnie, ktora konczy sie plikami o linii na dziesiatki
+!!! tysiecy znakow (cale tresci jako zagniezdzone `mkobj([...])` w jednej linii).
+!!! To sa BLEDY (build sie nie udaje), nie ostrzezenia:
+!!!   E0801  linia dluzsza niz SITE_MAX_LINE znakow
+!!!   E0802  zagniezdzenie ( i [ glebsze niz SITE_MAX_DEPTH w jednej linii
+!!!   E0803  napisy sklejane plusem: "a" + "b" (uzyj jednego literalu)
+!!!   E0804  obiekt budowany jako plaska lista par `mkobj(["k", v, ...])`
+!!! Zamiast tego: tresci trzymaj w `data/*.json` (patrz `data_get`) albo w kilku
+!!! krotkich linijkach z `Dict`. Opis: docs/WEBSITE.md, sekcja "Dane i czytelnosc".
+
+fun site_max_line() -> Int [
+    end 160
+]
+
+fun site_max_depth() -> Int [
+    end 5
+]
+
+fun site_style_errors(source: Str, path: Str) -> List<Str> [
+    let errs: List<Str> = []
+    let lines = str_split(source, "\n")
+    let li = 0
+    while li < lines.len() [
+        let line: Str = lines[li].clone()
+        let ln = (li + 1) as Str
+        let where = path + ":" + ln
+        if line.len() > site_max_line() [
+            errs.push(where.clone() + ": E0801 linia ma " + (line.len() as Str) + " znakow (limit " + (site_max_line() as Str) + "). Rozbij ja na wiele linii; dluga tresc trzymaj w pliku data/*.json i czytaj przez data_get(\"nazwa\")")
+        ]
+        let code = site_code_only(line.clone())
+        let depth = 0
+        let maxd = 0
+        let k = 0
+        while k < code.len() [
+            let c = code.char_at(k)
+            if c == "(" or c == "[" [
+                depth = depth + 1
+                if depth > maxd [
+                    maxd = depth
+                ]
+            ] elif c == ")" or c == "]" [
+                depth = depth - 1
+            ]
+            k = k + 1
+        ]
+        if maxd > site_max_depth() [
+            errs.push(where.clone() + ": E0802 zagniezdzenie " + (maxd as Str) + " poziomow w jednej linii (limit " + (site_max_depth() as Str) + "). Wyciagnij podwyrazenia do `let` w osobnych liniach albo przenies dane do data/*.json")
+        ]
+        if str_contains_substring(code.clone(), "mkobj(") or str_contains_substring(code.clone(), "mkobj (") [
+            errs.push(where.clone() + ": E0804 obiekt jako plaska lista par `mkobj([\"klucz\", wartosc, ...])` jest nieczytelny i podatny na pomylki. Uzyj Dict (`let o = dict()` + `o.insert(k, v)`) albo pliku data/*.json")
+        ]
+        !!! "a" + "b": po zamknieciu literalu pomijamy spacje, `+`, spacje i szukamy kolejnego cudzyslowu
+        let q = 0
+        let in_str = false
+        let found_concat = false
+        while q < line.len() and not found_concat [
+            let ch = line.char_at(q)
+            if in_str [
+                if ch == "\\" [
+                    q = q + 1
+                ] elif ch == "\"" [
+                    in_str = false
+                    let r = q + 1
+                    while r < line.len() and line.char_at(r) == " " [
+                        r = r + 1
+                    ]
+                    if r < line.len() and line.char_at(r) == "+" [
+                        r = r + 1
+                        while r < line.len() and line.char_at(r) == " " [
+                            r = r + 1
+                        ]
+                        if r < line.len() and line.char_at(r) == "\"" [
+                            found_concat = true
+                        ]
+                    ]
+                ]
+            ] else [
+                if ch == "!" and q + 1 < line.len() and line.char_at(q + 1) == "!" [
+                    q = line.len()
+                ] elif ch == "\"" [
+                    in_str = true
+                ]
+            ]
+            q = q + 1
+        ]
+        if found_concat [
+            errs.push(where.clone() + ": E0803 dwa literaly napisowe sklejone plusem (\"a\" + \"b\"). Zapisz jeden literal - slowa kluczowe w napisach nie wymagaja obejsc")
+        ]
+        li = li + 1
+    ]
+    end errs
+]
+
+!!! `data/*.json` obok pliku wejsciowego -> prolog JS `globalThis.__hks_data = {...}`,
+!!! czytany w programie przez `data_get("nazwa")` (nazwa pliku bez `.json`).
+!!! Plik musi byc poprawnym JSON-em (sprawdzane tylko pobieznie - nawiasy).
+fun site_data_prelude(entry_path: Str) -> Str [
+    let base = "."
+    let slash = entry_path.len() - 1
+    while slash >= 0 and entry_path.char_at(slash) != "/" [
+        slash = slash - 1
+    ]
+    if slash >= 0 [
+        base = entry_path.slice(0, slash)
+    ]
+    !! szukamy w <katalog wejscia>/data oraz <katalog wejscia>/../data (korzen projektu)
+    let dirs: List<Str> = [base + "/data", base + "/../data"]
+    let parts: List<Str> = []
+    let seen: List<Str> = []
+    let di = 0
+    while di < dirs.len() [
+        let dir: Str = dirs[di].clone()
+        let names = list_dir_or_empty(dir.clone())
+        let i = 0
+        while i < names.len() [
+            let nm: Str = names[i].clone()
+            let dup = false
+            let si = 0
+            while si < seen.len() [
+                if seen[si] == nm [
+                    dup = true
+                ]
+                si = si + 1
+            ]
+            if not dup and nm.len() > 5 and nm.slice(nm.len() - 5, nm.len()) == ".json" [
+                match read_file(dir.clone() + "/" + nm) [
+                    Ok(txt) -> [
+                        parts.push("\"" + nm.slice(0, nm.len() - 5) + "\": " + txt)
+                        seen.push(nm.clone())
+                    ]
+                    Err(_re) -> [
+                        elog("hackerc website: nie mozna odczytac " + dir + "/" + nm)
+                    ]
+                ]
+            ]
+            i = i + 1
+        ]
+        di = di + 1
+    ]
+    if parts.len() == 0 [
+        end ""
+    ]
+    end "globalThis.__hks_data = {\n" + str_join(parts, ",\n") + "\n};\n"
+]
+
 fun site_known_names() -> List<Str> [
-    end str_split("alert app_root before_route bind_attr bind_checked bind_class bind_list bind_show bind_text bind_value child clear_interval clear_timeout computed dom_append dom_attr dom_checked dom_class dom_class_has dom_class_remove dom_class_toggle dom_clear dom_create dom_delegate dom_focus dom_get dom_get_attr dom_html dom_off dom_on dom_on_event dom_query dom_query_all dom_remove dom_remove_attr dom_set_checked dom_set_value dom_style dom_text dom_value effect effect_stop el event_checked event_code event_current event_key event_mod event_prevent event_stop event_target event_type event_value html_escape http_error_code http_get http_json http_last_body http_last_status http_post http_post_json http_request json_get nav_child nav_link navigate navigate_replace now_ms on_leave page_css page_favicon page_lang page_meta page_og page_theme_color page_title random route route_current route_href route_layout route_mode route_not_found route_outlet route_param route_query route_rest route_set_outlet session_clear session_get session_remove session_set set_interval set_timeout sig_flush sig_get sig_peek sig_push sig_remove_at sig_set sig_update signal sleep storage_available storage_clear storage_get storage_remove storage_set", " ")
+    end str_split("data_get data_field data_len data_at alert app_root before_route bind_attr bind_checked bind_class bind_list bind_show bind_text bind_value child clear_interval clear_timeout computed dom_append dom_attr dom_checked dom_class dom_class_has dom_class_remove dom_class_toggle dom_clear dom_create dom_delegate dom_focus dom_get dom_get_attr dom_html dom_off dom_on dom_on_event dom_query dom_query_all dom_remove dom_remove_attr dom_set_checked dom_set_value dom_style dom_text dom_value effect effect_stop el event_checked event_code event_current event_key event_mod event_prevent event_stop event_target event_type event_value html_escape http_error_code http_get http_json http_last_body http_last_status http_post http_post_json http_request json_get nav_child nav_link navigate navigate_replace now_ms on_leave page_css page_favicon page_lang page_meta page_og page_theme_color page_title random route route_current route_href route_layout route_mode route_not_found route_outlet route_param route_query route_rest route_set_outlet session_clear session_get session_remove session_set set_interval set_timeout sig_flush sig_get sig_peek sig_push sig_remove_at sig_set sig_update signal sleep storage_available storage_clear storage_get storage_remove storage_set", " ")
 ]
 
 fun site_list_has(xs: List<Str>, x: Str) -> Bool [
