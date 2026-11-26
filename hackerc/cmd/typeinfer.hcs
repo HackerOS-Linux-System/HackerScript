@@ -460,6 +460,9 @@ fun infer_ident_call_type(name: Str, sigs: Signatures) -> Option<TypeRef> [
     !! zebrany tekst) sie do tego kompletnie nie nadaja. Zwraca kod
     !! wyjscia dziecka (Int), nie jego wyjscie (bo wyjscie nigdy nie
     !! trafia do rodzica - idzie WPROST do prawdziwego stdout).
+    if name == "__fmt" [
+        end some(make_type0("Str"))
+    ]
     if name == "run_command_inherit" [
         end some(make_type0("Int"))
     ]
