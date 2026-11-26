@@ -224,6 +224,50 @@ przycisków, licznik po 3 kliknięciach, dodawanie elementów listy z
 pola tekstowego i czyszczenie pola. Nie testowano w prawdziwej
 przeglądarce ani na urządzeniach mobilnych.
 
+## Dane i czytelnosc (0.7)
+
+Tryb `website` **odrzuca** skladnie, ktora konczy sie plikami z liniami po dziesiatki tysiecy znakow (cale tresci jako
+zagniezdzone `mkobj([...])` w jednej linii). To sa **bledy** - `hackerc build`/`hackerc website` konczy sie kodem 2:
+
+| Kod | Regula |
+|---|---|
+| `E0801` | linia dluzsza niz 160 znakow |
+| `E0802` | wiecej niz 5 poziomow `(`/`[` w jednej linii |
+| `E0803` | dwa literaly napisowe sklejone plusem (`"a" + "b"`) - slowa kluczowe w napisach nie wymagaja obejsc (`"direct [ x ]"` dziala) |
+| `E0804` | obiekt zapisany jako plaska lista par `mkobj(["klucz", wartosc, ...])` |
+
+**Zamiast tego - tresc w plikach danych.** Pliki `data/*.json` (obok pliku wejsciowego albo w korzeniu projektu) sa
+wstawiane do `app.js` i czytane w programie:
+
+```
+use <mode:website>
+
+fun main() [
+    match data_get("articles") [               ;; data/articles.json -> Option<Any>
+        Some(list) -> [
+            let i = 0
+            while i < data_len(list) [         ;; dlugosc tablicy
+                match data_at(list, i) [       ;; Option<Any>
+                    Some(a) -> [
+                        match data_field(a, "id") [   ;; pole obiektu -> Option<Any>
+                            Some(id) -> [ child(app_root(), "p", id) ]
+                            None -> [ ]
+                        ]
+                    ]
+                    None -> [ ]
+                ]
+                i = i + 1
+            ]
+        ]
+        None -> [ ]
+    ]
+]
+```
+
+Plik JSON musi byc poprawny (kompilator wstawia go doslownie). Dla tresci wielojezycznych: jeden plik na dziedzine
+(`articles.json`) z kluczami `pl`/`en` w obiektach - latwo diffowac, formatowac i edytowac narzedziami do JSON.
+Test: `tests/website/errors` (oczekiwane E0801/E0803/E0804) i `tests/website/data`.
+
 ## Ograniczenia
 
 - SSR to prerendering (bez hydratacji, patrz `--ssr`); jedna strona na plik wejściowy (wiele podstron = wiele plików wejściowych w jednym wywołaniu `hackerc website`);
