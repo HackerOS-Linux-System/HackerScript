@@ -990,7 +990,56 @@ fun text_marker_scan(source: Str, from: Int, marker: Str) -> Int [
     end -1
 ]
 
-fun extract_hot_reload_markers(source: Str) -> HotReloadExtraction [
+!!! 0.6+ - `@test` przed `fun nazwa() [ ... ]`: ten sam skaner tekstowy co
+!!! `@hot_reload`/`@wasm_export` (marker jest usuwany ze zrodla PRZED
+!!! tokenizacja, numery linii zostaja). Nazwy trafiaja do tej samej listy co
+!!! nazwy `@hot_reload`, ale z prefiksem `@test:` (nie koliduje z prawdziwa
+!!! nazwa funkcji) - dzieki temu check/lint/lsp/build/project propaguja je bez
+!!! zmiany sygnatur. `codegen.hcs::gen_fun` emituje `#[test]` nad `pub fn`.
+fun extract_test_markers(source: Str) -> HotReloadExtraction [
+    let names: List<Str> = []
+    let out = ""
+    let i = 0
+    let n = source.len()
+    let marker = "@test"
+    let mlen = marker.len()
+    while i < n [
+        let found_at = text_marker_scan(source, i, marker)
+        if found_at == -1 [
+            out = out + source.slice(i, n)
+            i = n
+        ] else [
+            out = out + source.slice(i, found_at)
+            let after = found_at + mlen
+            let fk = after
+            while fk < n and (source.char_at(fk) == " " or source.char_at(fk) == "\t" or source.char_at(fk) == "\n" or source.char_at(fk) == "\r") [
+                fk = fk + 1
+            ]
+            if fk + 3 <= n and source.slice(fk, fk + 3) == "fun" and (fk + 3 >= n or not is_direct_ident_char(source.char_at(fk + 3))) [
+                let nk = fk + 3
+                while nk < n and (source.char_at(nk) == " " or source.char_at(nk) == "\t") [
+                    nk = nk + 1
+                ]
+                let name_start = nk
+                while nk < n and is_direct_ident_char(source.char_at(nk)) [
+                    nk = nk + 1
+                ]
+                if nk > name_start [
+                    names.push("@test:" + source.slice(name_start, nk))
+                ] else [
+                    elog("[transpiler.hcs] @test: nie znaleziono nazwy funkcji po 'fun'")
+                ]
+            ] else [
+                elog("[transpiler.hcs] @test: oczekiwano 'fun <nazwa>()' zaraz po markerze")
+            ]
+            i = after
+        ]
+    ]
+    end HotReloadExtraction(out, names)
+]
+
+
+fun extract_hot_reload_only(source: Str) -> HotReloadExtraction [
     let names: List<Str> = []
     let out = ""
     let i = 0
@@ -1034,6 +1083,19 @@ fun extract_hot_reload_markers(source: Str) -> HotReloadExtraction [
         ]
     ]
     end HotReloadExtraction(out, names)
+]
+
+!!! Wejscie dla check/lint/lsp/build: `@hot_reload` + `@test` w jednym przebiegu.
+fun extract_hot_reload_markers(source: Str) -> HotReloadExtraction [
+    let hot = extract_hot_reload_only(source)
+    let tst = extract_test_markers(hot.stripped_source)
+    let names: List<Str> = hot.names.clone()
+    let k = 0
+    while k < tst.names.len() [
+        names.push(tst.names[k].clone())
+        k = k + 1
+    ]
+    end HotReloadExtraction(tst.stripped_source, names)
 ]
 
 struct WasmExportExtraction [
