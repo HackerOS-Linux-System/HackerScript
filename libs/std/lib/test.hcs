@@ -1,0 +1,111 @@
+get <std:string> import <str_contains>
+
+native {Rust} [
+    pub trait HksTestable: PartialEq + std::fmt::Debug {}
+    impl<T: PartialEq + std::fmt::Debug> HksTestable for T {}
+
+    pub fn hks_test_fail(msg: &str) -> ! {
+        panic!("{}", msg)
+    }
+]
+
+!! Zawsze konczy test porazka z komunikatem.
+fun fail(msg: Str) [
+    native {Rust} [
+        hks_test_fail(&msg);
+    ]
+]
+
+!! Porazka, gdy `cond` jest falszem.
+fun assert_true(cond: Bool, msg: Str) [
+    if not cond [
+        fail("assert_true: " + msg)
+    ]
+]
+
+!! Porazka, gdy `cond` jest prawda.
+fun assert_false(cond: Bool, msg: Str) [
+    if cond [
+        fail("assert_false: " + msg)
+    ]
+]
+
+!! Porazka, gdy `a != b`; komunikat pokazuje obie wartosci (Debug).
+fun assert_eq<T: HksTestable>(a: T, b: T) [
+    if a != b [
+        native {Rust} [
+            hks_test_fail(&format!("assert_eq: lewa = {:?}, prawa = {:?}", a, b));
+        ]
+    ]
+]
+
+!! Porazka, gdy `a == b`.
+fun assert_ne<T: HksTestable>(a: T, b: T) [
+    if a == b [
+        native {Rust} [
+            hks_test_fail(&format!("assert_ne: obie strony = {:?}", a));
+        ]
+    ]
+]
+
+!! Porazka, gdy `a` i `b` roznia sie o wiecej niz `eps`.
+fun assert_approx(a: Float, b: Float, eps: Float) [
+    let d = a - b
+    if d < 0.0 [
+        d = 0.0 - d
+    ]
+    if d > eps [
+        fail("assert_approx: " + (a as Str) + " vs " + (b as Str) + " (eps " + (eps as Str) + ")")
+    ]
+]
+
+!! Porazka, gdy `hay` nie zawiera `needle`.
+fun assert_contains(hay: Str, needle: Str) [
+    if not str_contains(hay, needle) [
+        fail("assert_contains: \"" + hay + "\" nie zawiera \"" + needle + "\"")
+    ]
+]
+
+!! Porazka, gdy `r` jest `Err`.
+fun assert_ok<T, E>(r: Result<T, E>) [
+    match r [
+        Ok(_v) -> [
+        ]
+        Err(_e) -> [
+            fail("assert_ok: dostalem Err")
+        ]
+    ]
+]
+
+!! Porazka, gdy `r` jest `Ok`.
+fun assert_err<T, E>(r: Result<T, E>) [
+    match r [
+        Ok(_v) -> [
+            fail("assert_err: dostalem Ok")
+        ]
+        Err(_e) -> [
+        ]
+    ]
+]
+
+!! Porazka, gdy `o` to `None`.
+fun assert_some<T>(o: Option<T>) [
+    match o [
+        Some(_v) -> [
+        ]
+        None -> [
+            fail("assert_some: dostalem None")
+        ]
+    ]
+]
+
+!! Porazka, gdy `o` to `Some`.
+fun assert_none<T>(o: Option<T>) [
+    match o [
+        Some(_v) -> [
+            fail("assert_none: dostalem Some")
+        ]
+        None -> [
+        ]
+    ]
+]
