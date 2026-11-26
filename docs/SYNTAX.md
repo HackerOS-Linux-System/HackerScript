@@ -585,3 +585,49 @@ Automatyczny konstruktor struktury nazywa się teraz `hks_new`, więc `fun new(.
 `get <crates:md-5::0.10>` generuje `use md5::*` (tabela: `md-5`→`md5`, `sha-1`→`sha1`,
 `rust-crypto`→`crypto`, `pbkdf2-hmac`→`pbkdf2`). Przy crate'ach, których glob psuje
 nazwy z preludium (np. `argon2` ma własny `Result`), użyj `get <crates:argon2::0.5> import <Argon2>`.
+
+
+## Dodatki 0.6/0.7 (ta runda)
+
+### `@test` i `get <std:test>`
+
+```
+get <std:test>
+
+@test
+fun dodawanie() [
+    assert_eq(1 + 1, 2)
+]
+```
+
+`@test` stoi tuz przed `fun nazwa()` (bez parametrow); kompilator emituje `#[test]`. `hackerc test plik.hcs [-o katalog]
+[-- argumenty cargo]` buduje crate i uruchamia `cargo test`. Asercje: `assert_true/false(cond, msg)`, `assert_eq/ne(a, b)`,
+`assert_approx(a, b, eps)`, `assert_contains(hay, needle)`, `assert_ok/err(result)`, `assert_some/none(option)`, `fail(msg)`.
+
+### `mut self` w traitach
+
+```
+trait Counter [
+    fun inc(mut self)          ;; => &mut self
+    fun value(self) -> Int
+]
+impl Counter for C [ fun inc(mut self) [ self.n = self.n + 1 ] ... ]
+```
+
+Sygnatura w `impl` musi zgadzac sie z traitem (rustc zglosi E0053).
+
+### `Fn` w polach struktur
+
+`struct Op [ name: Str, apply: Fn(Int) -> Int ]` - pole jest opakowane w `HksFnField<dyn Fn(..)>` (Rc; `Debug` jako `<fn>`,
+`PartialEq` jako rownosc wskaznikow, brak `Default`). Wywolanie: `(o.apply)(21)` lub `o.apply(21)`.
+Znane ograniczenie: gdy dwa typy maja metode i pole `Fn` o tej samej nazwie, `o.nazwa(..)` jest wolane jako pole.
+
+### Format w interpolacji
+
+`f"{x:>6}"`, `f"{pi:.2}"`, `f"{x:#b}"`, `f"{name:*>8}"`, `f"{x:?}"` - specyfikacja po `:` to skladnia `format!` Rusta.
+W `{...}` mozna uzywac cudzyslowu: `f"<{id("a")}>"`. `{{`/`}}` to literalne nawiasy.
+
+### Biblioteki 0.7 (nowe moduly std)
+
+`std:test`, `std:hlib` (oficjalne CLI `hlib`), `std:cli` (port podzbioru `colors`), `std:diag` (port stylu graficznego `nidus`),
+`std:cybersecurity::random|kdf|sign|cipher` (HKDF, scrypt, Argon2id, Ed25519, ECDSA P-256, X25519, ChaCha20-Poly1305, AES-256-GCM).
