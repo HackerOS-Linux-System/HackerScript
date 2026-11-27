@@ -1,0 +1,143 @@
+get <crates:hkdf::0.12>
+get <crates:sha2::0.10>
+get <crates:scrypt::0.11>
+get <crates:argon2::0.5>
+
+native {Rust} [
+    // glob-importy crate'ow (np. argon2::*) przeslaniaja Result - przywracamy std
+    type Result<T, E> = std::result::Result<T, E>;
+
+    pub fn hks_kdf_hex_of(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{:02x}", x)).collect::<String>()
+    }
+
+    pub fn hks_kdf_hex_to(h: &str) -> Option<Vec<u8>> {
+        let h = h.trim();
+        if h.len() % 2 != 0 || !h.is_ascii() {
+            return None;
+        }
+        let mut out = Vec::with_capacity(h.len() / 2);
+        let mut i = 0;
+        while i < h.len() {
+            out.push(u8::from_str_radix(&h[i..i + 2], 16).ok()?);
+            i += 2;
+        }
+        Some(out)
+    }
+
+    pub fn hks_hkdf_sha256(ikm: &[u8], salt: &[u8], info: &[u8], len: usize) -> Option<Vec<u8>> {
+        let hk = hkdf::Hkdf::<sha2::Sha256>::new(if salt.is_empty() { None } else { Some(salt) }, ikm);
+        let mut okm = vec![0u8; len];
+        hk.expand(info, &mut okm).ok()?;
+        Some(okm)
+    }
+
+    pub fn hks_scrypt(pw: &[u8], salt: &[u8], log_n: u8, r: u32, p: u32, len: usize) -> Option<Vec<u8>> {
+        let params = scrypt::Params::new(log_n, r, p, len).ok()?;
+        let mut out = vec![0u8; len];
+        scrypt::scrypt(pw, salt, &params, &mut out).ok()?;
+        Some(out)
+    }
+
+    pub fn hks_argon2id_raw(pw: &[u8], salt: &[u8], m: u32, t: u32, p: u32, len: usize) -> Option<Vec<u8>> {
+        let params = argon2::Params::new(m, t, p, Some(len)).ok()?;
+        let a = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+        let mut out = vec![0u8; len];
+        a.hash_password_into(pw, salt, &mut out).ok()?;
+        Some(out)
+    }
+
+    pub fn hks_argon2id_phc(pw: &str) -> Option<String> {
+        use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
+        let salt = SaltString::generate(&mut OsRng);
+        argon2::Argon2::default().hash_password(pw.as_bytes(), &salt).ok().map(|h| h.to_string())
+    }
+
+    pub fn hks_argon2id_check(pw: &str, phc: &str) -> bool {
+        use argon2::password_hash::{PasswordHash, PasswordVerifier};
+        match PasswordHash::new(phc) {
+            Ok(parsed) => argon2::Argon2::default().verify_password(pw.as_bytes(), &parsed).is_ok(),
+            Err(_) => false,
+        }
+    }
+]
+
+fun hkdf_sha256_hex(ikm_hex: Str, salt_hex: Str, info_hex: Str, len: Int) -> Result<Str, Str> [
+    if len < 1 or len > 8160 [
+        end err("hkdf: len poza zakresem 1..=8160")
+    ]
+    let good = false
+    let out = ""
+    native {Rust} [
+        match (hks_kdf_hex_to(&ikm_hex), hks_kdf_hex_to(&salt_hex), hks_kdf_hex_to(&info_hex)) {
+            (Some(i), Some(s), Some(n)) => match hks_hkdf_sha256(&i, &s, &n, len as usize) {
+                Some(b) => { out = hks_kdf_hex_of(&b); good = true; }
+                None => { out = "hkdf: niepoprawna dlugosc".to_string(); }
+            },
+            _ => { out = "hkdf: argumenty musza byc poprawnym hex".to_string(); }
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err(out)
+]
+
+fun scrypt_hex(password: Str, salt: Str, log_n: Int, r: Int, p: Int, len: Int) -> Result<Str, Str> [
+    if log_n < 1 or log_n > 30 or r < 1 or p < 1 or len < 1 or len > 1024 [
+        end err("scrypt: niepoprawne parametry")
+    ]
+    let good = false
+    let out = ""
+    native {Rust} [
+        match hks_scrypt(password.as_bytes(), salt.as_bytes(), log_n as u8, r as u32, p as u32, len as usize) {
+            Some(b) => { out = hks_kdf_hex_of(&b); good = true; }
+            None => { out = "scrypt: niepoprawne parametry".to_string(); }
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err(out)
+]
+
+fun argon2id_raw_hex(password: Str, salt: Str, m_kib: Int, t: Int, p: Int, len: Int) -> Result<Str, Str> [
+    if m_kib < 8 or t < 1 or p < 1 or len < 4 or len > 1024 [
+        end err("argon2id: niepoprawne parametry (m >= 8 KiB, t >= 1, p >= 1, 4 <= len <= 1024)")
+    ]
+    let good = false
+    let out = ""
+    native {Rust} [
+        match hks_argon2id_raw(password.as_bytes(), salt.as_bytes(), m_kib as u32, t as u32, p as u32, len as usize) {
+            Some(b) => { out = hks_kdf_hex_of(&b); good = true; }
+            None => { out = "argon2id: niepoprawne parametry (sol >= 8 bajtow?)".to_string(); }
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err(out)
+]
+
+fun argon2id_hash(password: Str) -> Result<Str, Str> [
+    let good = false
+    let out = ""
+    native {Rust} [
+        match hks_argon2id_phc(&password) {
+            Some(s) => { out = s; good = true; }
+            None => { out = "argon2id: haszowanie nie powiodlo sie".to_string(); }
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err(out)
+]
+
+fun argon2id_verify(password: Str, phc: Str) -> Bool [
+    let valid = false
+    native {Rust} [
+        valid = hks_argon2id_check(&password, &phc);
+    ]
+    end valid
+]
