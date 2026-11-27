@@ -1,0 +1,58 @@
+get <crates:rand::0.8>
+
+native {Rust} [
+    // glob-importy crate'ow (np. argon2::*) przeslaniaja Result - przywracamy std
+    type Result<T, E> = std::result::Result<T, E>;
+
+    use rand::RngCore;
+
+    pub fn hks_rnd_bytes(n: usize) -> Vec<u8> {
+        let mut v = vec![0u8; n];
+        rand::rngs::OsRng.fill_bytes(&mut v);
+        v
+    }
+
+    pub fn hks_rnd_hex_of(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{:02x}", x)).collect::<String>()
+    }
+
+    pub fn hks_rnd_range(lo: i64, hi: i64) -> i64 {
+        let span: u64 = (hi as i128 - lo as i128 + 1) as u64;
+        if span == 0 {
+            return rand::rngs::OsRng.next_u64() as i64;
+        }
+        let zone: u64 = u64::MAX - (u64::MAX % span + 1) % span;
+        loop {
+            let r = rand::rngs::OsRng.next_u64();
+            if r <= zone {
+                return (lo as i128 + (r % span) as i128) as i64;
+            }
+        }
+    }
+]
+
+fun random_hex(n: Int) -> Result<Str, Str> [
+    if n < 1 or n > 1048576 [
+        end err("random_hex: n poza zakresem 1..=1048576")
+    ]
+    let out = ""
+    native {Rust} [
+        out = hks_rnd_hex_of(&hks_rnd_bytes(n as usize));
+    ]
+    end ok(out)
+]
+
+fun random_token(n: Int) -> Result<Str, Str> [
+    end random_hex(n)
+]
+
+fun random_int(lo: Int, hi: Int) -> Result<Int, Str> [
+    if lo > hi [
+        end err("random_int: lo > hi")
+    ]
+    let v = 0
+    native {Rust} [
+        v = hks_rnd_range(lo, hi);
+    ]
+    end ok(v)
+]
