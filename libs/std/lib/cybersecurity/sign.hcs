@@ -1,0 +1,184 @@
+get <crates:rand::0.8>
+get <crates:ed25519-dalek::2.0.0>
+get <crates:x25519-dalek::2+static_secrets>
+get <crates:p256::0.13>
+
+native {Rust} [
+    // glob-importy crate'ow (np. argon2::*) przeslaniaja Result - przywracamy std
+    type Result<T, E> = std::result::Result<T, E>;
+
+    pub fn hks_sg_hex_of(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{:02x}", x)).collect::<String>()
+    }
+
+    pub fn hks_sg_hex_to(h: &str) -> Option<Vec<u8>> {
+        let h = h.trim();
+        if h.len() % 2 != 0 || !h.is_ascii() {
+            return None;
+        }
+        let mut out = Vec::with_capacity(h.len() / 2);
+        let mut i = 0;
+        while i < h.len() {
+            out.push(u8::from_str_radix(&h[i..i + 2], 16).ok()?);
+            i += 2;
+        }
+        Some(out)
+    }
+
+    pub fn hks_ed_keypair() -> (String, String) {
+        let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        (hks_sg_hex_of(&sk.to_bytes()), hks_sg_hex_of(sk.verifying_key().as_bytes()))
+    }
+
+    pub fn hks_ed_sign(sk_hex: &str, msg: &[u8]) -> Option<String> {
+        use ed25519_dalek::Signer;
+        let b: [u8; 32] = hks_sg_hex_to(sk_hex)?.try_into().ok()?;
+        let sk = ed25519_dalek::SigningKey::from_bytes(&b);
+        Some(hks_sg_hex_of(&sk.sign(msg).to_bytes()))
+    }
+
+    pub fn hks_ed_verify(pk_hex: &str, msg: &[u8], sig_hex: &str) -> bool {
+        use ed25519_dalek::Verifier;
+        let r = || -> Option<bool> {
+            let pk: [u8; 32] = hks_sg_hex_to(pk_hex)?.try_into().ok()?;
+            let sg: [u8; 64] = hks_sg_hex_to(sig_hex)?.try_into().ok()?;
+            let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).ok()?;
+            Some(vk.verify(msg, &ed25519_dalek::Signature::from_bytes(&sg)).is_ok())
+        };
+        r().unwrap_or(false)
+    }
+
+    pub fn hks_p256_keypair() -> (String, String) {
+        use p256::elliptic_curve::sec1::ToEncodedPoint;
+        let sk = p256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng);
+        let vk = p256::ecdsa::VerifyingKey::from(&sk);
+        (hks_sg_hex_of(&sk.to_bytes()), hks_sg_hex_of(vk.to_encoded_point(true).as_bytes()))
+    }
+
+    pub fn hks_p256_sign(sk_hex: &str, msg: &[u8]) -> Option<String> {
+        use p256::ecdsa::signature::Signer;
+        let sk = p256::ecdsa::SigningKey::from_slice(&hks_sg_hex_to(sk_hex)?).ok()?;
+        let sig: p256::ecdsa::Signature = sk.sign(msg);
+        Some(hks_sg_hex_of(&sig.to_bytes()))
+    }
+
+    pub fn hks_p256_verify(pk_hex: &str, msg: &[u8], sig_hex: &str) -> bool {
+        use p256::ecdsa::signature::Verifier;
+        let r = || -> Option<bool> {
+            let vk = p256::ecdsa::VerifyingKey::from_sec1_bytes(&hks_sg_hex_to(pk_hex)?).ok()?;
+            let sg = p256::ecdsa::Signature::from_slice(&hks_sg_hex_to(sig_hex)?).ok()?;
+            Some(vk.verify(msg, &sg).is_ok())
+        };
+        r().unwrap_or(false)
+    }
+
+    pub fn hks_x_keypair() -> (String, String) {
+        let sk = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let pk = x25519_dalek::PublicKey::from(&sk);
+        (hks_sg_hex_of(&sk.to_bytes()), hks_sg_hex_of(pk.as_bytes()))
+    }
+
+    pub fn hks_x_shared(sk_hex: &str, pk_hex: &str) -> Option<String> {
+        let s: [u8; 32] = hks_sg_hex_to(sk_hex)?.try_into().ok()?;
+        let p: [u8; 32] = hks_sg_hex_to(pk_hex)?.try_into().ok()?;
+        let shared = x25519_dalek::StaticSecret::from(s).diffie_hellman(&x25519_dalek::PublicKey::from(p));
+        if !shared.was_contributory() {
+            return None;
+        }
+        Some(hks_sg_hex_of(shared.as_bytes()))
+    }
+]
+
+fun ed25519_keypair_hex() -> Result<List<Str>, Str> [
+    let a = ""
+    let b = ""
+    native {Rust} [
+        let kp = hks_ed_keypair();
+        a = kp.0;
+        b = kp.1;
+    ]
+    end ok([a, b])
+]
+
+fun ed25519_sign_hex(secret_hex: Str, message: Str) -> Result<Str, Str> [
+    let good = false
+    let out = ""
+    native {Rust} [
+        match hks_ed_sign(&secret_hex, message.as_bytes()) {
+            Some(s) => { out = s; good = true; }
+            None => { out = "ed25519: klucz tajny musi miec 32 bajty (64 znaki hex)".to_string(); }
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err(out)
+]
+
+fun ed25519_verify_hex(public_hex: Str, message: Str, signature_hex: Str) -> Bool [
+    let valid = false
+    native {Rust} [
+        valid = hks_ed_verify(&public_hex, message.as_bytes(), &signature_hex);
+    ]
+    end valid
+]
+
+fun ecdsa_p256_keypair_hex() -> Result<List<Str>, Str> [
+    let a = ""
+    let b = ""
+    native {Rust} [
+        let kp = hks_p256_keypair();
+        a = kp.0;
+        b = kp.1;
+    ]
+    end ok([a, b])
+]
+
+fun ecdsa_p256_sign_hex(secret_hex: Str, message: Str) -> Result<Str, Str> [
+    let good = false
+    let out = ""
+    native {Rust} [
+        match hks_p256_sign(&secret_hex, message.as_bytes()) {
+            Some(s) => { out = s; good = true; }
+            None => { out = "ecdsa-p256: niepoprawny klucz tajny (32 bajty hex)".to_string(); }
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err(out)
+]
+
+fun ecdsa_p256_verify_hex(public_hex: Str, message: Str, signature_hex: Str) -> Bool [
+    let valid = false
+    native {Rust} [
+        valid = hks_p256_verify(&public_hex, message.as_bytes(), &signature_hex);
+    ]
+    end valid
+]
+
+fun x25519_keypair_hex() -> Result<List<Str>, Str> [
+    let a = ""
+    let b = ""
+    native {Rust} [
+        let kp = hks_x_keypair();
+        a = kp.0;
+        b = kp.1;
+    ]
+    end ok([a, b])
+]
+
+fun x25519_shared_hex(secret_hex: Str, peer_public_hex: Str) -> Result<Str, Str> [
+    let good = false
+    let out = ""
+    native {Rust} [
+        match hks_x_shared(&secret_hex, &peer_public_hex) {
+            Some(s) => { out = s; good = true; }
+            None => { out = "x25519: niepoprawne klucze albo punkt o malym rzedzie".to_string(); }
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err(out)
+]
