@@ -1,0 +1,161 @@
+get <crates:rand::0.8>
+get <crates:chacha20poly1305::0.10>
+get <crates:aes-gcm::0.10>
+
+native {Rust} [
+    // glob-importy crate'ow (np. argon2::*) przeslaniaja Result - przywracamy std
+    type Result<T, E> = std::result::Result<T, E>;
+
+    use rand::RngCore;
+    use aes_gcm::aead::{Aead, KeyInit, Payload};
+
+    pub fn hks_ci_hex_of(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{:02x}", x)).collect::<String>()
+    }
+
+    pub fn hks_ci_hex_to(h: &str) -> Option<Vec<u8>> {
+        let h = h.trim();
+        if h.len() % 2 != 0 || !h.is_ascii() {
+            return None;
+        }
+        let mut out = Vec::with_capacity(h.len() / 2);
+        let mut i = 0;
+        while i < h.len() {
+            out.push(u8::from_str_radix(&h[i..i + 2], 16).ok()?);
+            i += 2;
+        }
+        Some(out)
+    }
+
+    pub fn hks_ci_algo(a: &str) -> String {
+        a.chars().filter(|c| *c != '-' && *c != '_').collect::<String>().to_lowercase()
+    }
+
+    pub fn hks_ci_seal(algo: &str, key: &[u8], nonce: &[u8], msg: &[u8], aad: &[u8]) -> Result<Vec<u8>, String> {
+        if key.len() != 32 {
+            return Err("klucz musi miec 32 bajty".to_string());
+        }
+        if nonce.len() != 12 {
+            return Err("nonce musi miec 12 bajtow".to_string());
+        }
+        let p = Payload { msg, aad };
+        match hks_ci_algo(algo).as_str() {
+            "chacha20poly1305" => chacha20poly1305::ChaCha20Poly1305::new_from_slice(key)
+                .map_err(|_| "zly klucz".to_string())?
+                .encrypt(chacha20poly1305::Nonce::from_slice(nonce), p)
+                .map_err(|_| "szyfrowanie nie powiodlo sie".to_string()),
+            "aes256gcm" => aes_gcm::Aes256Gcm::new_from_slice(key)
+                .map_err(|_| "zly klucz".to_string())?
+                .encrypt(aes_gcm::Nonce::from_slice(nonce), p)
+                .map_err(|_| "szyfrowanie nie powiodlo sie".to_string()),
+            _ => Err(format!("nieznany algorytm AEAD: {}", algo)),
+        }
+    }
+
+    pub fn hks_ci_open(algo: &str, key: &[u8], nonce: &[u8], ct: &[u8], aad: &[u8]) -> Result<Vec<u8>, String> {
+        if key.len() != 32 {
+            return Err("klucz musi miec 32 bajty".to_string());
+        }
+        if nonce.len() != 12 {
+            return Err("nonce musi miec 12 bajtow".to_string());
+        }
+        let p = Payload { msg: ct, aad };
+        match hks_ci_algo(algo).as_str() {
+            "chacha20poly1305" => chacha20poly1305::ChaCha20Poly1305::new_from_slice(key)
+                .map_err(|_| "zly klucz".to_string())?
+                .decrypt(chacha20poly1305::Nonce::from_slice(nonce), p)
+                .map_err(|_| "uwierzytelnienie nie powiodlo sie (zly klucz, AAD albo zmieniony szyfrogram)".to_string()),
+            "aes256gcm" => aes_gcm::Aes256Gcm::new_from_slice(key)
+                .map_err(|_| "zly klucz".to_string())?
+                .decrypt(aes_gcm::Nonce::from_slice(nonce), p)
+                .map_err(|_| "uwierzytelnienie nie powiodlo sie (zly klucz, AAD albo zmieniony szyfrogram)".to_string()),
+            _ => Err(format!("nieznany algorytm AEAD: {}", algo)),
+        }
+    }
+]
+
+fun cipher_algorithms() -> List<Str> [
+    end ["chacha20poly1305", "aes256gcm"]
+]
+
+fun cipher_generate_key_hex() -> Result<Str, Str> [
+    let out = ""
+    native {Rust} [
+        let mut k = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut k);
+        out = hks_ci_hex_of(&k);
+    ]
+    end ok(out)
+]
+
+fun cipher_encrypt_hex(algo: Str, key_hex: Str, plaintext: Str, aad: Str) -> Result<Str, Str> [
+    let good = false
+    let out = ""
+    native {Rust} [
+        match hks_ci_hex_to(&key_hex) {
+            None => { out = "klucz musi byc poprawnym hex".to_string(); }
+            Some(key) => {
+                let mut nonce = [0u8; 12];
+                rand::rngs::OsRng.fill_bytes(&mut nonce);
+                match hks_ci_seal(&algo, &key, &nonce, plaintext.as_bytes(), aad.as_bytes()) {
+                    Ok(ct) => {
+                        let mut blob = nonce.to_vec();
+                        blob.extend_from_slice(&ct);
+                        out = hks_ci_hex_of(&blob);
+                        good = true;
+                    }
+                    Err(e) => { out = e; }
+                }
+            }
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err(out)
+]
+
+fun cipher_decrypt_hex(algo: Str, key_hex: Str, blob_hex: Str, aad: Str) -> Result<Str, Str> [
+    let good = false
+    let out = ""
+    native {Rust} [
+        match (hks_ci_hex_to(&key_hex), hks_ci_hex_to(&blob_hex)) {
+            (Some(key), Some(blob)) => {
+                if blob.len() < 12 + 16 {
+                    out = "szyfrogram jest za krotki".to_string();
+                } else {
+                    match hks_ci_open(&algo, &key, &blob[..12], &blob[12..], aad.as_bytes()) {
+                        Ok(pt) => match String::from_utf8(pt) {
+                            Ok(s) => { out = s; good = true; }
+                            Err(_) => { out = "tekst jawny nie jest poprawnym UTF-8".to_string(); }
+                        },
+                        Err(e) => { out = e; }
+                    }
+                }
+            }
+            _ => { out = "klucz i szyfrogram musza byc poprawnym hex".to_string(); }
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err(out)
+]
+
+fun cipher_encrypt_with_nonce_hex(algo: Str, key_hex: Str, nonce_hex: Str, plaintext_hex: Str, aad_hex: Str) -> Result<Str, Str> [
+    let good = false
+    let out = ""
+    native {Rust} [
+        match (hks_ci_hex_to(&key_hex), hks_ci_hex_to(&nonce_hex), hks_ci_hex_to(&plaintext_hex), hks_ci_hex_to(&aad_hex)) {
+            (Some(k), Some(n), Some(p), Some(a)) => match hks_ci_seal(&algo, &k, &n, &p, &a) {
+                Ok(ct) => { out = hks_ci_hex_of(&ct); good = true; }
+                Err(e) => { out = e; }
+            },
+            _ => { out = "argumenty musza byc poprawnym hex".to_string(); }
+        }
+    ]
+    if good [
+        end ok(out)
+    ]
+    end err(out)
+]
